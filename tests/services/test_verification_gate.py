@@ -84,17 +84,19 @@ def mock_pipeline_and_repo():
                     return ClaimEntailmentOutput(
                         is_supported=False,
                         confidence=0.1,
-                        cited_url=None,
-                        cited_excerpt=None,
-                        rationale="The claim of 10x throughput and zero disk IO is unsubstantiated by SQLite WAL documentation.",
+                        verdict=ClaimVerificationVerdict.REMOVE,
+                        cited_url="NONE",
+                        cited_excerpt="NONE",
+                        notes="The claim of 10x throughput and zero disk IO is unsubstantiated by SQLite WAL documentation.",
                     )
                 else:
                     return ClaimEntailmentOutput(
                         is_supported=True,
                         confidence=0.98,
+                        verdict=ClaimVerificationVerdict.VERIFIED,
                         cited_url="https://sqlite.org/wal.html",
                         cited_excerpt="readers do not block writers and writers do not block readers",
-                        rationale="Directly supported by SQLite documentation.",
+                        notes="Directly supported by SQLite documentation.",
                     )
             raise ValueError(f"Unhandled mock schema: {schema_cls}")
 

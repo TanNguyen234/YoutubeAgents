@@ -1,11 +1,11 @@
 """SQLite schema definition, DDL statements, migrations, and initialization."""
 
-import sqlite3
 from pathlib import Path
+import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
-SCHEMA_V2_SQL = """
+SCHEMA_V3_SQL = """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS channels (
@@ -192,11 +192,17 @@ CREATE TABLE IF NOT EXISTS state_transitions (
 );
 """
 
+# Backwards compatibility alias
+SCHEMA_V2_SQL = SCHEMA_V3_SQL
+
 
 def migrate_database(db_path: Path) -> None:
-    """Migrate SQLite database to the current schema version (v2).
+    """Migrate SQLite database to the current schema version (v3).
 
-    Distinguishes between a truly empty database (0 tables) and a legacy Phase-3 database (user_version == 0 with tables).
+    Handles:
+    - Truly empty database -> direct v3 initialization.
+    - Legacy Phase-3 database (user_version == 0 with tables or user_version == 1) -> migrate to v2 structure then v3.
+    - Pure Phase-3.7 v2 or Phase-4.1 pseudo-v2 database (user_version == 2) -> shape-aware migration to v3.
     """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -212,17 +218,17 @@ def migrate_database(db_path: Path) -> None:
         user_table_count = cursor.fetchone()[0]
 
         if current_version == 0 and user_table_count == 0:
-            # Truly empty/new database: apply full v2 schema directly
-            conn.executescript(SCHEMA_V2_SQL)
+            # Truly empty/new database: apply full v3 schema directly
+            conn.executescript(SCHEMA_V3_SQL)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()
             return
 
+        # 1. Migrate v0/v1 legacy databases to v2 structure
         if current_version < 2:
-            # Existing legacy database (either user_version == 0 with tables or user_version == 1):
             conn.execute("PRAGMA foreign_keys = OFF;")
 
-            # 1. Migrate topic_candidates: remove NOT NULL / DEFAULT 10.0 on estimated_cpm
+            # Migrate topic_candidates: remove NOT NULL / DEFAULT 10.0 on estimated_cpm
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='topic_candidates';")
             if cursor.fetchone():
                 conn.executescript(
@@ -249,7 +255,7 @@ def migrate_database(db_path: Path) -> None:
                     """
                 )
 
-            # 2. Migrate idempotency_keys: composite (scope, key) PK and expires_at column
+            # Migrate idempotency_keys: composite (scope, key) PK and expires_at column
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='idempotency_keys';")
             if cursor.fetchone():
                 conn.executescript(
@@ -274,22 +280,33 @@ def migrate_database(db_path: Path) -> None:
                     """
                 )
 
-            # 3. Ensure all other v2 tables exist
-            conn.executescript(SCHEMA_V2_SQL)
+            conn.execute("PRAGMA foreign_keys = ON;")
 
-            # 4. Check if scripts table is missing sections_json
+        # 2. Migrate v2 (or legacy upgraded to v2) to v3
+        if current_version < 3:
+            # Shape-aware column evolution for existing tables
+            cursor.execute("PRAGMA table_info(topic_candidates);")
+            tc_cols = {row[1] for row in cursor.fetchall()}
+            if tc_cols and "score_breakdown_json" not in tc_cols:
+                conn.execute("ALTER TABLE topic_candidates ADD COLUMN score_breakdown_json TEXT;")
+
             cursor.execute("PRAGMA table_info(scripts);")
             script_cols = {row[1] for row in cursor.fetchall()}
             if script_cols and "sections_json" not in script_cols:
                 conn.execute("ALTER TABLE scripts ADD COLUMN sections_json TEXT;")
 
-            # Re-enable foreign keys and set version
-            conn.execute("PRAGMA foreign_keys = ON;")
+            # Ensure all v3 intelligence tables exist
+            conn.executescript(SCHEMA_V3_SQL)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()
         else:
-            # Ensure any new tables from v2 additions exist
-            conn.executescript(SCHEMA_V2_SQL)
+            # Current v3 idempotent check
+            conn.executescript(SCHEMA_V3_SQL)
+            cursor.execute("PRAGMA table_info(topic_candidates);")
+            tc_cols = {row[1] for row in cursor.fetchall()}
+            if tc_cols and "score_breakdown_json" not in tc_cols:
+                conn.execute("ALTER TABLE topic_candidates ADD COLUMN score_breakdown_json TEXT;")
+
             cursor.execute("PRAGMA table_info(scripts);")
             script_cols = {row[1] for row in cursor.fetchall()}
             if script_cols and "sections_json" not in script_cols:

@@ -462,6 +462,66 @@ class SQLiteRepository:
                     ),
                 )
 
+    def get_research_dossier(self, project_id: str) -> Optional[ResearchDossier]:
+        with self._get_connection() as conn:
+            d_row = conn.execute("SELECT * FROM research_dossiers WHERE project_id = ?", (project_id,)).fetchone()
+            if not d_row:
+                return None
+            s_rows = conn.execute("SELECT * FROM research_sources WHERE dossier_id = ?", (d_row["id"],)).fetchall()
+            sources = [
+                ResearchSource(
+                    id=s["id"],
+                    url=s["url"],
+                    final_url=s["final_url"],
+                    http_status=s["http_status"],
+                    title=s["title"],
+                    content_sha256=s["content_sha256"],
+                    content_snapshot=s["content_snapshot"],
+                    content_snapshot_path=s["content_snapshot_path"],
+                    license_type=s["license_type"],
+                    fetched_at=datetime.fromisoformat(s["fetched_at"]),
+                )
+                for s in s_rows
+            ]
+            return ResearchDossier(
+                id=d_row["id"],
+                topic_id=d_row["topic_id"],
+                sources=sources,
+                summary=d_row["summary"],
+                created_at=datetime.fromisoformat(d_row["created_at"]),
+            )
+
+    def get_fact_check_report(self, project_id: str) -> Optional[FactCheckReport]:
+        with self._get_connection() as conn:
+            r_row = conn.execute("SELECT * FROM fact_check_reports WHERE project_id = ?", (project_id,)).fetchone()
+            if not r_row:
+                return None
+            c_rows = conn.execute("SELECT * FROM claims WHERE project_id = ?", (project_id,)).fetchall()
+            claims = [
+                Claim(
+                    id=c["id"],
+                    source_id=c["source_id"],
+                    statement=c["statement"],
+                    verified=bool(c["verified"]),
+                    verdict=ClaimVerificationVerdict(c["verdict"]),
+                    confidence_score=c["confidence_score"],
+                    cited_url=c["cited_url"],
+                    cited_excerpt=c["cited_excerpt"],
+                    notes=c["notes"],
+                )
+                for c in c_rows
+            ]
+            return FactCheckReport(
+                id=r_row["id"],
+                project_id=r_row["project_id"],
+                claims=claims,
+                verified_count=r_row["verified_count"],
+                failed_count=r_row["failed_count"],
+                overall_verdict=QualityStatus(r_row["overall_verdict"]),
+                audit_summary=r_row["audit_summary"],
+                created_at=datetime.fromisoformat(r_row["created_at"]),
+            )
+
     # --- Publication & Queue Operations ---
     def save_publication_job(self, job: PublicationJob) -> None:
         with self._get_connection() as conn:

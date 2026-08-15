@@ -1,8 +1,10 @@
 """Research agent gathering real web evidence, computing SHA-256 provenance hashes, and persisting evidence snapshots."""
 
 import hashlib
+import html
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import List, Optional
 from uuid import uuid4
 import httpx
@@ -36,8 +38,20 @@ class ResearchAgent:
         )
 
     @staticmethod
+    def extract_clean_text(raw_html_or_text: str) -> str:
+        """Extract clean decoded normalized text from HTML or Markdown/plain text."""
+        import html
+        clean = re.sub(r"<(script|style|svg|noscript)[^>]*>.*?</\1>", " ", raw_html_or_text, flags=re.DOTALL | re.IGNORECASE)
+        clean = re.sub(r"<!--.*?-->", " ", clean, flags=re.DOTALL)
+        clean = re.sub(r"<[^>]+>", " ", clean)
+        clean = html.unescape(clean)
+        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in clean.splitlines()]
+        clean_text = "\n".join(line for line in lines if line)
+        return clean_text.strip() if clean_text.strip() else raw_html_or_text.strip()
+
+    @staticmethod
     def compute_sha256(content: str) -> str:
-        """Compute SHA-256 hash of UTF-8 content string."""
+        """Compute SHA-256 hash of decoded normalized UTF-8 content string."""
         return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     def fetch_source_from_url(
@@ -48,7 +62,7 @@ class ResearchAgent:
         authors: Optional[List[str]] = None,
         license_type: str = "UNKNOWN",
     ) -> ResearchSource:
-        """Fetch live web content from URL, compute SHA-256 provenance, and persist raw snapshot.
+        """Fetch live web content from URL, compute SHA-256 provenance on normalized text, and persist snapshot.
 
         Raises:
             ResearchFetchError: If the URL cannot be fetched or returns a non-200 status.
@@ -72,13 +86,14 @@ class ResearchAgent:
                 status_code=None,
             ) from e
 
-        content_hash = self.compute_sha256(raw_text)
+        clean_text = self.extract_clean_text(raw_text)
+        content_hash = self.compute_sha256(clean_text)
 
         # Persist raw evidence snapshot
         snapshot_filename = f"{content_hash}.txt"
         snapshot_path = self.evidence_dir / snapshot_filename
         try:
-            snapshot_path.write_text(raw_text, encoding="utf-8")
+            snapshot_path.write_text(clean_text, encoding="utf-8")
             saved_path_str = str(snapshot_path)
         except Exception:
             saved_path_str = None
@@ -93,7 +108,7 @@ class ResearchAgent:
             title=doc_title,
             authors=authors or [],
             content_sha256=content_hash,
-            content_snapshot=raw_text[:10000],  # Keep up to 10k chars in memory for fact checking
+            content_snapshot=clean_text[:10000],  # Keep up to 10k chars in memory for fact checking
             content_snapshot_path=saved_path_str,
             license_type=license_type,
             fetched_at=datetime.now(timezone.utc),
@@ -101,12 +116,22 @@ class ResearchAgent:
 
     def build_dossier_from_urls(
         self,
-        topic_id: str,
-        urls: List[str],
+        topic_id: Optional[str] = None,
+        urls: Optional[List[str]] = None,
         summary: str = "",
         dossier_id: Optional[str] = None,
+        summary_prompt: Optional[str] = None,
+        **kwargs,
     ) -> ResearchDossier:
         """Fetch all URLs in the plan and compile a verified ResearchDossier."""
+        if urls is None and "urls" in kwargs:
+            urls = kwargs["urls"]
+        if topic_id is None and "topic_id" in kwargs:
+            topic_id = kwargs["topic_id"]
+        urls = urls or []
+        topic_id = topic_id or f"topic-{uuid4().hex[:8]}"
+        summary_text = summary or summary_prompt or f"Compiled research dossier with {len(urls)} verified source(s)."
+
         sources: List[ResearchSource] = []
         for idx, url in enumerate(urls):
             src_id = f"src-{topic_id}-{idx+1}"
@@ -118,6 +143,6 @@ class ResearchAgent:
             topic_id=topic_id,
             sources=sources,
             claims=[],
-            summary=summary or f"Compiled research dossier with {len(sources)} verified source(s).",
+            summary=summary_text,
             created_at=datetime.now(timezone.utc),
         )

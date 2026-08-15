@@ -193,14 +193,31 @@ class AntigravityCLIBackend:
 class MockReasoningBackend:
     """Deterministic test double for unit testing without invoking the real CLI (TEST contract)."""
 
-    def __init__(self, handler: Optional[Callable[[str, Type[BaseModel]], BaseModel]] = None):
+    def __init__(
+        self,
+        handler: Optional[Callable[[str, Type[BaseModel]], BaseModel]] = None,
+        structured_responses: Optional[list] = None,
+    ):
         self.handler = handler
+        self.structured_responses = list(structured_responses) if structured_responses is not None else None
 
     def generate_structured(self, prompt: str, schema_cls: Type[T]) -> T:
+        if self.structured_responses is not None:
+            if self.structured_responses:
+                resp = self.structured_responses.pop(0)
+                if isinstance(resp, schema_cls):
+                    return resp
+                if isinstance(resp, dict):
+                    return schema_cls.model_validate(resp)
+            raise AntigravityBackendError("Mock reasoning backend ran out of structured responses", error_type="TEST_ERROR")
+
         if self.handler:
             result = self.handler(prompt, schema_cls)
             if isinstance(result, schema_cls):
                 return result
+            if isinstance(result, dict):
+                return schema_cls.model_validate(result)
+
         try:
             return schema_cls.model_construct()
         except Exception:

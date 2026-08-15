@@ -1,6 +1,7 @@
-"""Integrated pipeline orchestrator executing Stages 1-5 (Research to Verified Script)."""
+"""BrainPipeline orchestrating Stages 1-5 from Topic Selection through Fact-Checking and Verification Gate."""
 
 from typing import List, Optional, Tuple
+
 from app.core.backend import AntigravityCLIBackend, ReasoningBackend
 from app.db.repository import SQLiteRepository
 from app.domain.enums import QualityStatus, VideoLifecycleState
@@ -8,13 +9,10 @@ from app.domain.models import (
     Channel,
     FactCheckReport,
     ResearchDossier,
-    Script,
-    ScriptSections,
     TopicCandidate,
     VideoProject,
 )
 from app.services.claim_extractor import ClaimExtractor
-from app.services.duplicate_detector import DuplicateDetector
 from app.services.fact_checker import FactChecker
 from app.services.research_agent import ResearchAgent, ResearchFetchError
 from app.services.script_generator import ScriptGenerator
@@ -24,29 +22,32 @@ from app.services.topic_strategist import TopicStrategist
 
 
 class BrainPipeline:
-    """Orchestrates Stages 1-5 of the YouTube Autopilot pipeline."""
+    """End-to-end intelligence pipeline executing Stages 1-5 with strict grounding and checkpoint persistence."""
 
     def __init__(
         self,
-        repository: SQLiteRepository,
+        repo: Optional[SQLiteRepository] = None,
+        repository: Optional[SQLiteRepository] = None,
         backend: Optional[ReasoningBackend] = None,
-        topic_strategist: Optional[TopicStrategist] = None,
-        topic_evaluator: Optional[TopicEvaluator] = None,
         research_agent: Optional[ResearchAgent] = None,
-        script_generator: Optional[ScriptGenerator] = None,
-        script_writer: Optional[ScriptWriter] = None,
-        claim_extractor: Optional[ClaimExtractor] = None,
-        fact_checker: Optional[FactChecker] = None,
+        strategist: Optional[TopicStrategist] = None,
+        evaluator: Optional[TopicEvaluator] = None,
+        generator: Optional[ScriptGenerator] = None,
+        writer: Optional[ScriptWriter] = None,
+        extractor: Optional[ClaimExtractor] = None,
+        checker: Optional[FactChecker] = None,
     ):
-        self.repo = repository
+        self.repo = repo or repository
+        if not self.repo:
+            raise ValueError("SQLiteRepository instance is required for BrainPipeline.")
         self.backend = backend or AntigravityCLIBackend()
-        self.strategist = topic_strategist or TopicStrategist()
-        self.evaluator = topic_evaluator or TopicEvaluator(backend=self.backend)
-        self.researcher = research_agent or ResearchAgent()
-        self.generator = script_generator or ScriptGenerator(backend=self.backend)
-        self.writer = script_writer or ScriptWriter()
-        self.extractor = claim_extractor or ClaimExtractor(backend=self.backend)
-        self.checker = fact_checker or FactChecker(backend=self.backend)
+        self.research_agent = research_agent or ResearchAgent()
+        self.strategist = strategist or TopicStrategist()
+        self.evaluator = evaluator or TopicEvaluator(backend=self.backend)
+        self.generator = generator or ScriptGenerator(backend=self.backend)
+        self.writer = writer or ScriptWriter()
+        self.extractor = extractor or ClaimExtractor(backend=self.backend)
+        self.checker = checker or FactChecker(backend=self.backend)
 
     def run_stage_1_to_5(
         self,
@@ -57,8 +58,10 @@ class BrainPipeline:
         recent_topics: Optional[List[str]] = None,
         max_rewrite_attempts: int = 2,
     ) -> Tuple[VideoProject, FactCheckReport]:
-        """Execute Stage 1 (Select Topic) -> Stage 2 (Evidence) -> Stage 3 (Script) -> Stage 4 (Fact Check) -> Stage 5 (Verification Gate)."""
-        # Ensure project exists in CREATED state
+        """Execute Stage 1 (Topic Selection) -> Stage 2 (Research) -> Stage 3 (Script) -> Stage 4 (Fact Check) -> Stage 5 (Verification Gate)."""
+        recent = recent_topics or []
+
+        # 1. Initialize or load project (must start in CREATED)
         project = self.repo.get_video_project(project_id)
         if not project:
             project = VideoProject(
@@ -69,68 +72,87 @@ class BrainPipeline:
             )
             self.repo.save_video_project(project)
 
-        # 1. Duplicate check before advancing
-        is_dup, dup_score, matched = self.strategist.duplicate_detector.check_duplicate(keyword, recent_topics or [])
+        # 2. Stage 1: Deterministic Duplicate Check BEFORE network research
+        is_dup, dup_score, matched = self.strategist.duplicate_detector.check_duplicate(keyword, recent)
         if is_dup:
             self.repo.update_project_state(
                 project_id=project_id,
                 to_state=VideoLifecycleState.FAILED,
-                reason=f"Duplicate topic rejected: conflicts with '{matched}' (similarity: {dup_score:.2f})",
+                reason=f"Duplicate topic detected: matches '{matched}' with similarity {dup_score:.2f}",
             )
-            raise ValueError(f"Duplicate topic detected: '{keyword}' conflicts with '{matched}'")
+            raise ValueError(f"Duplicate topic detected: candidate '{keyword}' conflicts with '{matched}'")
 
-        # Stage 1: Topic Selection -> transition to RESEARCHING
+        # 3. Transition: CREATED -> RESEARCHING
         self.repo.update_project_state(
             project_id=project_id,
             to_state=VideoLifecycleState.RESEARCHING,
-            reason="Starting topic evaluation and evidence collection",
+            reason="Starting live evidence collection from seed sources",
         )
 
-        # 2. Topic Evaluation via Antigravity reasoning
+        # 4. Stage 2: Live Network Research & Dossier Compilation
         try:
-            scores_breakdown, rationale = self.evaluator.evaluate_topic_with_reasoning(
+            dossier = self.research_agent.build_dossier_from_urls(
+                urls=seed_urls,
+                topic_id=f"top-{project_id}",
+                summary_prompt=f"Comprehensive research summary on '{keyword}' for channel {channel.title}",
+            )
+            # Durable Checkpoint: Save research dossier
+            self.repo.save_research_dossier(project_id, dossier)
+        except ResearchFetchError as e:
+            self.repo.update_project_state(
+                project_id=project_id,
+                to_state=VideoLifecycleState.BLOCKED,
+                reason=f"Live research fetch failed: {str(e)}",
+            )
+            raise
+        except Exception as e:
+            self.repo.update_project_state(
+                project_id=project_id,
+                to_state=VideoLifecycleState.FAILED,
+                reason=f"Research dossier creation failed: {str(e)}",
+            )
+            raise
+
+        # 5. Stage 3: Evidence-Aware Topic Evaluation & Strategy Scoring
+        try:
+            # Build compact real evidence context from downloaded sources
+            evidence_context = "\n\n".join(
+                f"[{s.title}] {s.final_url or s.url}\n{(s.content_snapshot or '')[:2000]}"
+                for s in dossier.sources
+            )
+
+            scores_dict, rationale, score_reasons = self.evaluator.evaluate_topic_with_reasoning(
                 channel=channel,
                 keyword=keyword,
-                evidence_summary=f"Target sources: {', '.join(seed_urls)}",
+                evidence_summary=evidence_context,
             )
+
             candidate = self.strategist.evaluate_candidate(
                 topic_id=f"top-{project_id}",
                 channel=channel,
                 keyword=keyword,
-                raw_scores=scores_breakdown,
+                raw_scores=scores_dict,
                 rationale=rationale,
-                recent_channel_topics=recent_topics or [],
+                score_reasons=score_reasons,
+                recent_channel_topics=recent,
+            )
+            # Durable Checkpoint: Save topic candidate
+            self.repo.save_topic_candidate(candidate)
+
+            self.repo.update_project_state(
+                project_id=project_id,
+                to_state=VideoLifecycleState.PLANNED,
+                reason=f"Evidence-aware topic evaluation completed with composite score {candidate.opportunity_score:.2f}",
             )
         except Exception as e:
             self.repo.update_project_state(
                 project_id=project_id,
                 to_state=VideoLifecycleState.FAILED,
-                reason=f"Topic evaluation reasoning failed: {str(e)}",
+                reason=f"Topic evaluation failed: {str(e)}",
             )
             raise
 
-        # Stage 2: Evidence Collection -> transition to PLANNED
-        try:
-            dossier = self.researcher.build_dossier_from_urls(
-                topic_id=candidate.id,
-                urls=seed_urls,
-                summary=f"Evidence for '{keyword}' compiled from {len(seed_urls)} source(s)",
-            )
-        except ResearchFetchError as e:
-            self.repo.update_project_state(
-                project_id=project_id,
-                to_state=VideoLifecycleState.BLOCKED,
-                reason=f"Research evidence collection BLOCKED: {str(e)}",
-            )
-            raise
-
-        self.repo.update_project_state(
-            project_id=project_id,
-            to_state=VideoLifecycleState.PLANNED,
-            reason=f"Evidence dossier compiled with {len(dossier.sources)} verified source(s)",
-        )
-
-        # Stage 3: Script Generation -> transition to SCRIPTED
+        # 6. Stage 4: Script Generation -> transition to SCRIPTED
         try:
             sections = self.generator.generate_script_sections(
                 channel=channel,
@@ -143,7 +165,9 @@ class BrainPipeline:
                 sections=sections,
             )
             project.script = script
+            # Durable Checkpoint: Save script & video project
             self.repo.save_video_project(project)
+
             self.repo.update_project_state(
                 project_id=project_id,
                 to_state=VideoLifecycleState.SCRIPTED,
@@ -157,24 +181,23 @@ class BrainPipeline:
             )
             raise
 
-        # Stage 4: Claim Extraction & Fact Checking
+        # 7. Stage 5: Claim Extraction & Fact Checking Rewrite Loop
         for attempt in range(max_rewrite_attempts + 1):
-            # Extract claims from current script voiceover
             extracted_claims = self.extractor.extract_from_script(project.script)
             dossier.claims = extracted_claims
 
-            # Verify claims against dossier source text
             report = self.checker.verify_all_claims(
                 claims=extracted_claims,
                 dossier=dossier,
                 project_id=project_id,
             )
 
-            # If passed, break out
+            # Durable Checkpoint: Save fact check report after each audit pass
+            self.repo.save_fact_check_report(report)
+
             if report.overall_verdict == QualityStatus.PASSED:
                 break
 
-            # If rewrite required and attempts remain, rewrite script
             rewrite_needed = any(c.verdict.value in ["REWRITE_REQUIRED", "REMOVE", "UNVERIFIABLE"] for c in report.claims)
             if rewrite_needed and attempt < max_rewrite_attempts:
                 flagged = [c for c in report.claims if c.verdict.value != "VERIFIED"]
@@ -194,19 +217,19 @@ class BrainPipeline:
             else:
                 break
 
-        # Stage 5: Verification Gate Decision
-        if report.overall_verdict == QualityStatus.PASSED:
+        # 8. Stage 6: Authoritative Verification Gate
+        if report.overall_verdict == QualityStatus.PASSED and report.failed_count == 0:
             self.repo.update_project_state(
                 project_id=project_id,
                 to_state=VideoLifecycleState.VERIFIED,
-                reason=f"Fact-checking passed: {report.verified_count} claim(s) verified with source URL citations",
+                reason=f"All {report.verified_count} factual claims verified against source evidence",
             )
         else:
             self.repo.update_project_state(
                 project_id=project_id,
                 to_state=VideoLifecycleState.FAILED,
-                reason=f"Fact-checking failed: {report.audit_summary}",
+                reason=f"Fact check verification failed with {report.failed_count} unverified claim(s)",
             )
 
-        updated_project = self.repo.get_video_project(project_id)
+        updated_project = self.repo.get_video_project(project_id) or project
         return updated_project, report

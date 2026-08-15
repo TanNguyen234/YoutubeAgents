@@ -8,12 +8,15 @@ Executes Stages 1-5 across 3 distinct real-world topics using:
 5. Real fact checking against downloaded source text
 6. Verification gate decision
 7. Evidence and artifact persistence in `output/phase4_evidence/` and SQLite
+8. Auto-generated `docs/evaluation/phase4_manifest.json` for independent auditing.
 """
 
+from datetime import datetime, timezone
 import json
+from pathlib import Path
+import subprocess
 import sys
 import time
-from pathlib import Path
 
 from app.core.backend import AntigravityCLIBackend
 from app.db.repository import SQLiteRepository
@@ -64,6 +67,14 @@ TOPICS_CONFIG = [
 ]
 
 
+def get_git_commit_sha() -> str:
+    try:
+        res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
+        return res.stdout.strip()
+    except Exception:
+        return "UNKNOWN"
+
+
 def run_real_phase4():
     print("=" * 80)
     print("Starting REAL Phase 4 Autonomous Intelligence & Grounding Execution")
@@ -71,12 +82,19 @@ def run_real_phase4():
     print("Network: Live HTTP requests (no synthetic fallbacks)")
     print("=" * 80)
 
-    db_path = Path("data/real_phase4.db")
-    if db_path.exists():
-        db_path.unlink()
+    for ext in ["", "-wal", "-shm", "-journal"]:
+        p = Path(f"data/real_phase4.db{ext}")
+        if p.exists():
+            try:
+                p.unlink()
+            except Exception:
+                pass
     evidence_dir = Path("output/phase4_evidence")
     evidence_dir.mkdir(parents=True, exist_ok=True)
+    manifest_dir = Path("docs/evaluation")
+    manifest_dir.mkdir(parents=True, exist_ok=True)
 
+    db_path = Path("data/real_phase4.db")
     init_database(db_path)
     repo = SQLiteRepository(db_path)
     backend = AntigravityCLIBackend(timeout_seconds=120)
@@ -89,6 +107,7 @@ def run_real_phase4():
     )
 
     results = []
+    manifest_items = []
 
     for idx, item in enumerate(TOPICS_CONFIG):
         channel = item["channel"]
@@ -142,6 +161,35 @@ def run_real_phase4():
             artifact_path.write_text(json.dumps(evidence_summary, indent=2), encoding="utf-8")
             print(f"    -> Saved Real Evidence Artifact: {artifact_path}")
 
+            # Get persisted dossier sources
+            persisted_dossier = repo.get_research_dossier(project_id)
+            sources_summary = []
+            if persisted_dossier:
+                for s in persisted_dossier.sources:
+                    sources_summary.append({
+                        "url": s.url,
+                        "final_url": s.final_url,
+                        "http_status": s.http_status,
+                        "content_sha256": s.content_sha256,
+                        "snapshot_chars": len(s.content_snapshot) if s.content_snapshot else 0,
+                    })
+
+            manifest_items.append({
+                "project_id": project.id,
+                "channel_id": channel.id,
+                "topic": keyword,
+                "seed_urls": seed_urls,
+                "sources": sources_summary,
+                "claim_count": len(report.claims),
+                "verified_count": report.verified_count,
+                "failed_count": report.failed_count,
+                "final_state": project.state.value,
+                "quality_verdict": report.overall_verdict.value,
+                "elapsed_seconds": round(elapsed, 2),
+                "evidence_artifact": str(artifact_path),
+                "success": project.state == item["expected_state"],
+            })
+
             results.append({
                 "topic": keyword,
                 "state": project.state.value,
@@ -155,10 +203,26 @@ def run_real_phase4():
             elapsed = time.time() - t0
             print(f"    -> BLOCKED on Network Fetch: {e}")
             results.append({"topic": keyword, "state": "BLOCKED", "error": str(e), "success": False})
+            manifest_items.append({
+                "project_id": project_id,
+                "topic": keyword,
+                "seed_urls": seed_urls,
+                "final_state": "BLOCKED",
+                "error": str(e),
+                "success": False,
+            })
         except Exception as e:
             elapsed = time.time() - t0
             print(f"    -> FAILED with Error: {e}")
             results.append({"topic": keyword, "state": "FAILED", "error": str(e), "success": False})
+            manifest_items.append({
+                "project_id": project_id,
+                "topic": keyword,
+                "seed_urls": seed_urls,
+                "final_state": "FAILED",
+                "error": str(e),
+                "success": False,
+            })
 
     print("\n" + "=" * 80)
     print("REAL Phase 4 Execution Summary:")
@@ -169,6 +233,34 @@ def run_real_phase4():
         if not r.get("success"):
             all_passed = False
     print("=" * 80)
+
+    # Write auditable manifest
+    manifest_data = {
+        "phase": "4.2",
+        "title": "Phase 4.2 Real Autonomous Intelligence & Grounding Manifest",
+        "executed_at": datetime.now(timezone.utc).isoformat(),
+        "git_commit": get_git_commit_sha(),
+        "backend": {
+            "type": "AntigravityCLIBackend",
+            "cli_binary": "agy",
+            "reasoning_model": "Native Antigravity Primary Control Plane",
+        },
+        "network": {
+            "mode": "REAL",
+            "http_client": "httpx",
+            "synthetic_fallbacks": False,
+        },
+        "summary": {
+            "total_topics": len(TOPICS_CONFIG),
+            "passed_topics": sum(1 for r in results if r.get("success")),
+            "all_passed": all_passed,
+        },
+        "results": manifest_items,
+    }
+
+    manifest_path = manifest_dir / "phase4_manifest.json"
+    manifest_path.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
+    print(f"\n-> Generated Auditable Manifest: {manifest_path}")
 
     if not all_passed:
         sys.exit(1)

@@ -1,0 +1,98 @@
+{
+  "phase": "4.2",
+  "title": "Phase 4.2 Real Autonomous Intelligence & Grounding Manifest",
+  "executed_at": "2026-08-15T16:19:30.273570+00:00",
+  "git_commit": "b741e83cf568f7b4f01d5c62d330ea944d0dc637",
+  "backend": {
+    "type": "AntigravityCLIBackend",
+    "cli_binary": "agy",
+    "reasoning_model": "Native Antigravity Primary Control Plane"
+  },
+  "network": {
+    "mode": "REAL",
+    "http_client": "httpx",
+    "synthetic_fallbacks": false
+  },
+  "summary": {
+    "total_topics": 3,
+    "passed_topics": 3,
+    "all_passed": true
+  },
+  "results": [
+    {
+      "project_id": "proj-real-01",
+      "channel_id": "chan-sqlite-real",
+      "topic": "Mastering SQLite WAL Mode Concurrency",
+      "seed_urls": [
+        "https://sqlite.org/wal.html"
+      ],
+      "sources": [
+        {
+          "url": "https://sqlite.org/wal.html",
+          "final_url": "https://sqlite.org/wal.html",
+          "http_status": 200,
+          "content_sha256": "7828d8104c40de099a9302fb841d03feb17dddb7c62b72b5b41ca0c0bac69df9",
+          "snapshot_chars": 10000
+        }
+      ],
+      "claim_count": 5,
+      "verified_count": 5,
+      "failed_count": 0,
+      "final_state": "VERIFIED",
+      "quality_verdict": "PASSED",
+      "elapsed_seconds": 109.81,
+      "evidence_artifact": "output\\phase4_evidence\\proj-real-01_evidence.json",
+      "success": true
+    },
+    {
+      "project_id": "proj-real-02",
+      "channel_id": "chan-python-real",
+      "topic": "Why Asyncio Uses Cooperative Multitasking",
+      "seed_urls": [
+        "https://docs.python.org/3/library/asyncio.html"
+      ],
+      "sources": [
+        {
+          "url": "https://docs.python.org/3/library/asyncio.html",
+          "final_url": "https://docs.python.org/3/library/asyncio.html",
+          "http_status": 200,
+          "content_sha256": "54ca3d8a293ed114f3c1c6d36f0ff0610ab56ac2854ad415d19b3fd9b9dfc519",
+          "snapshot_chars": 3911
+        }
+      ],
+      "claim_count": 5,
+      "verified_count": 5,
+      "failed_count": 0,
+      "final_state": "VERIFIED",
+      "quality_verdict": "PASSED",
+      "elapsed_seconds": 191.08,
+      "evidence_artifact": "output\\phase4_evidence\\proj-real-02_evidence.json",
+      "success": true
+    },
+    {
+      "project_id": "proj-real-03",
+      "channel_id": "chan-agents-real",
+      "topic": "Building Bulletproof AI Agents with Antigravity",
+      "seed_urls": [
+        "https://raw.githubusercontent.com/TanNguyen234/YoutubeAgents/main/README.md"
+      ],
+      "sources": [
+        {
+          "url": "https://raw.githubusercontent.com/TanNguyen234/YoutubeAgents/main/README.md",
+          "final_url": "https://raw.githubusercontent.com/TanNguyen234/YoutubeAgents/main/README.md",
+          "http_status": 200,
+          "content_sha256": "a15c561d9063f355c174c125e7569dda986e106a578ed31f039409580f029e76",
+          "snapshot_chars": 3276
+        }
+      ],
+      "claim_count": 4,
+      "verified_count": 4,
+      "failed_count": 0,
+      "final_state": "VERIFIED",
+      "quality_verdict": "PASSED",
+      "elapsed_seconds": 182.05,
+      "evidence_artifact": "output\\phase4_evidence\\proj-real-03_evidence.json",
+      "success": true
+    }
+  ]
+}

@@ -1,23 +1,24 @@
-# Phase 4.1 — Real Intelligence & Grounding Verification Report
+# Phase 4.2 — Grounding Hardening & Real Verification Run Report
 
 **Phase Status**: `VERIFIED`  
 **Execution Environment**: Antigravity Runtime + SDK CLI (`agy`)  
 **Network Mode**: Real HTTP live network requests via `httpx` (no synthetic fallback data)  
-**Database**: SQLite (`sqlite3`) with `PRAGMA foreign_keys = ON`, `PRAGMA user_version = 2`  
+**Database**: SQLite (`sqlite3`) with `PRAGMA foreign_keys = ON`, `PRAGMA user_version = 3` (Shape-Aware Migration)  
+**Auditable Manifest**: [`docs/evaluation/phase4_manifest.json`](file:///d:/Download/YoutubeAgents/docs/evaluation/phase4_manifest.json)  
 **Date**: 2026-08-15  
 
 ---
 
 ## 1. Executive Summary & Verification Matrix
 
-In Phase 4.1, the YouTube Autopilot pipeline brain was fully integrated with:
-1. **Real HTTP Research & Content Grounding**: Fetches live web pages, calculates SHA-256 hashes from actual fetched bytes, and persists raw snapshots to `data/evidence/<sha256>.txt`.
-2. **Antigravity CLI Subprocess Backend**: Direct programmatic execution of `agy --print <prompt> --output-format json --json-schema <schema>` for topic scoring, script generation, and claim entailment checking. **Zero Gemini Developer API fallback**.
-3. **8-Dimension Topic Evaluation**: Produces typed scores (`demand`, `freshness`, `competition`, `channel_fit`, `originality`, `evidence_quality`, `production_feasibility`, `historical_fit`) and rationales based on channel profile and evidence.
-4. **Script Generation & Scene Breakdown**: Generates typed `ScriptSections` (`hook`, `intro`, `segments`, `cta`, `voiceover_text`, `estimated_duration`) grounded strictly in the research dossier.
-5. **Atomic Claim Extraction**: Extracts factual claims from the final voiceover text.
-6. **Entailment Fact Checking & Automated Rewrite Loop**: Validates claims against source evidence text. Re-prompts script rewrites if ungrounded claims are detected.
-7. **Verification Gate**: Enforces that a video project may only transition `SCRIPTED -> VERIFIED` if **every** factual claim is verified (`VERIFIED`, confidence >= 0.70, citation URL present). Projects with unresolved claims transition to `FAILED`. Network fetch errors transition to `BLOCKED`.
+In Phase 4.2, the YouTube Autopilot pipeline brain underwent rigorous grounding hardening and invariant verification:
+1. **HTML Clean Text Extraction & Cryptographic Provenance**: Strips scripts, styles, SVGs, and HTML tags to extract clean readable body text. Persists snapshots to `data/evidence/<sha256>.txt` and computes `content_sha256` from decoded normalized UTF-8 text.
+2. **Deterministic Duplicate Check Before Network Calls**: Evaluates duplicate topics strictly in `CREATED` state prior to making live network requests.
+3. **Dynamic Composite Topic Scoring Without Fabricated Defaults**: `TopicEvaluationOutput` has no hardcoded default scores. `TopicScoreBreakdown` treats `historical_fit` as an optional dimension and re-normalizes composite weights dynamically over non-None dimensions.
+4. **Exact Citation & Snapshot Substring Binding**: `FactChecker` mandates `cited_url` and `cited_excerpt` in `ClaimEntailmentOutput`. The model must cite an exact URL from `AVAILABLE SOURCE URLS`, and the verifier enforces that `cited_excerpt` exists as a verbatim substring within the resolved source snapshot.
+5. **Full Voiceover Claim Extraction Coverage**: `ClaimExtractor` falls back to auditing the full composite voiceover text (`hook`, `intro`, `scene narrations`, `cta`). Raises typed `ClaimExtractionError` if voiceover is empty.
+6. **Schema v3 Shape-Aware Migration**: Safely migrates legacy Phase-3.7 v2 and pseudo-v2 databases to v3 (`score_breakdown_json`, `sections_json`), asserting `PRAGMA user_version = 3`.
+7. **Auditable JSON Manifest**: Automatically records commit SHA, ISO timestamps, source URLs, content SHA-256 hashes, HTTP statuses, scene word counts, and claim verdicts to [`docs/evaluation/phase4_manifest.json`](file:///d:/Download/YoutubeAgents/docs/evaluation/phase4_manifest.json).
 
 ---
 
@@ -27,15 +28,15 @@ All 3 real topics were executed through `scripts/run_real_phase4.py` using live 
 
 | Topic / Channel | Target Seed URL | Content SHA-256 | Script Duration | Fact-Check Claims | Pipeline State | Real Evidence Artifact |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Topic 1**: Mastering SQLite WAL Mode Concurrency<br>*Channel: Database Internals Hub* | `https://sqlite.org/wal.html` | `b8e3bfdecc7f78870f7b3427432bd8e489b7afbaddf4011dda52b1d0eeda9c10` (25.9 KB) | 20.0s (60 words) | **2 / 2 Verified**<br>(0 Failed) | `VERIFIED` | [`proj-real-01_evidence.json`](file:///d:/Download/YoutubeAgents/output/phase4_evidence/proj-real-01_evidence.json) |
-| **Topic 2**: Why Asyncio Uses Cooperative Multitasking<br>*Channel: Python Architecture Weekly* | `https://docs.python.org/3/library/asyncio.html` | `29315aaa998c5e2acf29e3ac161e9e8bf786d0c82a85ac83eb4f4091234acb7b` (42.6 KB) | 22.0s (56 words) | **3 / 3 Verified**<br>(0 Failed) | `VERIFIED` | [`proj-real-02_evidence.json`](file:///d:/Download/YoutubeAgents/output/phase4_evidence/proj-real-02_evidence.json) |
-| **Topic 3**: Building Bulletproof AI Agents with Antigravity<br>*Channel: Autonomous Agents Engineering* | `https://raw.githubusercontent.com/TanNguyen234/YoutubeAgents/main/README.md` | `7e5931b97e813717a369f0879789cd5b468e0f07d332e162c56c9a2b81698cfc` (4.2 KB) | 38.0s (97 words) | **4 / 4 Verified**<br>(0 Failed) | `VERIFIED` | [`proj-real-03_evidence.json`](file:///d:/Download/YoutubeAgents/output/phase4_evidence/proj-real-03_evidence.json) |
+| **Topic 1**: Mastering SQLite WAL Mode Concurrency<br>*Channel: Database Internals Hub* | `https://sqlite.org/wal.html` | `7828d8104c40de099a9302fb841d03feb17dddb7c62b72b5b41ca0c0bac69df9` (10,000 chars) | 35.0s (88 words, 2 scenes) | **5 / 5 Verified**<br>(0 Failed) | `VERIFIED` | [`proj-real-01_evidence.json`](file:///d:/Download/YoutubeAgents/output/phase4_evidence/proj-real-01_evidence.json) |
+| **Topic 2**: Why Asyncio Uses Cooperative Multitasking<br>*Channel: Python Architecture Weekly* | `https://docs.python.org/3/library/asyncio.html` | `54ca3d8a293ed114f3c1c6d36f0ff0610ab56ac2854ad415d19b3fd9b9dfc519` (3,911 chars) | 65.0s (174 words, 2 scenes) | **5 / 5 Verified**<br>(0 Failed) | `VERIFIED` | [`proj-real-02_evidence.json`](file:///d:/Download/YoutubeAgents/output/phase4_evidence/proj-real-02_evidence.json) |
+| **Topic 3**: Building Bulletproof AI Agents with Antigravity<br>*Channel: Autonomous Agents Engineering* | `https://raw.githubusercontent.com/TanNguyen234/YoutubeAgents/main/README.md` | `a15c561d9063f355c174c125e7569dda986e106a578ed31f039409580f029e76` (3,276 chars) | 38.0s (93 words, 3 scenes) | **4 / 4 Verified**<br>(0 Failed) | `VERIFIED` | [`proj-real-03_evidence.json`](file:///d:/Download/YoutubeAgents/output/phase4_evidence/proj-real-03_evidence.json) |
 
 ---
 
-## 3. Fact-Check Entailment & Gate Verification Proofs
+## 3. Grounding Hardening Proofs
 
-### Proof 1: Grounded Technical Claims (Topic 1)
+### Proof 1: Strict Citation & Excerpt Binding (Topic 1)
 ```json
 {
   "statement": "By default, SQLite implements atomic commit and rollback using a rollback journal.",
@@ -44,22 +45,25 @@ All 3 real topics were executed through `scripts/run_real_phase4.py` using live 
   "confidence_score": 1.0,
   "cited_url": "https://sqlite.org/wal.html",
   "cited_excerpt": "The default method by which SQLite implements atomic commit and rollback is a rollback journal.",
-  "notes": "The provided source evidence explicitly states in the Overview section: 'The default method by which SQLite implements atomic commit and rollback is a rollback journal.' This directly and unambiguously supports the claim."
+  "notes": "The source explicitly states verbatim: 'The default method by which SQLite implements atomic commit and rollback is a rollback journal.'"
 }
 ```
 
-### Proof 2: Detection of Ungrounded Intro Claim & Blocking (Regression Gate)
-When a hallucinated or ungrounded claim was tested against source evidence (`tests/services/test_verification_gate.py`):
+### Proof 2: Rejection of Partial Overlap Compound Attack
+When a claim shares prefix words with evidence but adds an unsubstantiated compound assertion (`"In WAL mode, readers do not block writers and writers do not block readers, resulting in 100x throughput"`):
 ```
-Claim: "Python was created in 1991 by James Gosling in Japan"
-Audit Verdict: REMOVE (Confidence: 0.10)
-Pipeline Transition: SCRIPTED -> FAILED (State machine blocks VERIFIED transition)
+Claim: "In WAL mode, readers do not block writers and writers do not block readers, resulting in 100x throughput"
+Verdict: REMOVE / UNVERIFIABLE (Confidence: 0.10)
+Status: Rejected by FactChecker and blocked at VerificationGate.
 ```
 
-### Proof 3: Network Fetch Failure Transitions to BLOCKED
-When a network fetch is interrupted or URL is unreachable:
+### Proof 3: Rejection of Cross-Source Excerpt Mismatch
+When a model cites Source A (`docs.python.org`) but quotes text that only exists in Source B (`sqlite.org`):
 ```
-Pipeline Transition: RESEARCHING -> BLOCKED (No synthetic fallback generated)
+Claim: "WAL mode separates write transactions from readers"
+Cited URL: "https://docs.python.org/3/library/asyncio.html"
+Verdict: UNVERIFIABLE
+Notes: "Quoted excerpt does not exist in the specified cited source snapshot."
 ```
 
 ---
@@ -68,25 +72,28 @@ Pipeline Transition: RESEARCHING -> BLOCKED (No synthetic fallback generated)
 
 ```bash
 $ pytest -v -k "not test_real_live_e2e"
-====================== 57 passed, 1 deselected in 12.02s ======================
+====================== 69 passed, 1 deselected in 13.57s ======================
 ```
 
-- **Core & Idempotency Tests**: 5/5 PASSED (multi-threaded CAS, recovery, concurrency)
-- **Database & Persistence Tests**: 13/13 PASSED (foreign keys, atomic CAS transitions, v2 migrations)
-- **Domain & State Machine Tests**: 15/15 PASSED (16 lifecycle states, strict transition rules)
-- **Service & Intelligence Tests**: 20/20 PASSED (TopicStrategist, DuplicateDetector, ScriptWriter, FactChecker, ClaimExtractor, VerificationGate)
-- **Smoke Tests**: 4/4 PASSED (Python version, config, execution states)
+- **Core & Idempotency Tests**: 5/5 PASSED
+- **Database & Persistence Tests**: 13/13 PASSED
+- **Schema v3 Migrations (v0->v2, v2->v3, pseudo-v2->v3, idempotent)**: 7/7 PASSED
+- **Domain & State Machine Tests**: 15/15 PASSED
+- **Grounding Hardening Regression Suite (`test_grounding_hardening.py`)**: 8/8 PASSED
+- **Service & Intelligence Tests**: 17/17 PASSED
+- **Smoke Tests**: 4/4 PASSED
 
 ---
 
-## 5. Phase 4.1 Sign-Off
+## 5. Phase 4.2 Sign-Off
 
-- [x] All network synthetic fallbacks eliminated.
-- [x] Antigravity CLI subprocess backend functioning with structured output schema enforcement.
-- [x] Topic evaluation producing 8-dimension weighted composite scoring.
-- [x] Script generator outputting structured scenes and estimated duration.
-- [x] Claim extractor isolating atomic assertions from voiceover text.
-- [x] FactChecker performing objective entailment verification without caller-supplied truth parameters.
-- [x] Verification Gate enforcing 100% verified claims prior to `VERIFIED` state transition.
-- [x] Real artifacts saved to `output/phase4_evidence/`.
-- [x] STOP before Phase 5.
+- [x] Duplicate check executes strictly in `CREATED` before network calls.
+- [x] Clean text extracted from HTML (scripts/styles stripped) for evidence snapshots & SHA-256 calculation.
+- [x] `TopicEvaluationOutput` has no hardcoded defaults; weights dynamically renormalize over valid dimensions.
+- [x] `FactChecker` strictly resolves `cited_url` and verifies verbatim `cited_excerpt` in the source snapshot.
+- [x] Full voiceover (`hook`, `intro`, `segments`, `cta`) extracted for claims; empty voiceover raises typed error.
+- [x] Schema v3 shape-aware migration tested and verified (`PRAGMA user_version = 3`).
+- [x] Auditable manifest generated at `docs/evaluation/phase4_manifest.json`.
+- [x] All 3 real topics verified (100% verified claims, 0 failed, State: `VERIFIED`).
+- [x] All 69 deterministic tests passed (100% GREEN).
+- [x] **STOP before Phase 5.**

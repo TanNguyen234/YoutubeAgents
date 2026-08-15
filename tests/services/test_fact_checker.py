@@ -49,9 +49,9 @@ def test_verify_unsupported_claim_resolves_to_remove(sample_dossier):
             return ClaimEntailmentOutput(
                 is_supported=False,
                 confidence=0.1,
-                cited_url=None,
-                cited_excerpt=None,
-                rationale="No mention of 10 billion transactions per second in SQLite documentation.",
+                cited_url="NONE",
+                cited_excerpt="NONE",
+                notes="No mention of 10 billion transactions per second in SQLite documentation.",
             )
         raise ValueError("Unhandled schema")
 

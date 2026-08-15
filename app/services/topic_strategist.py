@@ -60,8 +60,8 @@ class TopicStrategist:
         except Exception:
             self.weights = DEFAULT_WEIGHTS.copy()
 
-    def compute_composite_score(self, breakdown: Union[TopicScoreBreakdown, Dict[str, float]]) -> float:
-        """Calculate weighted composite score from individual dimension scores (0.0 - 10.0 scale)."""
+    def compute_composite_score(self, breakdown: Union[TopicScoreBreakdown, Dict[str, Optional[float]]]) -> float:
+        """Calculate weighted composite score dynamically renormalized over available non-None dimensions (0.0 - 10.0 scale)."""
         if isinstance(breakdown, TopicScoreBreakdown):
             score_map = {
                 "demand": breakdown.demand,
@@ -80,8 +80,8 @@ class TopicStrategist:
         total_weight = 0.0
 
         for dim, weight in self.weights.items():
-            if dim in score_map:
-                weighted_sum += score_map[dim] * weight
+            if dim in score_map and score_map[dim] is not None:
+                weighted_sum += float(score_map[dim]) * weight
                 total_weight += weight
 
         if total_weight == 0:
@@ -95,8 +95,9 @@ class TopicStrategist:
         topic_id: str,
         channel: Channel,
         keyword: str,
-        raw_scores: Union[TopicScoreBreakdown, Dict[str, float]],
+        raw_scores: Union[TopicScoreBreakdown, Dict[str, Optional[float]]],
         rationale: Optional[str] = None,
+        score_reasons: Optional[Dict[str, str]] = None,
         estimated_cpm: Optional[float] = None,
         recent_channel_topics: Optional[List[str]] = None,
     ) -> TopicCandidate:
@@ -114,17 +115,18 @@ class TopicStrategist:
         composite = self.compute_composite_score(raw_scores)
         if isinstance(raw_scores, dict):
             breakdown_with_composite = TopicScoreBreakdown(
-                demand=raw_scores.get("demand", 8.0),
-                freshness=raw_scores.get("freshness", 8.0),
-                competition=raw_scores.get("competition", 6.0),
-                channel_fit=raw_scores.get("channel_fit", 8.5),
-                originality=raw_scores.get("originality", 8.0),
-                evidence_quality=raw_scores.get("evidence_quality", 8.5),
-                production_feasibility=raw_scores.get("production_feasibility", 8.0),
-                historical_fit=raw_scores.get("historical_fit", 8.0),
+                demand=float(raw_scores["demand"]),
+                freshness=float(raw_scores["freshness"]),
+                competition=float(raw_scores["competition"]),
+                channel_fit=float(raw_scores["channel_fit"]),
+                originality=float(raw_scores["originality"]),
+                evidence_quality=float(raw_scores["evidence_quality"]),
+                production_feasibility=float(raw_scores["production_feasibility"]),
+                historical_fit=raw_scores.get("historical_fit"),
                 composite_score=composite,
+                score_reasons=score_reasons or {},
             )
-            authority = raw_scores.get("channel_fit", 8.5)
+            authority = float(raw_scores["channel_fit"])
         else:
             breakdown_with_composite = TopicScoreBreakdown(
                 demand=raw_scores.demand,
@@ -136,6 +138,7 @@ class TopicStrategist:
                 production_feasibility=raw_scores.production_feasibility,
                 historical_fit=raw_scores.historical_fit,
                 composite_score=composite,
+                score_reasons=raw_scores.score_reasons or score_reasons or {},
             )
             authority = raw_scores.channel_fit
 

@@ -39,7 +39,7 @@ class TopicScoreBreakdown(BaseModel):
     originality: float = Field(ge=0.0, le=10.0, description="Unique angle / novelty (0-10)")
     evidence_quality: float = Field(ge=0.0, le=10.0, description="Availability of verifiable source citations (0-10)")
     production_feasibility: float = Field(ge=0.0, le=10.0, description="Ease of asset sourcing / rendering (0-10)")
-    historical_fit: float = Field(ge=0.0, le=10.0, description="Past topic performance correlation (0-10)")
+    historical_fit: Optional[float] = Field(default=None, ge=0.0, le=10.0, description="Past topic performance correlation (0-10)")
     composite_score: float = Field(ge=0.0, le=10.0, description="Weighted composite score (0-10)")
     score_reasons: Dict[str, str] = Field(default_factory=dict, description="Detailed rationale per dimension")
 

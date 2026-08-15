@@ -1,5 +1,6 @@
-"""Claim extractor service identifying verifiable factual statements from script voiceover text."""
+"""Claim extractor service extracting atomic factual assertions from final narration text."""
 
+import re
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -7,62 +8,72 @@ from app.core.backend import AntigravityCLIBackend, ReasoningBackend
 from app.domain.models import Claim, Script
 
 
-class ClaimExtractionOutput(BaseModel):
-    """Structured extraction of factual assertions from text."""
+class ClaimExtractionError(Exception):
+    """Raised when claim extraction fails or when script contains empty voiceover."""
+    pass
 
-    claims: List[str] = Field(
-        default_factory=list,
-        description="Discrete, atomic, verifiable factual claims extracted from the narration text",
-    )
+
+class ClaimExtractionOutput(BaseModel):
+    """Structured LLM output for extracted factual claims."""
+
+    claims: List[str] = Field(description="List of atomic, verifiable factual claims extracted from the narration")
 
 
 class ClaimExtractor:
-    """Extracts atomic factual claims from final script voiceover text using Antigravity reasoning."""
+    """Extracts atomic factual claims from final script voiceover text for fact checking."""
 
     def __init__(self, backend: Optional[ReasoningBackend] = None):
         self.backend = backend or AntigravityCLIBackend()
 
+    def get_audit_text(self, script: Script) -> str:
+        """Extract the full contiguous spoken voiceover text to be audited."""
+        if script.sections and getattr(script.sections, "voiceover_text", None) and script.sections.voiceover_text.strip():
+            return script.sections.voiceover_text.strip()
+        if getattr(script, "voiceover_text", None) and script.voiceover_text.strip():
+            return script.voiceover_text.strip()
+        if script.sections:
+            parts = [script.sections.hook, script.sections.intro]
+            parts.extend(s.narration for s in script.sections.segments)
+            parts.append(script.sections.cta)
+            return " ".join(p.strip() for p in parts if p and p.strip())
+        if script.scenes:
+            parts = [s.narration for s in script.scenes]
+            return " ".join(p.strip() for p in parts if p and p.strip())
+        return ""
+
     def extract_from_script(self, script: Script) -> List[Claim]:
-        """Extract atomic factual claims from script voiceover text."""
-        # Use voiceover text if available or concatenate scene narrations
-        if script.sections and script.sections.voiceover_text:
-            text_to_audit = script.sections.voiceover_text
-        else:
-            text_to_audit = f"{script.hook} " + " ".join(scene.narration for scene in script.scenes)
+        """Extract atomic factual claims from the final voiceover text of a Script."""
+        audit_text = self.get_audit_text(script)
+        if not audit_text:
+            raise ClaimExtractionError(f"Script '{script.id}' contains empty voiceover and narration text.")
 
-        prompt = f"""You are a precise factual analysis editor.
-Analyze the video script narration below and extract 2 to 4 core ATOMIC FACTUAL CLAIMS that require evidence verification.
+        prompt = f"""You are a Fact-Checking Auditor for short educational video content.
+Extract the key, atomic factual claims made in the following video script voiceover for verification against technical sources.
 
-SCRIPT NARRATION:
-"{text_to_audit}"
+VOICEOVER TEXT TO AUDIT:
+"{audit_text}"
 
-EXTRACTION RULES:
-1. Extract only objective factual assertions (e.g. software architecture, technical mechanisms, statistics, historical facts).
-2. DO NOT extract rhetorical questions ("Have you ever wondered?"), opinions, greetings, or call-to-actions ("Subscribe!").
-3. Keep each claim atomic, precise, and declarative.
+INSTRUCTIONS:
+1. Extract 3 to 6 complete, distinct factual statements asserting technical facts, features, or behaviors.
+2. Do not include pure greetings, rhetorical transitions, or calls to action unless they contain specific factual claims.
+3. Keep each claim as a clear, complete, verifiable statement.
 """
-
         try:
-            output = self.backend.generate_structured(prompt, ClaimExtractionOutput)
-            claims = []
-            for idx, stmt in enumerate(output.claims):
-                if stmt.strip():
-                    claims.append(
-                        Claim(
-                            id=f"clm-{script.id}-{idx+1:02d}",
-                            statement=stmt.strip(),
-                        )
-                    )
-            return claims
+            extraction_output = self.backend.generate_structured(prompt, ClaimExtractionOutput)
+            raw_claims = extraction_output.claims
+            if not raw_claims:
+                raise ValueError("Model returned 0 claims")
         except Exception:
-            # Fallback: create claim from scene narrations if reasoning fails
-            fallback_claims = []
-            for idx, scene in enumerate(script.scenes):
-                if len(scene.narration.split()) >= 5:
-                    fallback_claims.append(
-                        Claim(
-                            id=f"clm-{script.id}-{idx+1:02d}",
-                            statement=scene.narration.strip(),
-                        )
-                    )
-            return fallback_claims
+            # Deterministic fallback sentence extraction over the exact same audit text
+            raw_sentences = re.split(r'(?<=[.!?])\s+', audit_text)
+            raw_claims = [s.strip() for s in raw_sentences if len(s.strip().split()) >= 3]
+
+        if not raw_claims:
+            raise ClaimExtractionError(f"Failed to extract any claims from script '{script.id}'.")
+
+        claims = []
+        for idx, statement in enumerate(raw_claims):
+            claim_id = f"clm-{script.id}-{idx+1:02d}"
+            claims.append(Claim(id=claim_id, statement=statement.strip()))
+
+        return claims
