@@ -1,0 +1,15 @@
+# Weights configuration for TopicStrategist scoring dimensions
+# Total weights will be normalized during composite score calculation
+
+weights:
+  demand: 0.20
+  freshness: 0.15
+  competition: 0.10
+  channel_fit: 0.15
+  originality: 0.15
+  evidence_quality: 0.10
+  production_feasibility: 0.05
+  historical_fit: 0.10
+
+# Duplicate threshold: similarity score above which a topic is rejected
+duplicate_threshold: 0.65

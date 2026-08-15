@@ -78,3 +78,12 @@ class ExperimentStatus(str, Enum):
     RUNNING = "RUNNING"
     CONCLUDED = "CONCLUDED"
     ARCHIVED = "ARCHIVED"
+
+
+class ClaimVerificationVerdict(str, Enum):
+    """Fact checker resolution verdict for an individual factual claim."""
+
+    VERIFIED = "VERIFIED"
+    REWRITE_REQUIRED = "REWRITE_REQUIRED"
+    REMOVE = "REMOVE"
+    UNVERIFIABLE = "UNVERIFIABLE"
