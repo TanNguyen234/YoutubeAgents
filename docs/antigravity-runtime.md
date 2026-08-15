@@ -2,7 +2,7 @@
 
 ## 1. Executive Summary
 
-This document establishes the architecture and empirical verification of Google Antigravity as the primary control plane, reasoning engine, and orchestration environment for **YouTube Autopilot**. In accordance with core engineering rules, commercial external LLM API endpoints (such as raw Gemini Developer API wrappers) are completely eliminated from core reasoning paths in favor of the local Antigravity runtime, SDK, and specialized MCP connectors.
+This document establishes the architecture and empirical verification of Google Antigravity as the primary control plane, reasoning engine, and orchestration environment for **YouTube Autopilot**. In accordance with core engineering rules, commercial external LLM API endpoints (such as raw Gemini Developer API wrappers) are completely eliminated from core reasoning paths in favor of the local Antigravity runtime, CLI, and specialized MCP connectors.
 
 ---
 
@@ -12,11 +12,12 @@ Based on live runtime spikes executed in `experiments/antigravity_runtime/`, the
 
 | Capability | Classification | Empirical Evidence |
 |---|---|---|
-| **Programmatic Execution** | `SUPPORTED` | Python `google.antigravity` (v0.1.12) imported cleanly; `Agent`, `LocalAgentConfig`, `CapabilitiesConfig` exported. |
-| **Headless CLI Execution** | `SUPPORTED` | `agy --print "<prompt>" --output-format json` executed non-interactively with Exit Code 0 in ~11s. |
-| **Structured Output** | `SUPPORTED` | `--json-schema` enforces strict JSON schemas validated directly into Pydantic models with typed fields. |
-| **Multi-Turn Context Continuity** | `SUPPORTED` | Context retained across turns via `--conversation <conversation_id>` (retained secret code across isolated turns). |
-| **MCP Integration** | `SUPPORTED` | Native MCP client interfaces with `gemini-notebook` (`get_health`, `get_capabilities`, `ask_question`). |
+| **Headless CLI Execution** | `REAL VERIFIED` | `agy --print "<prompt>" --output-format json` executed non-interactively with Exit Code 0 in ~11s. |
+| **Structured CLI Output** | `REAL VERIFIED` | `--json-schema` enforces strict JSON schemas validated directly into Pydantic models with typed fields. |
+| **Multi-Turn Context Continuity (CLI)** | `REAL VERIFIED` | Context retained across turns via `--conversation <conversation_id>` (retained secret code across isolated turns). |
+| **Python SDK Symbol Import** | `VERIFIED` | Python `google.antigravity` (v0.1.12) imported cleanly; `Agent`, `LocalAgentConfig`, `CapabilitiesConfig` exported. |
+| **Python SDK Reasoning Execution** | `NOT VERIFIED` | Symbol import verified, but runtime reasoning pipeline uses `agy` CLI subprocess; programmatic SDK execution is NOT equated with symbol import. |
+| **MCP Integration** | `REAL VERIFIED` | Native MCP client interfaces with `gemini-notebook` (`get_health`, `get_capabilities`, `ask_question`). |
 | **Subagent Hierarchy** | `SUPPORTED` | Antigravity native subagent spawning and delegation supported for parallel task isolation. |
 | **Scheduler Integration** | `SUPPORTED` | Cron and one-shot timers supported via native scheduling primitives. |
 
@@ -52,7 +53,7 @@ classDiagram
 ```
 
 ### Invariant Rules
-1. **Primary Control Plane**: `AntigravityBackend` executes via headless CLI / SDK subprocess with strictly enforced Pydantic schemas.
+1. **Primary Control Plane**: `AntigravityBackend` executes via headless `agy` CLI subprocess with strictly enforced Pydantic schemas.
 2. **NotebookLM Role**: Dedicated exclusively as a **Research Evidence Assistant** for Stage 1 (Research), Stage 2 (Topic Selection), and Stage 3 (Evidence Gathering). NotebookLM is NOT a video renderer, TTS synthesizer, or primary orchestrator.
 3. **Fail-Safe Discipline**: Any backend failure produces an explicit `FAILED` or `BLOCKED` state with full error diagnostics. No silent mock fallbacks.
 
@@ -67,15 +68,16 @@ classDiagram
   IMPORT_STATUS: SUCCESS
   EXPORTED_SYMBOLS: ['Agent', 'AgentBehavior', 'AgentConfig', 'CapabilitiesConfig', 'LocalAgentConfig', ...]
   ```
+- *Note*: Symbol import verification does not constitute execution verification of the Python SDK reasoning loop; active reasoning is driven via `agy` CLI subprocess.
 
-### 4.2. Schema-Enforced Structured Output
+### 4.2. Schema-Enforced Structured Output (CLI)
 - **Script**: `experiments/antigravity_runtime/test_comprehensive_runtime.py`
 - **Input Model**: `TopicEvaluation(topic: str, target_audience: str, viability_score: int, key_reasons: list[str])`
 - **Execution Result**:
   - Exit Code: `0`
   - Validated Model: `TopicEvaluation(topic='How to build local AI agents in Python', viability_score=9, ...)`
 
-### 4.3. Multi-Turn Context Memory
+### 4.3. Multi-Turn Context Memory (CLI)
 - **Turn 1 Prompt**: `"Remember this secret code: 'YOUTUBE_AUTOPILOT_2026'"` $\rightarrow$ Returned `conversation_id = 7a75e662-266e-4a04-ae5f-a51969498430`
 - **Turn 2 Prompt**: `"What was the secret code I gave you?"` (using `--conversation 7a75e662-266e-4a04-ae5f-a51969498430`)
 - **Turn 2 Output**: `"The secret code you gave me is: YOUTUBE_AUTOPILOT_2026"`

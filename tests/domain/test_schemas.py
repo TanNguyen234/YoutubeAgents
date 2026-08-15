@@ -1,4 +1,4 @@
-"""Unit tests verifying domain schema models and validation rules."""
+"""Unit tests verifying domain schema models, validation rules, and default safeguards."""
 
 from datetime import datetime, timezone
 import pytest
@@ -8,6 +8,7 @@ from app.domain.enums import (
     AssetType,
     ExperimentStatus,
     PlatformFormat,
+    PrivacyStatus,
     PublicationStatus,
     QualityStatus,
     VideoLifecycleState,
@@ -44,18 +45,19 @@ def test_channel_model() -> None:
     assert channel.is_active is True
 
 
-def test_topic_candidate_validation() -> None:
-    """Verify TopicCandidate validation and scoring range."""
+def test_topic_candidate_validation_and_no_fabricated_cpm() -> None:
+    """Verify TopicCandidate validation and ensure estimated_cpm defaults to None."""
     topic = TopicCandidate(
         id="topic-101",
         channel_id="chan-001",
         keyword="Local AI Agents",
         opportunity_score=8.5,
         authority_score=9.0,
-        estimated_cpm=15.0,
     )
     assert topic.opportunity_score == 8.5
-    assert topic.estimated_cpm == 15.0
+    assert topic.authority_score == 9.0
+    # Invariant: No fabricated default CPM (must be None)
+    assert topic.estimated_cpm is None
 
     # Score out of bounds should fail
     with pytest.raises(ValidationError):
@@ -65,6 +67,18 @@ def test_topic_candidate_validation() -> None:
             keyword="Invalid Score",
             opportunity_score=11.0,  # Max is 10.0
         )
+
+
+def test_research_source_license_provenance_default() -> None:
+    """Verify ResearchSource license_type defaults to UNKNOWN or None, not fabricated CC."""
+    source = ResearchSource(
+        id="src-01",
+        url="https://arxiv.org/abs/2601.12345",
+        title="Autonomous Coding Agents",
+        authors=["Alice", "Bob"],
+        content_sha256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    )
+    assert source.license_type in ("UNKNOWN", None)
 
 
 def test_research_source_and_claim_provenance() -> None:
@@ -94,6 +108,17 @@ def test_research_source_and_claim_provenance() -> None:
     assert len(dossier.sources) == 1
     assert len(dossier.claims) == 1
     assert dossier.claims[0].verified is True
+
+
+def test_quality_result_defaults_to_pending_not_passed() -> None:
+    """Verify QualityResult defaults to PENDING (implicit success is forbidden)."""
+    qa = QualityResult(
+        id="qa-01",
+        project_id="proj-01",
+        loudness_lufs=-14.2,
+        duration_seconds=59.8,
+    )
+    assert qa.status == QualityStatus.PENDING
 
 
 def test_video_project_and_scene_structure() -> None:
@@ -146,15 +171,17 @@ def test_video_project_and_scene_structure() -> None:
     assert project.quality.status == QualityStatus.PASSED
 
 
-def test_publication_job_defaults_to_private() -> None:
-    """Verify PublicationJob enforces default private upload security invariant."""
+def test_publication_job_privacy_status_enum_default() -> None:
+    """Verify PublicationJob uses PrivacyStatus enum and enforces default PRIVATE."""
     job = PublicationJob(
         id="pub-01",
         project_id="proj-01",
         channel_id="chan-001",
         status=PublicationStatus.PENDING,
     )
-    assert job.privacy_status == "private"
+    assert job.privacy_status == PrivacyStatus.PRIVATE
+    assert job.privacy_status.value == "private"
+    assert isinstance(job.privacy_status, PrivacyStatus)
 
 
 def test_analytics_and_experiment_models() -> None:

@@ -45,11 +45,20 @@ class AssetType(str, Enum):
 
 
 class QualityStatus(str, Enum):
-    """Quality gate validation verdicts."""
+    """Quality gate validation verdicts (defaults safely to PENDING)."""
 
+    PENDING = "PENDING"
     PASSED = "PASSED"
     FAILED = "FAILED"
     WARNING = "WARNING"
+
+
+class PrivacyStatus(str, Enum):
+    """YouTube publication privacy status enum."""
+
+    PRIVATE = "private"
+    UNLISTED = "unlisted"
+    PUBLIC = "public"
 
 
 class PublicationStatus(str, Enum):

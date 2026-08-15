@@ -1,9 +1,11 @@
-"""SQLite schema definition, DDL statements, and initialization."""
+"""SQLite schema definition, DDL statements, foreign keys, and initialization."""
 
 import sqlite3
 from pathlib import Path
 
 SCHEMA_SQL = """
+PRAGMA foreign_keys = ON;
+
 CREATE TABLE IF NOT EXISTS channels (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -21,10 +23,10 @@ CREATE TABLE IF NOT EXISTS topic_candidates (
     keyword TEXT NOT NULL,
     opportunity_score REAL NOT NULL,
     authority_score REAL NOT NULL,
-    estimated_cpm REAL NOT NULL DEFAULT 10.0,
+    estimated_cpm REAL,
     rationale TEXT,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (channel_id) REFERENCES channels(id)
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS video_projects (
@@ -36,7 +38,7 @@ CREATE TABLE IF NOT EXISTS video_projects (
     metadata_tags TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    FOREIGN KEY (channel_id) REFERENCES channels(id)
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS scripts (
@@ -48,7 +50,7 @@ CREATE TABLE IF NOT EXISTS scripts (
     total_word_count INTEGER NOT NULL,
     estimated_duration_seconds REAL NOT NULL,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES video_projects(id)
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS assets (
@@ -60,7 +62,7 @@ CREATE TABLE IF NOT EXISTS assets (
     license_type TEXT NOT NULL,
     content_sha256 TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES video_projects(id)
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS quality_results (
@@ -72,7 +74,7 @@ CREATE TABLE IF NOT EXISTS quality_results (
     sync_drift_ms REAL NOT NULL,
     issues_json TEXT,
     checked_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES video_projects(id)
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS publication_jobs (
@@ -86,8 +88,8 @@ CREATE TABLE IF NOT EXISTS publication_jobs (
     published_at TEXT,
     error_message TEXT,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES video_projects(id),
-    FOREIGN KEY (channel_id) REFERENCES channels(id)
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS analytics_snapshots (
@@ -100,7 +102,7 @@ CREATE TABLE IF NOT EXISTS analytics_snapshots (
     average_view_duration_seconds REAL NOT NULL DEFAULT 0.0,
     retention_at_3s_percent REAL,
     captured_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES video_projects(id)
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS experiments (
@@ -111,16 +113,18 @@ CREATE TABLE IF NOT EXISTS experiments (
     status TEXT NOT NULL,
     result_summary TEXT,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES video_projects(id)
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS idempotency_keys (
-    key TEXT PRIMARY KEY,
+    key TEXT NOT NULL,
     scope TEXT NOT NULL,
     status TEXT NOT NULL,
     response TEXT,
+    expires_at TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (scope, key)
 );
 
 CREATE TABLE IF NOT EXISTS state_transitions (
@@ -130,16 +134,17 @@ CREATE TABLE IF NOT EXISTS state_transitions (
     to_state TEXT NOT NULL,
     reason TEXT,
     transitioned_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES video_projects(id)
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
 );
 """
 
 
 def init_database(db_path: Path) -> None:
-    """Initialize database tables and indexes."""
+    """Initialize database tables and indexes with active foreign key constraints."""
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON;")
         conn.executescript(SCHEMA_SQL)
         conn.commit()

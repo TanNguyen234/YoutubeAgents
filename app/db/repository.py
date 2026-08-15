@@ -1,4 +1,4 @@
-"""SQLite repository implementation providing transactional CRUD and restart persistence."""
+"""SQLite repository implementation providing transactional CRUD, CAS state transitions, and restart persistence."""
 
 import json
 import sqlite3
@@ -10,6 +10,7 @@ from app.domain.enums import (
     AssetType,
     ExperimentStatus,
     PlatformFormat,
+    PrivacyStatus,
     PublicationStatus,
     QualityStatus,
     VideoLifecycleState,
@@ -26,7 +27,13 @@ from app.domain.models import (
     TopicCandidate,
     VideoProject,
 )
+from app.domain.state_machine import LifecycleStateMachine, InvalidStateTransitionError
 from app.db.schema import init_database
+
+
+class StateConcurrencyError(RuntimeError):
+    """Raised when a compare-and-set state transition fails due to concurrent modification or state mismatch."""
+    pass
 
 
 class SQLiteRepository:
@@ -38,6 +45,7 @@ class SQLiteRepository:
 
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=15.0)
+        conn.execute("PRAGMA foreign_keys = ON;")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -284,21 +292,52 @@ class SQLiteRepository:
         return results
 
     def update_project_state(
-        self, project_id: str, from_state: VideoLifecycleState, to_state: VideoLifecycleState, reason: str = ""
+        self,
+        project_id: str,
+        to_state: VideoLifecycleState,
+        reason: str = "",
+        expected_from_state: Optional[VideoLifecycleState] = None,
     ) -> None:
+        """Atomically transition project state using Compare-And-Set with authoritative FSM validation."""
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._get_connection() as conn:
             cursor = conn.cursor()
+
+            # 1. Read actual current state from database (do NOT trust caller-supplied from_state blindly)
+            cursor.execute("SELECT state FROM video_projects WHERE id = ?", (project_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise KeyError(f"Video project '{project_id}' not found")
+
+            actual_from_state = VideoLifecycleState(row["state"])
+
+            # 2. Check expected state consistency if specified by caller
+            if expected_from_state is not None and actual_from_state != expected_from_state:
+                raise StateConcurrencyError(
+                    f"Expected state {expected_from_state.value} does not match current state {actual_from_state.value}"
+                )
+
+            # 3. Validate transition against authoritative state machine
+            sm = LifecycleStateMachine(current_state=actual_from_state)
+            sm.transition_to(to_state, reason=reason)
+
+            # 4. Perform atomic Compare-And-Set inside transaction
             cursor.execute(
-                "UPDATE video_projects SET state = ?, updated_at = ? WHERE id = ?",
-                (to_state.value, now_iso, project_id),
+                "UPDATE video_projects SET state = ?, updated_at = ? WHERE id = ? AND state = ?",
+                (to_state.value, now_iso, project_id, actual_from_state.value),
             )
+            if cursor.rowcount != 1:
+                raise StateConcurrencyError(
+                    f"CAS update failed for project '{project_id}': expected state '{actual_from_state.value}' was concurrently modified."
+                )
+
+            # 5. Record state transition history in same atomic transaction
             cursor.execute(
                 """
                 INSERT INTO state_transitions (project_id, from_state, to_state, reason, transitioned_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (project_id, from_state.value, to_state.value, reason, now_iso),
+                (project_id, actual_from_state.value, to_state.value, reason, now_iso),
             )
             conn.commit()
 
@@ -332,7 +371,7 @@ class SQLiteRepository:
                     job.project_id,
                     job.channel_id,
                     job.status.value,
-                    job.privacy_status,
+                    job.privacy_status.value if isinstance(job.privacy_status, PrivacyStatus) else job.privacy_status,
                     job.scheduled_publish_time.isoformat() if job.scheduled_publish_time else None,
                     job.youtube_video_id,
                     job.published_at.isoformat() if job.published_at else None,
@@ -361,7 +400,7 @@ class SQLiteRepository:
                     project_id=r["project_id"],
                     channel_id=r["channel_id"],
                     status=PublicationStatus(r["status"]),
-                    privacy_status=r["privacy_status"],
+                    privacy_status=PrivacyStatus(r["privacy_status"]),
                     scheduled_publish_time=sched,
                     youtube_video_id=r["youtube_video_id"],
                     published_at=pub,

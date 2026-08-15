@@ -10,11 +10,12 @@
 
 | Checkpoint | Requirement | Status | Evidence |
 |---|---|---|---|
-| **Antigravity SDK Import** | Import `google.antigravity` and inspect exported symbols | **PASS** | `google.antigravity` 0.1.12 imports cleanly in Python 3.12 |
-| **Headless CLI Structured Output** | Generate structured JSON conforming to Pydantic schema | **PASS** | `agy --print ... --json-schema ...` validated into `TopicEvaluation` |
-| **Multi-Turn Context Continuity** | Retain conversation history across turns | **PASS** | Verified with `--conversation <id>` context retention |
-| **NotebookLM MCP Health & Capabilities** | Query MCP `get_health` and `get_capabilities` | **PASS** | Health status: `ok`, active chat & research controls verified |
-| **NotebookLM Research Assistant** | Query grounded evidence from sources | **PASS** | `gemini-notebook:ask_question` returned grounded evidence with provenance |
+| **Antigravity SDK Import** | Import `google.antigravity` and inspect exported symbols | **VERIFIED** | `google.antigravity` 0.1.12 imports cleanly in Python 3.12 |
+| **Python SDK Reasoning Execution** | Programmatic Agent reasoning loop execution | **NOT RUN** | Symbol import verified, but runtime reasoning engine uses `agy` CLI subprocess; programmatic SDK execution not equated with symbol import. |
+| **Headless CLI Structured Output** | Generate structured JSON conforming to Pydantic schema | **REAL VERIFIED** | `agy --print ... --json-schema ...` validated into `TopicEvaluation` |
+| **Multi-Turn Context Continuity (CLI)** | Retain conversation history across turns via `--conversation` | **REAL VERIFIED** | Verified with `--conversation <id>` context retention |
+| **NotebookLM MCP Health & Capabilities** | Query MCP `get_health` and `get_capabilities` | **REAL VERIFIED** | Health status: `ok`, active chat & research controls verified |
+| **NotebookLM Research Assistant** | Query grounded evidence from sources | **REAL VERIFIED** | `gemini-notebook:ask_question` returned grounded evidence with provenance |
 | **Reasoning Architecture Decision** | Formalize `ReasoningBackend` $\rightarrow$ `AntigravityBackend` | **PASS** | Documented in `docs/antigravity-runtime.md` |
 
 ---
@@ -51,7 +52,10 @@
 2. **JSON Schema Generation**:
    - *Finding*: LLM responses occasionally wrap JSON in markdown code blocks (` ```json `).
    - *Mitigation*: Added automatic JSON fence stripping prior to Pydantic model validation in the runtime wrapper.
-3. **NotebookLM Role Enforcement**:
+3. **Execution Distinction**:
+   - *Finding*: SDK symbol import does not verify end-to-end Python SDK reasoning loop execution.
+   - *Mitigation*: Clarified that active reasoning pipeline uses `agy` CLI subprocess (`REAL VERIFIED`), while SDK reasoning loop is marked `NOT RUN / NOT VERIFIED`.
+4. **NotebookLM Role Enforcement**:
    - *Finding*: NotebookLM supports media artifacts (e.g., audio overview, slide deck).
    - *Mitigation*: Fixed NotebookLM's scope strictly to **Research Evidence Assistant** per project governance rules.
 

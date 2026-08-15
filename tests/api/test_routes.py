@@ -9,8 +9,8 @@ from fastapi.testclient import TestClient
 from app.api.app import create_app
 from app.db.schema import init_database
 from app.db.repository import SQLiteRepository
-from app.domain.enums import VideoLifecycleState, PlatformFormat, PublicationStatus
-from app.domain.models import VideoProject, PublicationJob
+from app.domain.enums import VideoLifecycleState, PlatformFormat, PublicationStatus, PrivacyStatus
+from app.domain.models import Channel, VideoProject, PublicationJob
 
 
 @pytest.fixture
@@ -20,6 +20,15 @@ def test_client_and_repo():
         db_path = Path(tmp_dir) / "api_test.db"
         init_database(db_path)
         repo = SQLiteRepository(db_path)
+        # Pre-seed a valid channel for foreign key integrity
+        channel = Channel(
+            id="chan-001",
+            title="AI Hub",
+            handle="@AIHub",
+            niche="AI",
+            target_audience="Devs",
+        )
+        repo.save_channel(channel)
         app = create_app(repo=repo)
         client = TestClient(app)
         yield client, repo
@@ -83,8 +92,17 @@ def test_get_videos_and_by_id(test_client_and_repo) -> None:
 
 
 def test_get_queue(test_client_and_repo) -> None:
-    """Verify /queue endpoint returns publication jobs."""
+    """Verify /queue endpoint returns publication jobs with PrivacyStatus enum."""
     client, repo = test_client_and_repo
+
+    project = VideoProject(
+        id="proj-api-01",
+        channel_id="chan-001",
+        title="Testing REST API Endpoints",
+        format=PlatformFormat.LONG_FORM_16_9,
+        state=VideoLifecycleState.APPROVED,
+    )
+    repo.save_video_project(project)
 
     job = PublicationJob(
         id="job-api-01",

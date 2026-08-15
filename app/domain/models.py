@@ -8,6 +8,7 @@ from app.domain.enums import (
     AssetType,
     ExperimentStatus,
     PlatformFormat,
+    PrivacyStatus,
     PublicationStatus,
     QualityStatus,
     VideoLifecycleState,
@@ -35,7 +36,7 @@ class TopicCandidate(BaseModel):
     keyword: str = Field(description="Main topic keyword/phrase")
     opportunity_score: float = Field(ge=0.0, le=10.0, description="Search volume / opportunity score (0-10)")
     authority_score: float = Field(ge=0.0, le=10.0, description="Niche authority alignment score (0-10)")
-    estimated_cpm: float = Field(default=10.0, ge=0.0, description="Estimated category CPM in USD")
+    estimated_cpm: Optional[float] = Field(default=None, ge=0.0, description="Estimated category CPM in USD")
     rationale: Optional[str] = Field(default=None, description="Topic selection reasoning")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -48,7 +49,7 @@ class ResearchSource(BaseModel):
     title: str = Field(description="Document / article title")
     authors: List[str] = Field(default_factory=list, description="Authors or publisher")
     content_sha256: str = Field(description="SHA-256 hash of fetched source text")
-    license_type: str = Field(default="Public Domain / CC", description="Usage terms")
+    license_type: str = Field(default="UNKNOWN", description="Usage terms")
     fetched_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -115,7 +116,7 @@ class QualityResult(BaseModel):
 
     id: str = Field(description="Unique QA result ID")
     project_id: str = Field(description="Associated project ID")
-    status: QualityStatus = Field(default=QualityStatus.PASSED, description="QA verdict")
+    status: QualityStatus = Field(default=QualityStatus.PENDING, description="QA verdict (defaults safely to PENDING)")
     loudness_lufs: float = Field(description="Integrated loudness in LUFS (-14 standard)")
     duration_seconds: float = Field(description="Actual final video duration")
     sync_drift_ms: float = Field(default=0.0, description="Audio-video sync drift in ms")
@@ -130,7 +131,7 @@ class PublicationJob(BaseModel):
     project_id: str = Field(description="Associated project ID")
     channel_id: str = Field(description="Target channel ID")
     status: PublicationStatus = Field(default=PublicationStatus.PENDING)
-    privacy_status: str = Field(default="private", description="MANDATORY default private")
+    privacy_status: PrivacyStatus = Field(default=PrivacyStatus.PRIVATE, description="Default private upload")
     scheduled_publish_time: Optional[datetime] = Field(default=None)
     youtube_video_id: Optional[str] = Field(default=None)
     published_at: Optional[datetime] = Field(default=None)
