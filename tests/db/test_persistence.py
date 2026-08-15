@@ -67,6 +67,7 @@ def test_orphan_insert_rejected_by_foreign_keys(temp_db_path: Path) -> None:
         channel_id="non-existent-channel",
         title="Orphan Project",
         format=PlatformFormat.SHORTS_9_16,
+        state=VideoLifecycleState.CREATED,
     )
     with pytest.raises(sqlite3.IntegrityError):
         repo.save_video_project(orphan_project)
@@ -121,6 +122,58 @@ def test_channel_crud_and_persistence(temp_db_path: Path) -> None:
     assert fetched.id == channel.id
     assert fetched.title == channel.title
     assert fetched.handle == channel.handle
+
+
+def test_save_video_project_enforces_initial_created_state(temp_db_path: Path) -> None:
+    """Verify that a brand new project cannot be initially persisted in an advanced state like APPROVED or PUBLISHED."""
+    repo = SQLiteRepository(temp_db_path)
+    channel = Channel(id="chan-001", title="AI Hub", handle="@AI", niche="AI", target_audience="Devs")
+    repo.save_channel(channel)
+
+    # Attempt to persist a brand new project directly as APPROVED
+    invalid_new_project = VideoProject(
+        id="proj-new-01",
+        channel_id="chan-001",
+        title="Illegal Initial State",
+        state=VideoLifecycleState.APPROVED,
+    )
+    with pytest.raises(ValueError) as exc_info:
+        repo.save_video_project(invalid_new_project)
+    assert "New video project must start in CREATED state" in str(exc_info.value)
+
+
+def test_save_video_project_cannot_bypass_state_machine_on_existing_project(temp_db_path: Path) -> None:
+    """Verify that save_video_project cannot mutate the lifecycle state of an existing project."""
+    repo = SQLiteRepository(temp_db_path)
+    channel = Channel(id="chan-001", title="AI Hub", handle="@AI", niche="AI", target_audience="Devs")
+    repo.save_channel(channel)
+
+    # Persist initial project in CREATED
+    project = VideoProject(
+        id="proj-bypass-01",
+        channel_id="chan-001",
+        title="Bypass Prevention Test",
+        state=VideoLifecycleState.CREATED,
+    )
+    repo.save_video_project(project)
+
+    # Legally advance state via update_project_state to RESEARCHING
+    repo.update_project_state(project_id="proj-bypass-01", to_state=VideoLifecycleState.RESEARCHING)
+
+    # Now attempt to mutate state directly via save_video_project (e.g. setting state to PUBLISHED)
+    tampered_project = VideoProject(
+        id="proj-bypass-01",
+        channel_id="chan-001",
+        title="Updated Title",
+        state=VideoLifecycleState.PUBLISHED,  # Attempting to bypass FSM
+    )
+    repo.save_video_project(tampered_project)
+
+    # Invariant: DB state must still be RESEARCHING (title updated, but state untouched)
+    reloaded = repo.get_video_project("proj-bypass-01")
+    assert reloaded is not None
+    assert reloaded.title == "Updated Title"
+    assert reloaded.state == VideoLifecycleState.RESEARCHING
 
 
 def test_video_project_lifecycle_and_restart_persistence(temp_db_path: Path) -> None:
@@ -235,8 +288,8 @@ def test_publication_queue_queries(temp_db_path: Path) -> None:
     channel = Channel(id="chan-001", title="AI Hub", handle="@AI", niche="AI", target_audience="Devs")
     repo.save_channel(channel)
 
-    proj1 = VideoProject(id="proj-101", channel_id="chan-001", title="P1", state=VideoLifecycleState.APPROVED)
-    proj2 = VideoProject(id="proj-102", channel_id="chan-001", title="P2", state=VideoLifecycleState.APPROVED)
+    proj1 = VideoProject(id="proj-101", channel_id="chan-001", title="P1", state=VideoLifecycleState.CREATED)
+    proj2 = VideoProject(id="proj-102", channel_id="chan-001", title="P2", state=VideoLifecycleState.CREATED)
     repo.save_video_project(proj1)
     repo.save_video_project(proj2)
 

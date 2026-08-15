@@ -1,9 +1,11 @@
-"""SQLite schema definition, DDL statements, foreign keys, and initialization."""
+"""SQLite schema definition, DDL statements, migrations, and initialization."""
 
 import sqlite3
 from pathlib import Path
 
-SCHEMA_SQL = """
+SCHEMA_VERSION = 2
+
+SCHEMA_V2_SQL = """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS channels (
@@ -139,12 +141,54 @@ CREATE TABLE IF NOT EXISTS state_transitions (
 """
 
 
-def init_database(db_path: Path) -> None:
-    """Initialize database tables and indexes with active foreign key constraints."""
+def migrate_database(db_path: Path) -> None:
+    """Migrate SQLite database to the current schema version using user_version pragma."""
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA foreign_keys = ON;")
-        conn.executescript(SCHEMA_SQL)
-        conn.commit()
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA user_version;")
+        current_version = cursor.fetchone()[0]
+
+        if current_version == 0:
+            # Brand new database: apply full v2 schema
+            conn.executescript(SCHEMA_V2_SQL)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.commit()
+            return
+
+        if current_version < 2:
+            # Upgrade from v1 to v2:
+            # 1. Upgrade idempotency_keys table to composite (scope, key) PK and add expires_at
+            conn.execute("PRAGMA foreign_keys = OFF;")
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS idempotency_keys_v2 (
+                    key TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    response TEXT,
+                    expires_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (scope, key)
+                );
+
+                INSERT INTO idempotency_keys_v2 (key, scope, status, response, expires_at, created_at, updated_at)
+                SELECT key, scope, status, response, NULL, created_at, updated_at
+                FROM idempotency_keys;
+
+                DROP TABLE idempotency_keys;
+                ALTER TABLE idempotency_keys_v2 RENAME TO idempotency_keys;
+                """
+            )
+            conn.execute("PRAGMA foreign_keys = ON;")
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.commit()
+
+
+def init_database(db_path: Path) -> None:
+    """Initialize or migrate database to the current schema version."""
+    migrate_database(db_path)

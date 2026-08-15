@@ -1,4 +1,4 @@
-"""Idempotency management with scoped keys and stale lease recovery."""
+"""Idempotency management with scoped keys, atomic CAS stale lease recovery, and concurrency protection."""
 
 import json
 import sqlite3
@@ -21,13 +21,13 @@ class IdempotencyRecord(BaseModel):
 
 
 class IdempotencyManager:
-    """Provides atomic scoped idempotency locking, response caching, and stale pending lease recovery."""
+    """Provides atomic scoped idempotency locking, response caching, and concurrency-safe stale pending lease recovery."""
 
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.row_factory = sqlite3.Row
         return conn
@@ -62,9 +62,9 @@ class IdempotencyManager:
     def acquire(self, key: str, scope: str = "default", lease_seconds: int = 300) -> bool:
         """Attempt to acquire an idempotency lock.
 
-        If key does not exist under the given scope, creates a PENDING record with an expiration lease.
-        If a PENDING record exists whose lease has expired, recovers and refreshes the lock.
-        Returns True if acquired, False otherwise.
+        - If key does not exist: atomically inserts PENDING lock. If another worker inserted concurrently, returns False without leaking IntegrityError.
+        - If key exists in PENDING and lease has expired: atomically performs Compare-And-Set against previously observed expires_at so exactly one worker wins.
+        - Otherwise: returns False.
         """
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
@@ -79,37 +79,40 @@ class IdempotencyManager:
             row = cursor.fetchone()
 
             if row is None:
-                # Key does not exist: insert fresh PENDING lock
-                cursor.execute(
-                    """
-                    INSERT INTO idempotency_keys (key, scope, status, response, expires_at, created_at, updated_at)
-                    VALUES (?, ?, 'PENDING', NULL, ?, ?, ?)
-                    """,
-                    (key, scope, expires_at_iso, now_iso, now_iso),
-                )
-                conn.commit()
-                return True
+                # Key does not exist: attempt atomic insert
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO idempotency_keys (key, scope, status, response, expires_at, created_at, updated_at)
+                        VALUES (?, ?, 'PENDING', NULL, ?, ?, ?)
+                        """,
+                        (key, scope, expires_at_iso, now_iso, now_iso),
+                    )
+                    conn.commit()
+                    return True
+                except sqlite3.IntegrityError:
+                    # Concurrent worker won the race to insert; return False cleanly
+                    return False
 
             status = row["status"]
             expires_at_str = row["expires_at"]
 
-            if status == "PENDING":
-                if expires_at_str:
-                    expires_dt = datetime.fromisoformat(expires_at_str)
-                    if now > expires_dt:
-                        # Stale PENDING lease expired: recover lock
-                        cursor.execute(
-                            """
-                            UPDATE idempotency_keys
-                            SET expires_at = ?, updated_at = ?
-                            WHERE scope = ? AND key = ? AND status = 'PENDING'
-                            """,
-                            (expires_at_iso, now_iso, scope, key),
-                        )
-                        conn.commit()
-                        return cursor.rowcount == 1
+            if status == "PENDING" and expires_at_str:
+                expires_dt = datetime.fromisoformat(expires_at_str)
+                if now > expires_dt:
+                    # Atomic Compare-And-Set: verify status is still PENDING and expires_at matches the exact observed value
+                    cursor.execute(
+                        """
+                        UPDATE idempotency_keys
+                        SET expires_at = ?, updated_at = ?
+                        WHERE scope = ? AND key = ? AND status = 'PENDING' AND expires_at = ?
+                        """,
+                        (expires_at_iso, now_iso, scope, key, expires_at_str),
+                    )
+                    conn.commit()
+                    return cursor.rowcount == 1
 
-            # Key is either actively PENDING (unexpired) or already COMPLETED/FAILED
+            # Key is either actively PENDING (lease still valid) or already COMPLETED/FAILED
             return False
 
     def complete(self, key: str, scope: str = "default", response: Optional[Dict[str, Any]] = None) -> None:

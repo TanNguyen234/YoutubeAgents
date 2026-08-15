@@ -1,6 +1,7 @@
-"""Unit tests for scoped idempotency key management and stale pending lease recovery."""
+"""Unit tests for scoped idempotency key management, stale lease recovery, and multi-thread concurrency safety."""
 
 import gc
+import threading
 import time
 from pathlib import Path
 import pytest
@@ -84,3 +85,69 @@ def test_stale_pending_lease_recovery(temp_db: Path) -> None:
     # Worker 2 attempts acquisition -> detects expired PENDING lease and recovers lock
     recovered = mgr.acquire(key, scope=scope, lease_seconds=10)
     assert recovered is True
+
+
+def test_concurrent_insert_race_has_exactly_one_winner(temp_db: Path) -> None:
+    """Verify concurrent worker threads competing to acquire the same key yields exactly 1 winner and 0 errors."""
+    key = "concurrent-render-task"
+    scope = "rendering"
+    num_threads = 10
+    results = []
+    exceptions = []
+
+    def worker():
+        try:
+            mgr = IdempotencyManager(temp_db)
+            acquired = mgr.acquire(key, scope=scope, lease_seconds=60)
+            results.append(acquired)
+        except Exception as e:
+            exceptions.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Invariant: No leaked IntegrityError or sqlite errors
+    assert len(exceptions) == 0
+    # Invariant: Exactly 1 thread won the lease
+    assert results.count(True) == 1
+    assert results.count(False) == num_threads - 1
+
+
+def test_concurrent_stale_lease_recovery_has_exactly_one_winner(temp_db: Path) -> None:
+    """Verify concurrent worker threads competing to recover an expired stale lease yields exactly 1 winner."""
+    key = "concurrent-stale-task"
+    scope = "tts_synthesis"
+
+    # Initial acquisition with 0.5s lease
+    init_mgr = IdempotencyManager(temp_db)
+    assert init_mgr.acquire(key, scope=scope, lease_seconds=1) is True
+
+    # Wait for expiration
+    time.sleep(1.2)
+
+    num_threads = 10
+    results = []
+    exceptions = []
+
+    def worker():
+        try:
+            mgr = IdempotencyManager(temp_db)
+            acquired = mgr.acquire(key, scope=scope, lease_seconds=60)
+            results.append(acquired)
+        except Exception as e:
+            exceptions.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Invariant: No leaked exceptions
+    assert len(exceptions) == 0
+    # Invariant: Exactly 1 thread won the stale recovery CAS
+    assert results.count(True) == 1
+    assert results.count(False) == num_threads - 1

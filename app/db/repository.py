@@ -98,32 +98,57 @@ class SQLiteRepository:
 
     # --- VideoProject CRUD ---
     def save_video_project(self, project: VideoProject) -> None:
+        """Persist or update video project details without allowing lifecycle state machine bypass."""
         tags_json = json.dumps(project.metadata_tags)
+        now_iso = datetime.now(timezone.utc).isoformat()
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO video_projects (id, channel_id, title, format, state, metadata_tags, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    channel_id = excluded.channel_id,
-                    title = excluded.title,
-                    format = excluded.format,
-                    state = excluded.state,
-                    metadata_tags = excluded.metadata_tags,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    project.id,
-                    project.channel_id,
-                    project.title,
-                    project.format.value,
-                    project.state.value,
-                    tags_json,
-                    project.created_at.isoformat(),
-                    project.updated_at.isoformat(),
-                ),
-            )
+
+            # Check if project already exists in database
+            cursor.execute("SELECT state FROM video_projects WHERE id = ?", (project.id,))
+            existing_row = cursor.fetchone()
+
+            if existing_row is None:
+                # Brand new project insertion: must start in CREATED state
+                if project.state != VideoLifecycleState.CREATED:
+                    raise ValueError(
+                        f"New video project must start in CREATED state, cannot initialize in '{project.state.value}'"
+                    )
+
+                cursor.execute(
+                    """
+                    INSERT INTO video_projects (id, channel_id, title, format, state, metadata_tags, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project.id,
+                        project.channel_id,
+                        project.title,
+                        project.format.value,
+                        VideoLifecycleState.CREATED.value,
+                        tags_json,
+                        project.created_at.isoformat(),
+                        now_iso,
+                    ),
+                )
+            else:
+                # Existing project update: Invariant: preserve existing DB state, do NOT overwrite state
+                cursor.execute(
+                    """
+                    UPDATE video_projects
+                    SET channel_id = ?, title = ?, format = ?, metadata_tags = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        project.channel_id,
+                        project.title,
+                        project.format.value,
+                        tags_json,
+                        now_iso,
+                        project.id,
+                    ),
+                )
 
             # Persist script if present
             if project.script:

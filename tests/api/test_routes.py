@@ -62,15 +62,17 @@ def test_get_videos_and_by_id(test_client_and_repo) -> None:
     """Verify /videos listing and /videos/{id} lookup."""
     client, repo = test_client_and_repo
 
-    # Seed project
+    # Seed project in CREATED and advance legally via FSM
     project = VideoProject(
         id="proj-api-01",
         channel_id="chan-001",
         title="Testing REST API Endpoints",
         format=PlatformFormat.LONG_FORM_16_9,
-        state=VideoLifecycleState.PLANNED,
+        state=VideoLifecycleState.CREATED,
     )
     repo.save_video_project(project)
+    repo.update_project_state(project_id="proj-api-01", to_state=VideoLifecycleState.RESEARCHING)
+    repo.update_project_state(project_id="proj-api-01", to_state=VideoLifecycleState.PLANNED)
 
     # List
     list_resp = client.get("/videos")
@@ -100,7 +102,7 @@ def test_get_queue(test_client_and_repo) -> None:
         channel_id="chan-001",
         title="Testing REST API Endpoints",
         format=PlatformFormat.LONG_FORM_16_9,
-        state=VideoLifecycleState.APPROVED,
+        state=VideoLifecycleState.CREATED,
     )
     repo.save_video_project(project)
 

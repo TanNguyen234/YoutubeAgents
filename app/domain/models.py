@@ -60,7 +60,7 @@ class Claim(BaseModel):
     source_id: str = Field(description="Referenced source ID")
     statement: str = Field(description="Factual claim text")
     verified: bool = Field(default=False, description="Verification status")
-    confidence_score: float = Field(default=1.0, ge=0.0, le=1.0, description="Verification confidence")
+    confidence_score: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Verification confidence")
     notes: Optional[str] = Field(default=None, description="Fact checker annotations")
 
 

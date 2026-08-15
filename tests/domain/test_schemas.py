@@ -81,8 +81,19 @@ def test_research_source_license_provenance_default() -> None:
     assert source.license_type in ("UNKNOWN", None)
 
 
+def test_claim_confidence_score_defaults_to_none() -> None:
+    """Verify unverified Claim confidence score defaults to None, not fabricated 1.0."""
+    claim = Claim(
+        id="claim-01",
+        source_id="src-01",
+        statement="Antigravity provides local reasoning control plane.",
+    )
+    assert claim.verified is False
+    assert claim.confidence_score is None
+
+
 def test_research_source_and_claim_provenance() -> None:
-    """Verify ResearchSource and Claim integrity."""
+    """Verify ResearchSource and Claim integrity with verified claim."""
     source = ResearchSource(
         id="src-01",
         url="https://arxiv.org/abs/2601.12345",
@@ -108,6 +119,7 @@ def test_research_source_and_claim_provenance() -> None:
     assert len(dossier.sources) == 1
     assert len(dossier.claims) == 1
     assert dossier.claims[0].verified is True
+    assert dossier.claims[0].confidence_score == 0.95
 
 
 def test_quality_result_defaults_to_pending_not_passed() -> None:
@@ -160,12 +172,12 @@ def test_video_project_and_scene_structure() -> None:
         channel_id="chan-001",
         title=script.title,
         format=PlatformFormat.SHORTS_9_16,
-        state=VideoLifecycleState.READY_FOR_REVIEW,
+        state=VideoLifecycleState.CREATED,
         script=script,
         assets=[asset],
         quality=qa,
     )
-    assert project.state == VideoLifecycleState.READY_FOR_REVIEW
+    assert project.state == VideoLifecycleState.CREATED
     assert project.format == PlatformFormat.SHORTS_9_16
     assert len(project.assets) == 1
     assert project.quality.status == QualityStatus.PASSED
