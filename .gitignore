@@ -52,13 +52,14 @@ oauth_credentials.json
 *.db-journal
 *.db-wal
 
-# Output, Media & Scratch Artefacts
+# Output, Media, Scratch & Reference Artefacts
 output/*
 !output/.gitkeep
 data/raw/*
 data/temp/*
 data/cache/*
 !data/.gitkeep
+references/*
 !references/.gitkeep
 
 # Testing & Linting Caches
