@@ -65,6 +65,7 @@ output/*
 data/raw/*
 data/temp/*
 data/cache/*
+data/evidence/*
 !data/.gitkeep
 references/*
 !references/.gitkeep

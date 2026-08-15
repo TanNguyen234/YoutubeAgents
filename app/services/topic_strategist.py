@@ -1,37 +1,46 @@
-"""Topic strategist evaluating and scoring candidate topics using multi-criteria YAML weights."""
+"""TopicStrategist scoring candidate topics using configurable YAML dimension weights."""
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 import yaml
 
 from app.domain.models import Channel, TopicCandidate, TopicScoreBreakdown
 from app.services.duplicate_detector import DuplicateDetector
 
-DEFAULT_WEIGHTS = {
+# Authoritative default dimension weights (sum to 1.0)
+DEFAULT_WEIGHTS: Dict[str, float] = {
     "demand": 0.20,
     "freshness": 0.15,
-    "competition": 0.10,
+    "competition": 0.15,
     "channel_fit": 0.15,
-    "originality": 0.15,
+    "originality": 0.10,
     "evidence_quality": 0.10,
-    "production_feasibility": 0.05,
-    "historical_fit": 0.10,
+    "production_feasibility": 0.10,
+    "historical_fit": 0.05,
 }
+
+CONFIG_FILE_PATH = Path("config/topic_weights.yaml")
 
 
 class TopicStrategist:
-    """Evaluates, scores, and ranks candidate video topics using multi-dimensional criteria."""
+    """Evaluates and ranks video topic candidates based on configurable 8-dimension scoring weights."""
 
     def __init__(
         self,
+        config_path: Optional[Path] = None,
         weights_config_path: Optional[Path] = None,
-        duplicate_threshold: float = 0.65,
+        weights_override: Optional[Dict[str, float]] = None,
+        duplicate_threshold: float = 0.80,
     ):
         self.weights = DEFAULT_WEIGHTS.copy()
         self.duplicate_threshold = duplicate_threshold
 
-        if weights_config_path and Path(weights_config_path).exists():
-            self._load_yaml_config(Path(weights_config_path))
+        path_to_load = weights_config_path or config_path or CONFIG_FILE_PATH
+        if path_to_load and path_to_load.exists():
+            self._load_yaml_config(path_to_load)
+
+        if weights_override:
+            self.weights = weights_override.copy()
 
         self.duplicate_detector = DuplicateDetector(similarity_threshold=self.duplicate_threshold)
 
@@ -43,28 +52,29 @@ class TopicStrategist:
                 if data and isinstance(data, dict):
                     loaded_weights = data.get("weights")
                     if loaded_weights and isinstance(loaded_weights, dict):
-                        # Normalize loaded weights
                         total = sum(loaded_weights.values())
                         if total > 0:
                             self.weights = {k: v / total for k, v in loaded_weights.items()}
                     if "duplicate_threshold" in data:
                         self.duplicate_threshold = float(data["duplicate_threshold"])
         except Exception:
-            # Fall back safely to DEFAULT_WEIGHTS on any file read error
             self.weights = DEFAULT_WEIGHTS.copy()
 
-    def compute_composite_score(self, breakdown: TopicScoreBreakdown) -> float:
+    def compute_composite_score(self, breakdown: Union[TopicScoreBreakdown, Dict[str, float]]) -> float:
         """Calculate weighted composite score from individual dimension scores (0.0 - 10.0 scale)."""
-        score_map = {
-            "demand": breakdown.demand,
-            "freshness": breakdown.freshness,
-            "competition": breakdown.competition,
-            "channel_fit": breakdown.channel_fit,
-            "originality": breakdown.originality,
-            "evidence_quality": breakdown.evidence_quality,
-            "production_feasibility": breakdown.production_feasibility,
-            "historical_fit": breakdown.historical_fit,
-        }
+        if isinstance(breakdown, TopicScoreBreakdown):
+            score_map = {
+                "demand": breakdown.demand,
+                "freshness": breakdown.freshness,
+                "competition": breakdown.competition,
+                "channel_fit": breakdown.channel_fit,
+                "originality": breakdown.originality,
+                "evidence_quality": breakdown.evidence_quality,
+                "production_feasibility": breakdown.production_feasibility,
+                "historical_fit": breakdown.historical_fit,
+            }
+        else:
+            score_map = breakdown
 
         weighted_sum = 0.0
         total_weight = 0.0
@@ -85,7 +95,7 @@ class TopicStrategist:
         topic_id: str,
         channel: Channel,
         keyword: str,
-        raw_scores: TopicScoreBreakdown,
+        raw_scores: Union[TopicScoreBreakdown, Dict[str, float]],
         rationale: Optional[str] = None,
         estimated_cpm: Optional[float] = None,
         recent_channel_topics: Optional[List[str]] = None,
@@ -102,24 +112,39 @@ class TopicStrategist:
 
         # 2. Calculate composite score
         composite = self.compute_composite_score(raw_scores)
-        breakdown_with_composite = TopicScoreBreakdown(
-            demand=raw_scores.demand,
-            freshness=raw_scores.freshness,
-            competition=raw_scores.competition,
-            channel_fit=raw_scores.channel_fit,
-            originality=raw_scores.originality,
-            evidence_quality=raw_scores.evidence_quality,
-            production_feasibility=raw_scores.production_feasibility,
-            historical_fit=raw_scores.historical_fit,
-            composite_score=composite,
-        )
+        if isinstance(raw_scores, dict):
+            breakdown_with_composite = TopicScoreBreakdown(
+                demand=raw_scores.get("demand", 8.0),
+                freshness=raw_scores.get("freshness", 8.0),
+                competition=raw_scores.get("competition", 6.0),
+                channel_fit=raw_scores.get("channel_fit", 8.5),
+                originality=raw_scores.get("originality", 8.0),
+                evidence_quality=raw_scores.get("evidence_quality", 8.5),
+                production_feasibility=raw_scores.get("production_feasibility", 8.0),
+                historical_fit=raw_scores.get("historical_fit", 8.0),
+                composite_score=composite,
+            )
+            authority = raw_scores.get("channel_fit", 8.5)
+        else:
+            breakdown_with_composite = TopicScoreBreakdown(
+                demand=raw_scores.demand,
+                freshness=raw_scores.freshness,
+                competition=raw_scores.competition,
+                channel_fit=raw_scores.channel_fit,
+                originality=raw_scores.originality,
+                evidence_quality=raw_scores.evidence_quality,
+                production_feasibility=raw_scores.production_feasibility,
+                historical_fit=raw_scores.historical_fit,
+                composite_score=composite,
+            )
+            authority = raw_scores.channel_fit
 
         return TopicCandidate(
             id=topic_id,
             channel_id=channel.id,
             keyword=keyword,
             opportunity_score=composite,
-            authority_score=raw_scores.channel_fit,
+            authority_score=authority,
             estimated_cpm=estimated_cpm,
             rationale=rationale,
             score_breakdown=breakdown_with_composite,

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS topic_candidates (
     authority_score REAL NOT NULL,
     estimated_cpm REAL,
     rationale TEXT,
+    score_breakdown_json TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
 );
@@ -49,8 +50,59 @@ CREATE TABLE IF NOT EXISTS scripts (
     title TEXT NOT NULL,
     hook TEXT NOT NULL,
     scenes_json TEXT NOT NULL,
+    sections_json TEXT,
     total_word_count INTEGER NOT NULL,
     estimated_duration_seconds REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS research_dossiers (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    topic_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS research_sources (
+    id TEXT PRIMARY KEY,
+    dossier_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    final_url TEXT,
+    http_status INTEGER,
+    title TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    content_snapshot TEXT,
+    content_snapshot_path TEXT,
+    license_type TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    FOREIGN KEY (dossier_id) REFERENCES research_dossiers(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS claims (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    source_id TEXT,
+    statement TEXT NOT NULL,
+    verified INTEGER NOT NULL DEFAULT 0,
+    verdict TEXT NOT NULL,
+    confidence_score REAL,
+    cited_url TEXT,
+    cited_excerpt TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS fact_check_reports (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL UNIQUE,
+    verified_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    overall_verdict TEXT NOT NULL,
+    audit_summary TEXT NOT NULL,
     created_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
 );
@@ -183,12 +235,13 @@ def migrate_database(db_path: Path) -> None:
                         authority_score REAL NOT NULL,
                         estimated_cpm REAL,
                         rationale TEXT,
+                        score_breakdown_json TEXT,
                         created_at TEXT NOT NULL,
                         FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
                     );
 
-                    INSERT INTO topic_candidates_v2 (id, channel_id, keyword, opportunity_score, authority_score, estimated_cpm, rationale, created_at)
-                    SELECT id, channel_id, keyword, opportunity_score, authority_score, estimated_cpm, rationale, created_at
+                    INSERT INTO topic_candidates_v2 (id, channel_id, keyword, opportunity_score, authority_score, estimated_cpm, rationale, score_breakdown_json, created_at)
+                    SELECT id, channel_id, keyword, opportunity_score, authority_score, estimated_cpm, rationale, NULL, created_at
                     FROM topic_candidates;
 
                     DROP TABLE topic_candidates;
@@ -224,9 +277,23 @@ def migrate_database(db_path: Path) -> None:
             # 3. Ensure all other v2 tables exist
             conn.executescript(SCHEMA_V2_SQL)
 
+            # 4. Check if scripts table is missing sections_json
+            cursor.execute("PRAGMA table_info(scripts);")
+            script_cols = {row[1] for row in cursor.fetchall()}
+            if script_cols and "sections_json" not in script_cols:
+                conn.execute("ALTER TABLE scripts ADD COLUMN sections_json TEXT;")
+
             # Re-enable foreign keys and set version
             conn.execute("PRAGMA foreign_keys = ON;")
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.commit()
+        else:
+            # Ensure any new tables from v2 additions exist
+            conn.executescript(SCHEMA_V2_SQL)
+            cursor.execute("PRAGMA table_info(scripts);")
+            script_cols = {row[1] for row in cursor.fetchall()}
+            if script_cols and "sections_json" not in script_cols:
+                conn.execute("ALTER TABLE scripts ADD COLUMN sections_json TEXT;")
             conn.commit()
 
 
