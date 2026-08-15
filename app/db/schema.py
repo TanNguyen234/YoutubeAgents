@@ -142,7 +142,10 @@ CREATE TABLE IF NOT EXISTS state_transitions (
 
 
 def migrate_database(db_path: Path) -> None:
-    """Migrate SQLite database to the current schema version using user_version pragma."""
+    """Migrate SQLite database to the current schema version (v2).
+
+    Distinguishes between a truly empty database (0 tables) and a legacy Phase-3 database (user_version == 0 with tables).
+    """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -152,38 +155,76 @@ def migrate_database(db_path: Path) -> None:
         cursor.execute("PRAGMA user_version;")
         current_version = cursor.fetchone()[0]
 
-        if current_version == 0:
-            # Brand new database: apply full v2 schema
+        # Check existing table count
+        cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
+        user_table_count = cursor.fetchone()[0]
+
+        if current_version == 0 and user_table_count == 0:
+            # Truly empty/new database: apply full v2 schema directly
             conn.executescript(SCHEMA_V2_SQL)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()
             return
 
         if current_version < 2:
-            # Upgrade from v1 to v2:
-            # 1. Upgrade idempotency_keys table to composite (scope, key) PK and add expires_at
+            # Existing legacy database (either user_version == 0 with tables or user_version == 1):
             conn.execute("PRAGMA foreign_keys = OFF;")
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS idempotency_keys_v2 (
-                    key TEXT NOT NULL,
-                    scope TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    response TEXT,
-                    expires_at TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (scope, key)
-                );
 
-                INSERT INTO idempotency_keys_v2 (key, scope, status, response, expires_at, created_at, updated_at)
-                SELECT key, scope, status, response, NULL, created_at, updated_at
-                FROM idempotency_keys;
+            # 1. Migrate topic_candidates: remove NOT NULL / DEFAULT 10.0 on estimated_cpm
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='topic_candidates';")
+            if cursor.fetchone():
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS topic_candidates_v2 (
+                        id TEXT PRIMARY KEY,
+                        channel_id TEXT NOT NULL,
+                        keyword TEXT NOT NULL,
+                        opportunity_score REAL NOT NULL,
+                        authority_score REAL NOT NULL,
+                        estimated_cpm REAL,
+                        rationale TEXT,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+                    );
 
-                DROP TABLE idempotency_keys;
-                ALTER TABLE idempotency_keys_v2 RENAME TO idempotency_keys;
-                """
-            )
+                    INSERT INTO topic_candidates_v2 (id, channel_id, keyword, opportunity_score, authority_score, estimated_cpm, rationale, created_at)
+                    SELECT id, channel_id, keyword, opportunity_score, authority_score, estimated_cpm, rationale, created_at
+                    FROM topic_candidates;
+
+                    DROP TABLE topic_candidates;
+                    ALTER TABLE topic_candidates_v2 RENAME TO topic_candidates;
+                    """
+                )
+
+            # 2. Migrate idempotency_keys: composite (scope, key) PK and expires_at column
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='idempotency_keys';")
+            if cursor.fetchone():
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS idempotency_keys_v2 (
+                        key TEXT NOT NULL,
+                        scope TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        response TEXT,
+                        expires_at TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (scope, key)
+                    );
+
+                    INSERT INTO idempotency_keys_v2 (key, scope, status, response, expires_at, created_at, updated_at)
+                    SELECT key, scope, status, response, NULL, created_at, updated_at
+                    FROM idempotency_keys;
+
+                    DROP TABLE idempotency_keys;
+                    ALTER TABLE idempotency_keys_v2 RENAME TO idempotency_keys;
+                    """
+                )
+
+            # 3. Ensure all other v2 tables exist
+            conn.executescript(SCHEMA_V2_SQL)
+
+            # Re-enable foreign keys and set version
             conn.execute("PRAGMA foreign_keys = ON;")
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()
