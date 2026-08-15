@@ -83,4 +83,5 @@ python -c "import app; import config; print(app.__version__)"
 ## 5. Phase Status
 
 - **Phase 0**: Workspace Bootstrap & Engineering Contract — **COMPLETED**
-- **Phase 1**: (Pending next specification)
+- **Phase 1**: Reference Repositories Deep Audit & Architectural Decisions — **COMPLETED**
+- **Phase 2**: Antigravity Runtime & Reasoning Plane — **NOT STARTED**

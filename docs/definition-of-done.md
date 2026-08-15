@@ -12,7 +12,7 @@ A task is complete only when all of the following conditions are satisfied:
 2. **Test-Driven Verification**:
    - For behavioral additions or bug fixes, a focused test was written/updated and observed failing (**RED**).
    - The minimal implementation was written and observed passing (**GREEN**).
-   - All tests in the test suite pass with exit code 0.
+   - All tests in the test suite pass with exit code 0 and zero unresolved warnings.
 3. **No Unrequested Complexity (Ponytail / YAGNI)**:
    - No speculative abstractions, dead code, or redundant layers.
    - Standard library or existing helpers used where possible.
@@ -25,31 +25,33 @@ A task is complete only when all of the following conditions are satisfied:
 
 ---
 
-## 2. Phase-Level Definition of Done
+## 2. Phase-Level Definition of Done & Quality Gates
 
 A phase is officially complete and allows transitioning to the next phase ONLY when:
 
-- [ ] **Planner / Review Evidence**: Documented stable diff inspection and verification logs.
+- [ ] **Planner / Review Evidence**: Documented plan compliance, repository audit (if applicable), and stable diff inspection.
 - [ ] **Tests Executed**: Unit and integration suites run cleanly with exact commands recorded.
-- [ ] **Reviewer Result**: Architecture, copyright safeguards, error handling, and state contracts verified.
-- [ ] **Verifier Verdict**: Explicitly marked `PASS`.
+- [ ] **Reviewer Result**: Architecture, copyright safeguards, error handling, and state contracts reviewed with explicit findings.
+- [ ] **Verifier Verdict**: Formally evaluated and committed in `docs/phase-<N>-verification.md` with verdict `PASS`.
 - [ ] **Remaining Blockers**: Documented as `NONE` (or explicit deferrals approved by human).
 
 > [!CAUTION]
-> **Strict Gate Invariant**: If the verifier verdict is `FAIL` or if verification has not been performed, work on the next phase **CANNOT** proceed.
+> **Strict Gate Invariant**: If the verifier verdict is `FAIL`, `PARTIAL`, or if verification has not been committed to the repository, work on the next phase **CANNOT** proceed.
 
 ---
 
-## 3. Phase 0 Specific Done Criteria
+## 3. Phase-Specific Verification Rules
 
-Phase 0 (Workspace Bootstrap & Engineering Contract) is done when:
+### Phase 0: Workspace Bootstrap Exception
+- **Exception Rule**: Phase 0 establishes the initial workspace skeleton, contracts, and baseline configuration. Because no business logic or runtime features exist, smoke verification (`tests/test_smoke.py` passing with exit code 0) is sufficient evidence for initial workspace bootstrap.
 
-- [x] Clean Python project skeleton initialized (`app/`, `config/`, `docs/`, `tests/`, `scripts/`, `data/`, `output/`, `references/`).
-- [x] Project imports cleanly via Python (`import app`, `import config`).
-- [x] Pytest runs cleanly and exits with code 0 (`pytest`).
-- [x] Git repository initialized (`git init`).
-- [x] Engineering rules frozen in `AGENTS.md`.
-- [x] Project contract created in `docs/project-contract.md`.
-- [x] Definition of Done documented in `docs/definition-of-done.md`.
-- [x] No fake AI code, no premature feature logic, no external AI API wrappers.
-- [x] Execution stopped immediately after Phase 0.
+### Phase $\ge$ 1: Mandatory Committed Verification Artifact
+- For every phase from Phase 1 onward, a dedicated verification document `docs/phase-<N>-verification.md` MUST be committed to version control prior to marking the phase complete.
+- The verification document must explicitly record:
+  1. `Phase`: Phase number and title
+  2. `Planner`: Plan status and scope coverage
+  3. `Tests Executed`: Exact commands and output pass/fail summary
+  4. `Reviewer`: Detailed inspection results across security, data contracts, and anti-patterns
+  5. `Verifier Verdict`: `PASS` | `PARTIAL` | `FAIL`
+  6. `Known Limitations`: Explicit list of unexecuted live paths, mock boundaries, or static constraints
+  7. `Remaining Blockers`: `NONE` or documented blockers

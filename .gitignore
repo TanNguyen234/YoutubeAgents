@@ -42,7 +42,14 @@ venv.bak/
 .env.*.local
 *.pem
 *.key
+
+# Google / YouTube credentials
 client_secret*.json
+config/client_secret*.json
+oauth_token*.json
+config/oauth_token*.json
+credentials.json
+config/credentials.json
 oauth_credentials.json
 
 # Databases & Local Storage
