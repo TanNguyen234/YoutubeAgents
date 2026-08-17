@@ -1,8 +1,9 @@
 {
-  "phase": "4.2",
-  "title": "Phase 4.2 Real Autonomous Intelligence & Grounding Manifest",
-  "executed_at": "2026-08-15T16:19:30.273570+00:00",
-  "git_commit": "b741e83cf568f7b4f01d5c62d330ea944d0dc637",
+  "phase": "4.2.1",
+  "title": "Phase 4.2.1 Closure Real Autonomous Intelligence & Grounding Manifest",
+  "executed_at": "2026-08-17T11:47:32.278720+00:00",
+  "source_commit": "0e09a24e66c93156d32e04a651c9a1fc3073467a",
+  "git_commit": "0e09a24e66c93156d32e04a651c9a1fc3073467a",
   "backend": {
     "type": "AntigravityCLIBackend",
     "cli_binary": "agy",
@@ -40,7 +41,7 @@
       "failed_count": 0,
       "final_state": "VERIFIED",
       "quality_verdict": "PASSED",
-      "elapsed_seconds": 109.81,
+      "elapsed_seconds": 244.95,
       "evidence_artifact": "output\\phase4_evidence\\proj-real-01_evidence.json",
       "success": true
     },
@@ -56,7 +57,7 @@
           "url": "https://docs.python.org/3/library/asyncio.html",
           "final_url": "https://docs.python.org/3/library/asyncio.html",
           "http_status": 200,
-          "content_sha256": "54ca3d8a293ed114f3c1c6d36f0ff0610ab56ac2854ad415d19b3fd9b9dfc519",
+          "content_sha256": "bd8cb234dbff2c480c54f95e1ef85356b457551ad989d99679c0f0976b7139d3",
           "snapshot_chars": 3911
         }
       ],
@@ -65,7 +66,7 @@
       "failed_count": 0,
       "final_state": "VERIFIED",
       "quality_verdict": "PASSED",
-      "elapsed_seconds": 191.08,
+      "elapsed_seconds": 420.06,
       "evidence_artifact": "output\\phase4_evidence\\proj-real-02_evidence.json",
       "success": true
     },
@@ -85,12 +86,12 @@
           "snapshot_chars": 3276
         }
       ],
-      "claim_count": 4,
-      "verified_count": 4,
+      "claim_count": 5,
+      "verified_count": 5,
       "failed_count": 0,
       "final_state": "VERIFIED",
       "quality_verdict": "PASSED",
-      "elapsed_seconds": 182.05,
+      "elapsed_seconds": 544.9,
       "evidence_artifact": "output\\phase4_evidence\\proj-real-03_evidence.json",
       "success": true
     }
