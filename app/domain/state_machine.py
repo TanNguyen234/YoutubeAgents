@@ -66,6 +66,7 @@ ALLOWED_TRANSITIONS: Dict[VideoLifecycleState, Set[VideoLifecycleState]] = {
         VideoLifecycleState.BLOCKED,
     },
     VideoLifecycleState.READY_FOR_REVIEW: {
+        VideoLifecycleState.PRODUCING,  # media-only rerender, canonical narration unchanged
         VideoLifecycleState.APPROVED,
         VideoLifecycleState.REJECTED,
         VideoLifecycleState.FAILED,

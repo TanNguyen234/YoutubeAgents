@@ -53,7 +53,7 @@ def test_production_rejects_unverified_project(test_repo: SQLiteRepository, tmp_
     test_repo.update_project_state(project.id, to_state=VideoLifecycleState.SCRIPTED)
 
     pipeline = MediaProductionPipeline(repository=test_repo, base_output_dir=tmp_path)
-    with pytest.raises(MediaProductionError, match="VERIFIED state"):
+    with pytest.raises(MediaProductionError, match="Production requires project to be in VERIFIED"):
         pipeline.run_production(project_id="proj-unverified")
 
 

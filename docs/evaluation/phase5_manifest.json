@@ -1,17 +1,17 @@
 {
   "phase": "5",
   "title": "Phase 5 Real Media Factory, TTS, Subtitles, FFmpeg Rendering & Technical QA Manifest",
-  "executed_at": "2026-08-17T13:55:08.637439+00:00",
-  "source_commit": "ed5bb5596f09b735bbd1cdc047d627c889519897",
+  "executed_at": "2026-08-17T14:18:53.354443+00:00",
+  "source_commit": "128c4169735717c91ab9c1a6b0f8852d1a075d22",
   "project_id": "proj-sqlite-wal-01",
-  "verified_script_id": "scr-proj-sqlite-wal-01",
-  "canonical_narration_sha256": "26bf08d3fd066ca468324e435734de5150a4eea496a6947aed341d8aad29d07f",
-  "production_fingerprint": "a5baab22237691bc74b83d4c281503c736120303adfe6a7843fa30934bfa2e4c",
+  "verified_script_id": "sc-sqlite-wal-real-01",
+  "canonical_narration_sha256": "42233fefc65fd01394e440ec3957c23223e2ed33e630988dcbf1c4e389354d9f",
+  "production_fingerprint": "c9d4b3a15646241fcdc04afb3aa5c2386c31b8103fca829bddce1a04cfdaa8d6",
   "narration_provenance": {
-    "canonical_sha256": "26bf08d3fd066ca468324e435734de5150a4eea496a6947aed341d8aad29d07f",
-    "tts_input_sha256": "26bf08d3fd066ca468324e435734de5150a4eea496a6947aed341d8aad29d07f",
-    "subtitle_source_sha256": "26bf08d3fd066ca468324e435734de5150a4eea496a6947aed341d8aad29d07f",
-    "render_input_sha256": "26bf08d3fd066ca468324e435734de5150a4eea496a6947aed341d8aad29d07f",
+    "canonical_sha256": "42233fefc65fd01394e440ec3957c23223e2ed33e630988dcbf1c4e389354d9f",
+    "tts_input_sha256": "42233fefc65fd01394e440ec3957c23223e2ed33e630988dcbf1c4e389354d9f",
+    "subtitle_source_sha256": "42233fefc65fd01394e440ec3957c23223e2ed33e630988dcbf1c4e389354d9f",
+    "render_input_sha256": "42233fefc65fd01394e440ec3957c23223e2ed33e630988dcbf1c4e389354d9f",
     "provenance_verified": true
   },
   "tts": {
@@ -19,19 +19,19 @@
     "voice": "en-US-GuyNeural",
     "rate": "+0%",
     "pitch": "+0Hz",
-    "audio_sha256": "a7d01ec85f2d685e691f8a873e47acfa27c17c39e46f0aa253d5ee388fbfe31a",
-    "duration_seconds": 49.776
+    "audio_sha256": "59eacf2d811b5b81eab3fb16a6cc0cfae59aa6bea7736e780c7afef2d1672c53",
+    "duration_seconds": 32.088
   },
   "subtitles": {
     "format": "srt",
-    "sha256": "fc22155b82cd2b6239118e7376becfea6c3131ca2ea71585d86bb834dd9b6bb7",
-    "cue_count": 24
+    "sha256": "acd12074fc1e6578da0e88d559cbfd6bb01ea46a44e065c8f4de26fede10e08a",
+    "cue_count": 18
   },
   "render": {
     "ffmpeg_version": "ffmpeg version 8.0.1-essentials_build-www.gyan.dev Copyright (c) 2000-2025 the FFmpeg developers",
     "ffprobe_version": "ffprobe version 8.0.1-essentials_build-www.gyan.dev Copyright (c) 2007-2025 the FFmpeg developers",
-    "video_sha256": "415b69a60054d875cecb5917662f945af9e880177f4cf4a64499f15a7c753623",
-    "size_bytes": 3279204,
+    "video_sha256": "36c482b5edfed37c19ed826ff3a3f208ebd3f2006ccc4c053ca71fe8b87ac8dc",
+    "size_bytes": 2363052,
     "width": 1080,
     "height": 1920,
     "fps": 30.0,
@@ -40,10 +40,10 @@
     "pixel_format": "yuv420p"
   },
   "qa": {
-    "audio_duration": 49.78,
-    "video_duration": 49.77,
-    "duration_drift": 0.009,
-    "integrated_lufs": -14.96,
+    "audio_duration": 32.09,
+    "video_duration": 32.1,
+    "duration_drift": 0.012,
+    "integrated_lufs": -15.23,
     "status": "PASSED",
     "issues": []
   },

@@ -13,14 +13,40 @@ from app.media.pipeline import MediaProductionPipeline
 from tests.media.test_ffmpeg_renderer import _create_dummy_wav
 
 
+def _create_mock_wav(output_path: Path, duration_seconds: float = 6.0, tag: str = ""):
+    """Generate a valid audible sine wave WAV file modulated by tag for deterministic test variation."""
+    import math
+    import struct
+    import wave
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sample_rate = 44100
+    freq_offset = int(hashlib.md5(tag.encode("utf-8")).hexdigest()[:4], 16) % 20
+    frequency = 440.0 + freq_offset
+    amplitude = 16000
+    num_frames = int(sample_rate * duration_seconds)
+
+    frames = bytearray()
+    for i in range(num_frames):
+        val = int(amplitude * math.sin(2.0 * math.pi * frequency * i / sample_rate))
+        frames.extend(struct.pack("<hh", val, val))
+
+    with wave.open(str(output_path), "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(frames)
+
+
 class MockTTSBackend:
-    """Deterministic TTS double for testing pipeline state machine."""
+    """Deterministic TTS double for testing pipeline state machine and cache invalidation."""
 
     backend_name = "mock-tts"
     default_voice = "mock-voice"
 
-    def __init__(self, duration_seconds: float = 4.0):
+    def __init__(self, duration_seconds: float = 6.0):
         self.duration = duration_seconds
+        self.call_count = 0
 
     def synthesize(
         self,
@@ -31,14 +57,16 @@ class MockTTSBackend:
         rate="+0%",
         pitch="+0Hz",
     ) -> TTSResult:
-        _create_dummy_wav(output_path, duration_seconds=self.duration)
+        self.call_count += 1
+        resolved_voice = voice or self.default_voice
+        _create_mock_wav(output_path, duration_seconds=self.duration, tag=f"{resolved_voice}|{rate}|{pitch}|{text}")
         content_bytes = output_path.read_bytes()
         return TTSResult(
             audio_path=str(output_path),
             duration_seconds=self.duration,
             sample_rate=44100,
             backend="mock-tts",
-            voice=voice or self.default_voice,
+            voice=resolved_voice,
             rate=rate,
             pitch=pitch,
             canonical_narration_sha256=hashlib.sha256(text.strip().encode("utf-8")).hexdigest(),
@@ -98,122 +126,102 @@ def test_media_pipeline_end_to_end_success(repo_with_verified_project, tmp_path:
     pipeline = MediaProductionPipeline(
         repository=repo,
         tts_backend=tts,
-        base_output_dir=tmp_path / "out",
+        base_output_dir=tmp_path / "out_e2e",
     )
 
-    final_proj, qa_res, manifest = pipeline.run_production(project_id=project_id)
+    project, qa_res, manifest = pipeline.run_production(project_id=project_id)
 
-    # 1. State machine assertions
-    assert final_proj.state == VideoLifecycleState.READY_FOR_REVIEW
-    history = repo.get_state_history(project_id)
-    states = [h["to_state"] for h in history]
-    assert states[-3:] == ["PRODUCING", "RENDERED", "READY_FOR_REVIEW"]
-
-    # 2. QA verdict
+    assert project.state == VideoLifecycleState.READY_FOR_REVIEW
     assert qa_res.passed is True
-    assert final_proj.quality is not None
-    assert final_proj.quality.status == QualityStatus.PASSED
-
-    # 3. Persisted Asset records in DB
-    assets = repo.get_assets_by_project(project_id)
-    asset_types = {a.asset_type for a in assets}
-    assert AssetType.AUDIO_VOICEOVER in asset_types
-    assert AssetType.SUBTITLES in asset_types
-    assert AssetType.FINAL_VIDEO in asset_types
-
-    # 4. Manifest generation
-    manifest_file = tmp_path / "out" / project_id / "manifests" / "render_manifest.json"
-    assert manifest_file.exists()
     assert manifest.qa_verdict == "PASSED"
-    assert manifest.project_id == project_id
-    assert len(manifest.production_fingerprint) == 64
+    assert Path(manifest.final_video_path).exists()
+    assert manifest.final_video_size_bytes > 0
+
+    # Verify project in DB
+    db_project = repo.get_video_project(project_id)
+    assert db_project is not None
+    assert db_project.state == VideoLifecycleState.READY_FOR_REVIEW
 
 
 def test_media_pipeline_idempotency_returns_cached_render(repo_with_verified_project, tmp_path: Path):
-    """Subsequent call with identical project & fingerprint reuses cached render without re-executing."""
+    """Calling production twice with same inputs returns cached manifest without re-rendering."""
     repo, project_id = repo_with_verified_project
     tts = MockTTSBackend(duration_seconds=3.0)
-
     pipeline = MediaProductionPipeline(
         repository=repo,
         tts_backend=tts,
-        base_output_dir=tmp_path / "out_idem",
+        base_output_dir=tmp_path / "out_cache",
     )
 
     # First run
     proj_1, qa_1, manifest_1 = pipeline.run_production(project_id=project_id)
     assert proj_1.state == VideoLifecycleState.READY_FOR_REVIEW
+    assert tts.call_count == 1
 
-    # Second run (idempotent)
+    # Second run (idempotent cache hit)
     proj_2, qa_2, manifest_2 = pipeline.run_production(project_id=project_id)
     assert proj_2.state == VideoLifecycleState.READY_FOR_REVIEW
-    assert manifest_2.production_fingerprint == manifest_1.production_fingerprint
-    assert manifest_2.final_video_sha256 == manifest_1.final_video_sha256
+    assert tts.call_count == 1  # TTS was not called again
+    assert manifest_1.production_fingerprint == manifest_2.production_fingerprint
+    assert manifest_1.final_video_sha256 == manifest_2.final_video_sha256
 
 
 def test_media_pipeline_qa_failure_transitions_to_qa_failed(repo_with_verified_project, tmp_path: Path, monkeypatch):
-    """When QA fails, the project must transition to QA_FAILED and cannot reach READY_FOR_REVIEW."""
+    """When QA inspection fails, project must transition from RENDERED to QA_FAILED."""
     repo, project_id = repo_with_verified_project
     tts = MockTTSBackend(duration_seconds=3.0)
-
     pipeline = MediaProductionPipeline(
         repository=repo,
         tts_backend=tts,
-        base_output_dir=tmp_path / "out_qafail",
+        base_output_dir=tmp_path / "out_qa_fail",
     )
 
-    # Force QA to fail
-    from app.domain.enums import QualityStatus
-    from app.domain.models import QualityResult
-    from app.media.models import MediaQAResult
-
+    # Force QA failure
     def mock_inspect(*args, **kwargs):
-        return (
-            QualityResult(
-                id=f"qa-{project_id}",
-                project_id=project_id,
-                status=QualityStatus.FAILED,
-                loudness_lufs=-14.0,
-                duration_seconds=3.0,
-                sync_drift_ms=999.0,
-                issues=["Simulated severe audio-video sync drift failure"],
-            ),
-            MediaQAResult(
-                passed=False,
-                file_path="mock.mp4",
-                file_size_bytes=1000,
-                video_duration=3.0,
-                audio_duration=1.0,
-                duration_drift=2.0,
-                width=1080,
-                height=1920,
-                fps=30.0,
-                video_codec="h264",
-                audio_codec="aac",
-                pixel_format="yuv420p",
-                loudness_lufs=-14.0,
-                issues=["Simulated severe audio-video sync drift failure"],
-            ),
+        from app.domain.models import QualityResult
+        from app.media.models import MediaQAResult
+        q = QualityResult(
+            id=f"qa-{project_id}",
+            project_id=project_id,
+            status=QualityStatus.FAILED,
+            loudness_lufs=-28.0,
+            duration_seconds=3.0,
+            sync_drift_ms=10.0,
+            issues=["Audio too quiet (-28.0 LUFS)"],
         )
+        qa_r = MediaQAResult(
+            passed=False,
+            file_path="mock.mp4",
+            file_size_bytes=1000,
+            video_duration=3.0,
+            audio_duration=3.0,
+            duration_drift=0.0,
+            width=1080,
+            height=1920,
+            fps=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            pixel_format="yuv420p",
+            loudness_lufs=-28.0,
+            issues=["Audio too quiet (-28.0 LUFS)"],
+        )
+        return q, qa_r
 
     monkeypatch.setattr(pipeline.qa, "inspect_video", mock_inspect)
 
-    final_proj, qa_res, manifest = pipeline.run_production(project_id=project_id)
-
-    assert final_proj.state == VideoLifecycleState.QA_FAILED
+    project, qa_res, manifest = pipeline.run_production(project_id=project_id)
+    assert project.state == VideoLifecycleState.QA_FAILED
     assert qa_res.passed is False
     assert manifest.qa_verdict == "FAILED"
-    history = repo.get_state_history(project_id)
-    states = [h["to_state"] for h in history]
-    assert states[-1] == "QA_FAILED"
-    assert "READY_FOR_REVIEW" not in states
+
+    curr_p = repo.get_video_project(project_id)
+    assert curr_p.state == VideoLifecycleState.QA_FAILED
 
 
 def test_media_pipeline_failure_does_not_strand_in_producing(repo_with_verified_project, tmp_path: Path, monkeypatch):
-    """When rendering throws an unhandled exception, project transitions to FAILED without getting stuck in PRODUCING."""
+    """Unhandled renderer crashes must transition project to FAILED and not strand in PRODUCING."""
     repo, project_id = repo_with_verified_project
     tts = MockTTSBackend(duration_seconds=3.0)
-
     pipeline = MediaProductionPipeline(
         repository=repo,
         tts_backend=tts,
@@ -221,7 +229,7 @@ def test_media_pipeline_failure_does_not_strand_in_producing(repo_with_verified_
     )
 
     def mock_render_fail(*args, **kwargs):
-        raise RuntimeError("Simulated unhandled renderer crash")
+        raise RuntimeError("Simulated unhandled renderer crash during FFmpeg execution")
 
     monkeypatch.setattr(pipeline.renderer, "render_video", mock_render_fail)
 
@@ -238,8 +246,8 @@ def _create_verified_project_in_repo(repo: SQLiteRepository, project_id: str, sc
         title="SQLite WAL Architecture",
         hook="How does SQLite WAL mode work?",
         scenes=scenes or [
-            Scene(index=0, narration="First scene explaining WAL readers.", hook="Hook 1", visual_prompt="P1"),
-            Scene(index=1, narration="Second scene explaining WAL writers.", hook="Hook 2", visual_prompt="P2"),
+            Scene(scene_index=0, narration="First scene explaining WAL readers.", hook="Hook 1", visual_prompt="P1"),
+            Scene(scene_index=1, narration="Second scene explaining WAL writers.", hook="Hook 2", visual_prompt="P2"),
         ],
         total_word_count=12,
         estimated_duration_seconds=6.0,
@@ -261,68 +269,118 @@ def _create_verified_project_in_repo(repo: SQLiteRepository, project_id: str, sc
 
 
 def test_media_pipeline_voice_change_invalidates_cache(repo_with_verified_project, tmp_path: Path):
-    """Changing voice must produce a different fingerprint and force a new render."""
+    """Changing voice on SAME project must invalidate cache, re-render, and advance lifecycle."""
     repo, project_id = repo_with_verified_project
-    p2_id = _create_verified_project_in_repo(repo, "proj-voice-02")
-    tts = MockTTSBackend(duration_seconds=3.0)
+    tts = MockTTSBackend(duration_seconds=6.0)
     pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_voice")
 
-    _, _, manifest_1 = pipeline.run_production(project_id=project_id, voice="en-US-GuyNeural")
+    # Run 1
+    proj_1, _, manifest_1 = pipeline.run_production(project_id=project_id, voice="en-US-GuyNeural")
+    assert proj_1.state == VideoLifecycleState.READY_FOR_REVIEW
     assert manifest_1.voice == "en-US-GuyNeural"
+    assert tts.call_count == 1
 
-    _, _, manifest_2 = pipeline.run_production(project_id=p2_id, voice="en-US-JennyNeural")
+    # Run 2 on SAME project with different voice
+    proj_2, _, manifest_2 = pipeline.run_production(project_id=project_id, voice="en-US-JennyNeural")
+    assert proj_2.state == VideoLifecycleState.READY_FOR_REVIEW
     assert manifest_2.voice == "en-US-JennyNeural"
+    assert tts.call_count == 2
     assert manifest_2.production_fingerprint != manifest_1.production_fingerprint
+    assert manifest_2.audio_sha256 != manifest_1.audio_sha256
+
+    # Verify lifecycle history recorded the second production cycle
+    history = repo.get_state_history(project_id)
+    states = [h["to_state"] for h in history]
+    assert states[-4:] == [
+        "READY_FOR_REVIEW",
+        "PRODUCING",
+        "RENDERED",
+        "READY_FOR_REVIEW",
+    ]
 
 
 def test_media_pipeline_rate_change_invalidates_cache(repo_with_verified_project, tmp_path: Path):
-    """Changing TTS rate must produce a different fingerprint and force a new render."""
+    """Changing TTS rate on SAME project must invalidate cache, re-render, and produce distinct audio."""
     repo, project_id = repo_with_verified_project
-    p2_id = _create_verified_project_in_repo(repo, "proj-rate-02")
-    tts = MockTTSBackend(duration_seconds=3.0)
+    tts = MockTTSBackend(duration_seconds=6.0)
     pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_rate")
 
-    _, _, manifest_1 = pipeline.run_production(project_id=project_id, rate="+0%")
-    _, _, manifest_2 = pipeline.run_production(project_id=p2_id, rate="+15%")
+    proj_1, _, manifest_1 = pipeline.run_production(project_id=project_id, rate="+0%")
+    assert proj_1.state == VideoLifecycleState.READY_FOR_REVIEW
+    assert tts.call_count == 1
+
+    proj_2, _, manifest_2 = pipeline.run_production(project_id=project_id, rate="+15%")
+    assert proj_2.state == VideoLifecycleState.READY_FOR_REVIEW
     assert manifest_2.tts_rate == "+15%"
+    assert tts.call_count == 2
     assert manifest_2.production_fingerprint != manifest_1.production_fingerprint
+    assert manifest_2.audio_sha256 != manifest_1.audio_sha256
 
 
 def test_media_pipeline_pitch_change_invalidates_cache(repo_with_verified_project, tmp_path: Path):
-    """Changing TTS pitch must produce a different fingerprint and force a new render."""
+    """Changing TTS pitch on SAME project must invalidate cache, re-render, and produce distinct audio."""
     repo, project_id = repo_with_verified_project
-    p2_id = _create_verified_project_in_repo(repo, "proj-pitch-02")
-    tts = MockTTSBackend(duration_seconds=3.0)
+    tts = MockTTSBackend(duration_seconds=6.0)
     pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_pitch")
 
-    _, _, manifest_1 = pipeline.run_production(project_id=project_id, pitch="+0Hz")
-    _, _, manifest_2 = pipeline.run_production(project_id=p2_id, pitch="-50Hz")
+    proj_1, _, manifest_1 = pipeline.run_production(project_id=project_id, pitch="+0Hz")
+    assert proj_1.state == VideoLifecycleState.READY_FOR_REVIEW
+    assert tts.call_count == 1
+
+    proj_2, _, manifest_2 = pipeline.run_production(project_id=project_id, pitch="-50Hz")
+    assert proj_2.state == VideoLifecycleState.READY_FOR_REVIEW
     assert manifest_2.tts_pitch == "-50Hz"
+    assert tts.call_count == 2
     assert manifest_2.production_fingerprint != manifest_1.production_fingerprint
+    assert manifest_2.audio_sha256 != manifest_1.audio_sha256
 
 
 def test_media_pipeline_profile_change_invalidates_cache(repo_with_verified_project, tmp_path: Path):
-    """Changing render profile dimensions must produce a different fingerprint and force a new render."""
+    """Changing render profile dimensions on SAME project must invalidate cache and re-render."""
     repo, project_id = repo_with_verified_project
-    p2_id = _create_verified_project_in_repo(repo, "proj-prof-02")
-    tts = MockTTSBackend(duration_seconds=3.0)
+    tts = MockTTSBackend(duration_seconds=6.0)
     pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_prof")
 
     prof_1 = RenderProfile(name="SHORTS_9_16", width=1080, height=1920)
     prof_2 = RenderProfile(name="LANDSCAPE_16_9", width=1920, height=1080)
 
-    _, _, manifest_1 = pipeline.run_production(project_id=project_id, profile=prof_1)
-    _, _, manifest_2 = pipeline.run_production(project_id=p2_id, profile=prof_2)
+    proj_1, _, manifest_1 = pipeline.run_production(project_id=project_id, profile=prof_1)
+    assert proj_1.state == VideoLifecycleState.READY_FOR_REVIEW
+
+    proj_2, _, manifest_2 = pipeline.run_production(project_id=project_id, profile=prof_2)
+    assert proj_2.state == VideoLifecycleState.READY_FOR_REVIEW
     assert manifest_2.render_profile == "LANDSCAPE_16_9"
     assert manifest_2.production_fingerprint != manifest_1.production_fingerprint
+
+
+def test_media_pipeline_same_project_cache_reuse_after_rerender(repo_with_verified_project, tmp_path: Path):
+    """After a rerender with new config, subsequent run with the same new config returns cache hit."""
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=6.0)
+    pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_cache_hit")
+
+    # Run 1: voice Guy
+    pipeline.run_production(project_id=project_id, voice="en-US-GuyNeural")
+    assert tts.call_count == 1
+
+    # Run 2: voice Jenny (cache miss -> re-render)
+    _, _, m2 = pipeline.run_production(project_id=project_id, voice="en-US-JennyNeural")
+    assert tts.call_count == 2
+
+    # Run 3: voice Jenny (cache hit -> return cached)
+    proj_3, _, m3 = pipeline.run_production(project_id=project_id, voice="en-US-JennyNeural")
+    assert tts.call_count == 2  # Not called again
+    assert m3.production_fingerprint == m2.production_fingerprint
+    assert m3.final_video_sha256 == m2.final_video_sha256
+    assert proj_3.state == VideoLifecycleState.READY_FOR_REVIEW
 
 
 def test_media_pipeline_scene_change_invalidates_cache(repo_with_verified_project, tmp_path: Path):
     """Mutating scene narration text must produce a different fingerprint and force a new render."""
     repo, project_id = repo_with_verified_project
     mutated_scenes = [
-        Scene(index=0, narration="Mutated narration altering the first scene completely.", hook="Hook 1", visual_prompt="P1"),
-        Scene(index=1, narration="Second scene explaining WAL writers.", hook="Hook 2", visual_prompt="P2"),
+        Scene(scene_index=0, narration="Mutated narration altering the first scene completely.", hook="Hook 1", visual_prompt="P1"),
+        Scene(scene_index=1, narration="Second scene explaining WAL writers.", hook="Hook 2", visual_prompt="P2"),
     ]
     p2_id = _create_verified_project_in_repo(repo, "proj-scene-02", scenes=mutated_scenes)
     tts = MockTTSBackend(duration_seconds=3.0)

@@ -116,3 +116,10 @@ def test_failure_and_blocked_can_be_reached_from_active_states() -> None:
         sm_block = LifecycleStateMachine(current_state=active_state)
         sm_block.transition_to(VideoLifecycleState.BLOCKED, reason="Missing API quota")
         assert sm_block.current_state == VideoLifecycleState.BLOCKED
+
+
+def test_ready_for_review_to_producing_media_rerender() -> None:
+    """Verify that READY_FOR_REVIEW can transition to PRODUCING for media-only rerenders."""
+    sm = LifecycleStateMachine(current_state=VideoLifecycleState.READY_FOR_REVIEW)
+    sm.transition_to(VideoLifecycleState.PRODUCING, reason="Media rerender requested with new voice/profile")
+    assert sm.current_state == VideoLifecycleState.PRODUCING

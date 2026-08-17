@@ -78,17 +78,24 @@ class MediaProductionPipeline:
     ) -> Tuple[VideoProject, MediaQAResult, RenderManifest]:
         """Execute full media production for a VERIFIED project with strict idempotency."""
         render_prof = profile or RenderProfile()
+        self.renderer.profile = render_prof
+        self.qa.profile = render_prof
+        if hasattr(self.planner, "visual_factory") and self.planner.visual_factory:
+            self.planner.visual_factory.width = render_prof.width
+            self.planner.visual_factory.height = render_prof.height
 
         # 1. Fetch project and assert preconditions
         project = self.repo.get_video_project(project_id)
         if not project:
             raise MediaProductionError(f"Project '{project_id}' not found in database.")
 
-        if project.state != VideoLifecycleState.VERIFIED and not (
-            project.state == VideoLifecycleState.READY_FOR_REVIEW and not force_rebuild
+        if project.state not in (
+            VideoLifecycleState.VERIFIED,
+            VideoLifecycleState.READY_FOR_REVIEW,
+            VideoLifecycleState.QA_FAILED,
         ):
             raise MediaProductionError(
-                f"Production requires project to be in VERIFIED state, but '{project_id}' is in {project.state.value}."
+                f"Production requires project to be in VERIFIED, READY_FOR_REVIEW, or QA_FAILED state, but '{project_id}' is in {project.state.value}."
             )
 
         if not project.script:
@@ -127,12 +134,12 @@ class MediaProductionPipeline:
         if not caps.is_production_ready:
             # Block cleanly without corrupting lifecycle
             blocker_msg = f"Media capabilities unmet: {', '.join(caps.blockers)}"
-            if project.state == VideoLifecycleState.VERIFIED:
+            if project.state in (VideoLifecycleState.VERIFIED, VideoLifecycleState.READY_FOR_REVIEW):
                 self.repo.update_project_state(
                     project_id=project_id,
                     to_state=VideoLifecycleState.BLOCKED,
                     reason=blocker_msg,
-                    expected_current_state=VideoLifecycleState.VERIFIED,
+                    expected_current_state=project.state,
                 )
             raise MediaProductionBlockerError(blocker_msg)
 
@@ -206,13 +213,27 @@ class MediaProductionPipeline:
                 # If cache validation fails, proceed with full rebuild
                 pass
 
-        # 6. Advance State Machine: VERIFIED -> PRODUCING
+        # 6. Advance State Machine: VERIFIED, READY_FOR_REVIEW, or QA_FAILED -> PRODUCING
         if project.state == VideoLifecycleState.VERIFIED:
             self.repo.update_project_state(
                 project_id=project_id,
                 to_state=VideoLifecycleState.PRODUCING,
                 reason="Starting media production, TTS, visual card composition, and rendering",
                 expected_current_state=VideoLifecycleState.VERIFIED,
+            )
+        elif project.state == VideoLifecycleState.READY_FOR_REVIEW:
+            self.repo.update_project_state(
+                project_id=project_id,
+                to_state=VideoLifecycleState.PRODUCING,
+                reason="Re-rendering media for project (cache miss or parameter update)",
+                expected_current_state=VideoLifecycleState.READY_FOR_REVIEW,
+            )
+        elif project.state == VideoLifecycleState.QA_FAILED:
+            self.repo.update_project_state(
+                project_id=project_id,
+                to_state=VideoLifecycleState.PRODUCING,
+                reason="Re-rendering media for project after previous QA failure",
+                expected_current_state=VideoLifecycleState.QA_FAILED,
             )
 
         created_assets: List[Asset] = []

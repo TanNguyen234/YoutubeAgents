@@ -94,7 +94,7 @@ class MediaQAInspector:
                     id=f"qa-{project_id}",
                     project_id=project_id,
                     status=QualityStatus.FAILED,
-                    loudness_lufs=-70.0,
+                    loudness_lufs=-999.0,
                     duration_seconds=0.0,
                     sync_drift_ms=0.0,
                     issues=issues,
@@ -112,7 +112,7 @@ class MediaQAInspector:
                     video_codec="none",
                     audio_codec="none",
                     pixel_format="none",
-                    loudness_lufs=-70.0,
+                    loudness_lufs=-999.0,
                     issues=issues,
                 ),
             )
