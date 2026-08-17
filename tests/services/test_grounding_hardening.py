@@ -373,3 +373,258 @@ def test_pipeline_persists_evidence_before_verified(tmp_path: Path):
     assert loaded_report is not None
     assert loaded_report.overall_verdict == QualityStatus.PASSED
     assert len(loaded_report.claims) >= 1
+
+
+# --- Phase 4.2.1 Closure Regression Tests ---
+
+def test_unverified_fact_in_scene_narration_audited():
+    """An ungrounded fact hidden strictly in a scene's narration must be present in canonical narration and audited."""
+    src = ResearchSource(
+        id="src-01",
+        url="https://sqlite.org/wal.html",
+        title="SQLite WAL",
+        content_sha256="abc",
+        content_snapshot="In SQLite WAL mode, readers do not block writers and writers do not block readers.",
+    )
+    dossier = ResearchDossier(id="dos-01", topic_id="top-01", sources=[src], summary="WAL summary")
+
+    # The ungrounded statement is placed strictly inside scene 2 narration
+    sections = ScriptSections(
+        hook="How does SQLite achieve high concurrency?",
+        intro="By using Write-Ahead Logging mode.",
+        segments=[
+            Scene(index=0, narration="Readers and writers run concurrently without blocking."),
+            Scene(index=1, narration="SQLite was secretly created in Rust on Mars in 1850."),
+        ],
+        cta="Subscribe for more database internals.",
+    )
+
+    # Assert canonical voiceover includes the scene 2 narration
+    assert "SQLite was secretly created in Rust on Mars in 1850." in sections.voiceover_text
+
+    script = Script(
+        id="scr-01",
+        title="SQLite Concurrency",
+        hook=sections.hook,
+        scenes=sections.segments,
+        total_word_count=100,
+        estimated_duration_seconds=30.0,
+        sections=sections,
+    )
+
+    extractor = ClaimExtractor(backend=MockReasoningBackend())
+    extracted_claims = extractor.extract_from_script(script)
+    statements = [c.statement for c in extracted_claims]
+    assert any("Mars" in s or "Rust" in s for s in statements)
+
+
+def test_stage_5_failure_transitions_to_failed(tmp_path: Path):
+    """If an error occurs during Stage 5 (e.g. empty voiceover / extraction failure), state transitions to FAILED."""
+    db_file = tmp_path / "stage5_fail.db"
+    repo = SQLiteRepository(db_file)
+
+    channel = Channel(
+        id="chan-fail-01",
+        title="Database Engineering",
+        handle="@dbeng",
+        niche="Databases",
+        target_audience="Engineers",
+    )
+    repo.save_channel(channel)
+
+    dossier = ResearchDossier(
+        id="dos-01",
+        topic_id="top-01",
+        sources=[ResearchSource(id="s1", url="https://example.com", title="Ex", content_sha256="123", content_snapshot="Text")],
+        summary="Summary",
+    )
+
+    # Empty sections to induce extraction error
+    empty_sections = ScriptSections(
+        hook="",
+        intro="",
+        segments=[],
+        cta="",
+        voiceover_text="",
+    )
+
+    def mock_handler(prompt: str, schema_cls: type) -> BaseModel:
+        if schema_cls == TopicEvaluationOutput:
+            return TopicEvaluationOutput(
+                demand=9.0,
+                freshness=8.0,
+                competition=7.0,
+                channel_fit=9.0,
+                originality=8.0,
+                evidence_quality=9.0,
+                production_feasibility=9.0,
+                rationale="Test rationale",
+                score_reasons={"demand": "High interest"},
+            )
+        if schema_cls == ScriptSections:
+            return empty_sections
+        return schema_cls.model_construct()
+
+    mock_backend = MockReasoningBackend(handler=mock_handler)
+
+    class InjectedResearchAgent:
+        def build_dossier_from_urls(self, urls, topic_id, summary_prompt=None):
+            return dossier
+
+    pipeline = BrainPipeline(
+        repo=repo,
+        backend=mock_backend,
+        research_agent=InjectedResearchAgent(),
+    )
+
+    with pytest.raises(Exception):
+        pipeline.run_stage_1_to_5(
+            project_id="proj-stage5-fail",
+            channel=channel,
+            keyword="Failing Stage 5",
+            seed_urls=["https://example.com"],
+        )
+
+    # Verify project did NOT remain stuck in SCRIPTED
+    proj = repo.get_video_project("proj-stage5-fail")
+    assert proj is not None
+    assert proj.state == VideoLifecycleState.FAILED
+
+
+def test_rewrite_and_restart_persists_only_final_authoritative_report(tmp_path: Path):
+    """When a script rewrite occurs, persisted claims/counts must reflect exactly the final passed report upon DB restart."""
+    db_file = tmp_path / "rewrite_restart.db"
+    repo1 = SQLiteRepository(db_file)
+
+    channel = Channel(
+        id="chan-rew-01",
+        title="Async Python",
+        handle="@asyncpy",
+        niche="Python",
+        target_audience="Devs",
+    )
+    repo1.save_channel(channel)
+
+    src = ResearchSource(
+        id="src-01",
+        url="https://docs.python.org/3/library/asyncio.html",
+        title="Asyncio Docs",
+        content_sha256="hash123",
+        content_snapshot="asyncio is a library to write concurrent code using the async/await syntax.",
+    )
+    dossier = ResearchDossier(id="dos-01", topic_id="top-01", sources=[src], summary="Asyncio Summary")
+
+    sections_v1 = ScriptSections(
+        hook="Why use asyncio?",
+        intro="Asyncio allows writing concurrent code using async/await syntax.",
+        segments=[Scene(index=0, narration="Asyncio makes your CPU 100 times faster instantly.")],
+        cta="Subscribe!",
+    )
+    sections_v2 = ScriptSections(
+        hook="Why use asyncio?",
+        intro="Asyncio allows writing concurrent code using async/await syntax.",
+        segments=[Scene(index=0, narration="Asyncio is a library to write concurrent code using the async/await syntax.")],
+        cta="Subscribe!",
+    )
+
+    call_count = {"entail": 0}
+
+    def mock_handler(prompt: str, schema_cls: type) -> BaseModel:
+        if schema_cls == TopicEvaluationOutput:
+            return TopicEvaluationOutput(
+                demand=9.0,
+                freshness=8.0,
+                competition=7.0,
+                channel_fit=9.0,
+                originality=8.0,
+                evidence_quality=9.0,
+                production_feasibility=9.0,
+                rationale="Test rationale",
+                score_reasons={"demand": "High interest"},
+            )
+        if schema_cls == ScriptSections:
+            return sections_v1 if call_count["entail"] == 0 else sections_v2
+        if schema_cls == ClaimEntailmentOutput:
+            call_count["entail"] += 1
+            if "100 times faster" in prompt:
+                return ClaimEntailmentOutput(
+                    is_supported=False,
+                    confidence=0.1,
+                    verdict=ClaimVerificationVerdict.REMOVE,
+                    cited_url="https://docs.python.org/3/library/asyncio.html",
+                    cited_excerpt="async/await syntax",
+                    notes="Unsupported assertion",
+                )
+            else:
+                return ClaimEntailmentOutput(
+                    is_supported=True,
+                    confidence=0.95,
+                    verdict=ClaimVerificationVerdict.VERIFIED,
+                    cited_url="https://docs.python.org/3/library/asyncio.html",
+                    cited_excerpt="asyncio is a library to write concurrent code using the async/await syntax",
+                    notes="Verified by docs",
+                )
+        return schema_cls.model_construct()
+
+    class InjectedResearchAgent:
+        def build_dossier_from_urls(self, urls, topic_id, summary_prompt=None):
+            return dossier
+
+    pipeline = BrainPipeline(
+        repo=repo1,
+        backend=MockReasoningBackend(handler=mock_handler),
+        research_agent=InjectedResearchAgent(),
+    )
+
+    proj, report = pipeline.run_stage_1_to_5(
+        project_id="proj-rewrite-restart",
+        channel=channel,
+        keyword="Asyncio Concurrency",
+        seed_urls=["https://docs.python.org/3/library/asyncio.html"],
+        max_rewrite_attempts=1,
+    )
+
+    assert proj.state == VideoLifecycleState.VERIFIED
+    assert report.overall_verdict == QualityStatus.PASSED
+
+    # Restart repository and check authoritative persistence
+    repo2 = SQLiteRepository(db_file)
+    reloaded_report = repo2.get_fact_check_report("proj-rewrite-restart")
+    assert reloaded_report is not None
+    assert reloaded_report.overall_verdict == QualityStatus.PASSED
+    assert reloaded_report.failed_count == 0
+    # Must NOT have retained orphaned unverified claims from attempt 1
+    assert all(c.verified for c in reloaded_report.claims)
+    assert len(reloaded_report.claims) == reloaded_report.verified_count
+
+
+def test_cited_source_resolution_equality_only():
+    """_resolve_cited_source must strictly match normalized full URL and reject substring/prefix containment."""
+    src = ResearchSource(
+        id="src-01",
+        url="https://sqlite.org/wal.html",
+        final_url="https://sqlite.org/wal.html",
+        title="SQLite WAL",
+        content_sha256="abc",
+        content_snapshot="Content",
+    )
+    dossier = ResearchDossier(id="dos-01", topic_id="top-01", sources=[src], summary="Summary")
+    checker = FactChecker()
+
+    # Exact match (with case/trailing slash tolerance)
+    assert checker._resolve_cited_source("https://sqlite.org/wal.html", dossier) == src
+    assert checker._resolve_cited_source("HTTPS://SQLITE.ORG/WAL.HTML/", dossier) == src
+
+    # Prefix or substring match must NOT resolve
+    assert checker._resolve_cited_source("https://sqlite.org", dossier) is None
+    assert checker._resolve_cited_source("https://sqlite.org/wal", dossier) is None
+    assert checker._resolve_cited_source("https://sqlite.org/wal.html?param=1", dossier) is None
+
+
+def test_fact_check_report_empty_claims_never_passed():
+    """An audit report with empty claims must resolve to FAILED, never PASSED."""
+    checker = FactChecker()
+    report = checker.build_audit_report("proj-empty", [])
+    assert report.overall_verdict == QualityStatus.FAILED
+    assert report.verified_count == 0
+    assert report.failed_count == 0

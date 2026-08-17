@@ -43,19 +43,26 @@ class FactChecker:
 
         return None
 
+    @staticmethod
+    def _normalize_url(url: Optional[str]) -> str:
+        if not url:
+            return ""
+        u = url.strip()
+        while u.endswith("/"):
+            u = u[:-1]
+        return u.lower()
+
     def _resolve_cited_source(self, cited_url: Optional[str], dossier: ResearchDossier) -> Optional[ResearchSource]:
-        """Resolve cited URL to an exact ResearchSource in the dossier."""
+        """Resolve cited URL to an exact ResearchSource in the dossier via strict normalized equality."""
         if not cited_url or cited_url.strip().upper() == "NONE":
             return None
-        clean_url = cited_url.strip().rstrip("/").lower()
+        clean_url = self._normalize_url(cited_url)
+        if not clean_url:
+            return None
         for src in dossier.sources:
-            src_u = (src.url or "").strip().rstrip("/").lower()
-            src_f = (src.final_url or "").strip().rstrip("/").lower()
+            src_u = self._normalize_url(src.url)
+            src_f = self._normalize_url(src.final_url)
             if clean_url == src_u or clean_url == src_f:
-                return src
-            if src_u and (clean_url in src_u or src_u in clean_url):
-                return src
-            if src_f and (clean_url in src_f or src_f in clean_url):
                 return src
         return None
 
@@ -213,9 +220,21 @@ AUDIT INSTRUCTIONS:
 
     def build_audit_report(self, project_id: str, claims: List[Claim]) -> FactCheckReport:
         """Construct a FactCheckReport from an already-verified list of claims."""
+        if not claims or len(claims) == 0:
+            return FactCheckReport(
+                id=f"fcr-{project_id}",
+                project_id=project_id,
+                claims=[],
+                verified_count=0,
+                failed_count=0,
+                overall_verdict=QualityStatus.FAILED,
+                audit_summary="No claims evaluated. An empty claims audit cannot produce a PASSED verdict.",
+                created_at=datetime.now(timezone.utc),
+            )
+
         verified_count = sum(1 for c in claims if c.verified)
         failed_count = len(claims) - verified_count
-        overall_verdict = QualityStatus.PASSED if failed_count == 0 else QualityStatus.FAILED
+        overall_verdict = QualityStatus.PASSED if (failed_count == 0 and verified_count > 0) else QualityStatus.FAILED
 
         summary_lines = [f"Evaluated {len(claims)} claim(s): {verified_count} verified, {failed_count} failed."]
         for c in claims:

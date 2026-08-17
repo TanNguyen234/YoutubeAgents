@@ -418,10 +418,12 @@ class SQLiteRepository:
                 INSERT INTO fact_check_reports (id, project_id, verified_count, failed_count, overall_verdict, audit_summary, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id) DO UPDATE SET
+                    id=excluded.id,
                     verified_count=excluded.verified_count,
                     failed_count=excluded.failed_count,
                     overall_verdict=excluded.overall_verdict,
-                    audit_summary=excluded.audit_summary;
+                    audit_summary=excluded.audit_summary,
+                    created_at=excluded.created_at;
                 """,
                 (
                     report.id,
@@ -433,19 +435,14 @@ class SQLiteRepository:
                     report.created_at.isoformat(),
                 ),
             )
+            # Transactionally replace project's claims to guarantee exact parity with final report
+            conn.execute("DELETE FROM claims WHERE project_id = ?", (report.project_id,))
             for claim in report.claims:
                 now_iso = datetime.now(timezone.utc).isoformat()
                 conn.execute(
                     """
                     INSERT INTO claims (id, project_id, source_id, statement, verified, verdict, confidence_score, cited_url, cited_excerpt, notes, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        verified=excluded.verified,
-                        verdict=excluded.verdict,
-                        confidence_score=excluded.confidence_score,
-                        cited_url=excluded.cited_url,
-                        cited_excerpt=excluded.cited_excerpt,
-                        notes=excluded.notes;
                     """,
                     (
                         claim.id,

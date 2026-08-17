@@ -27,18 +27,15 @@ class ClaimExtractor:
 
     def get_audit_text(self, script: Script) -> str:
         """Extract the full contiguous spoken voiceover text to be audited."""
+        if hasattr(script, "get_canonical_narration"):
+            canonical = script.get_canonical_narration()
+            if canonical.strip():
+                return canonical.strip()
         if script.sections and getattr(script.sections, "voiceover_text", None) and script.sections.voiceover_text.strip():
             return script.sections.voiceover_text.strip()
-        if getattr(script, "voiceover_text", None) and script.voiceover_text.strip():
-            return script.voiceover_text.strip()
-        if script.sections:
-            parts = [script.sections.hook, script.sections.intro]
-            parts.extend(s.narration for s in script.sections.segments)
-            parts.append(script.sections.cta)
-            return " ".join(p.strip() for p in parts if p and p.strip())
         if script.scenes:
-            parts = [s.narration for s in script.scenes]
-            return " ".join(p.strip() for p in parts if p and p.strip())
+            parts = [s.narration for s in script.scenes if s.narration]
+            return " ".join(p.strip() for p in parts if p.strip())
         return ""
 
     def extract_from_script(self, script: Script) -> List[Claim]:

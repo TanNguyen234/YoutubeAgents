@@ -14,42 +14,20 @@ from app.db.schema import SCHEMA_VERSION, init_database, migrate_database
 from app.domain.models import VideoLifecycleState
 
 
-# Exact DDL of pure Phase 3.7 v2 database
+# Exact DDL of pure Phase 3.7 v2 database from commit 5d91a3e
 PHASE_37_V2_DDL = """
-CREATE TABLE channels (
+CREATE TABLE IF NOT EXISTS channels (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
-    handle TEXT,
+    handle TEXT NOT NULL,
     niche TEXT NOT NULL,
-    target_audience TEXT,
+    target_audience TEXT NOT NULL,
     default_language TEXT NOT NULL DEFAULT 'en',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
 );
 
-CREATE TABLE video_projects (
-    id TEXT PRIMARY KEY,
-    channel_id TEXT NOT NULL,
-    state TEXT NOT NULL,
-    target_publish_time TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (channel_id) REFERENCES channels (id)
-);
-
-CREATE TABLE scripts (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    hook TEXT NOT NULL,
-    voiceover_text TEXT NOT NULL,
-    total_word_count INTEGER NOT NULL,
-    estimated_duration_seconds REAL NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES video_projects (id)
-);
-
-CREATE TABLE topic_candidates (
+CREATE TABLE IF NOT EXISTS topic_candidates (
     id TEXT PRIMARY KEY,
     channel_id TEXT NOT NULL,
     keyword TEXT NOT NULL,
@@ -58,41 +36,115 @@ CREATE TABLE topic_candidates (
     estimated_cpm REAL,
     rationale TEXT,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (channel_id) REFERENCES channels (id)
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
 );
 
-CREATE TABLE publication_jobs (
+CREATE TABLE IF NOT EXISTS video_projects (
     id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    scheduled_for TEXT,
-    privacy_status TEXT NOT NULL DEFAULT 'private',
-    youtube_video_id TEXT,
-    status TEXT NOT NULL,
-    error_message TEXT,
+    channel_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    format TEXT NOT NULL,
+    state TEXT NOT NULL,
+    metadata_tags TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES video_projects (id)
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE RESTRICT
 );
 
-CREATE TABLE state_transitions (
+CREATE TABLE IF NOT EXISTS scripts (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    hook TEXT NOT NULL,
+    scenes_json TEXT NOT NULL,
+    total_word_count INTEGER NOT NULL,
+    estimated_duration_seconds REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS assets (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    asset_type TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    license_type TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS quality_results (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    loudness_lufs REAL NOT NULL,
+    duration_seconds REAL NOT NULL,
+    sync_drift_ms REAL NOT NULL,
+    issues_json TEXT,
+    checked_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS publication_jobs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    privacy_status TEXT NOT NULL DEFAULT 'private',
+    scheduled_publish_time TEXT,
+    youtube_video_id TEXT,
+    published_at TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS analytics_snapshots (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    youtube_video_id TEXT NOT NULL,
+    views INTEGER NOT NULL DEFAULT 0,
+    watch_time_hours REAL NOT NULL DEFAULT 0.0,
+    ctr_percent REAL NOT NULL DEFAULT 0.0,
+    average_view_duration_seconds REAL NOT NULL DEFAULT 0.0,
+    retention_at_3s_percent REAL,
+    captured_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS experiments (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    hypothesis TEXT NOT NULL,
+    variant_details_json TEXT,
+    status TEXT NOT NULL,
+    result_summary TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    key TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    status TEXT NOT NULL,
+    response TEXT,
+    expires_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (scope, key)
+);
+
+CREATE TABLE IF NOT EXISTS state_transitions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id TEXT NOT NULL,
     from_state TEXT NOT NULL,
     to_state TEXT NOT NULL,
     reason TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES video_projects (id)
-);
-
-CREATE TABLE idempotency_keys (
-    scope TEXT NOT NULL,
-    key TEXT NOT NULL,
-    project_id TEXT,
-    status TEXT NOT NULL,
-    response_payload TEXT,
-    created_at TEXT NOT NULL,
-    expires_at TEXT NOT NULL,
-    PRIMARY KEY (scope, key)
+    transitioned_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
 );
 """
 
@@ -105,15 +157,18 @@ def test_phase37_v2_to_v3(tmp_path: Path):
     conn.executescript(PHASE_37_V2_DDL)
     conn.execute("PRAGMA user_version = 2;")
 
-    # Insert sample legacy data
+    # Insert sample legacy data adhering to exact 5d91a3e v2 schema
     conn.execute(
-        "INSERT INTO channels VALUES ('c1', 'Tech Hub', '@tech', 'AI', 'Devs', 'en', '2026-08-15T00:00:00Z', '2026-08-15T00:00:00Z')"
+        "INSERT INTO channels VALUES ('c1', 'Tech Hub', '@tech', 'AI', 'Devs', 'en', 1, '2026-08-15T00:00:00Z')"
     )
     conn.execute(
-        "INSERT INTO video_projects VALUES ('p1', 'c1', 'CREATED', NULL, '2026-08-15T00:00:00Z', '2026-08-15T00:00:00Z')"
+        "INSERT INTO video_projects VALUES ('p1', 'c1', 'Async Python', 'SHORT', 'CREATED', '[]', '2026-08-15T00:00:00Z', '2026-08-15T00:00:00Z')"
     )
     conn.execute(
         "INSERT INTO topic_candidates VALUES ('t1', 'c1', 'Async Python', 8.5, 9.0, 15.0, 'Good topic', '2026-08-15T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO scripts VALUES ('s1', 'p1', 'Async Python', 'Hook line', '[]', 100, 30.0, '2026-08-15T00:00:00Z')"
     )
     conn.commit()
     conn.close()

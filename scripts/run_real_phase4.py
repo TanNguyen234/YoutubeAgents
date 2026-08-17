@@ -235,11 +235,13 @@ def run_real_phase4():
     print("=" * 80)
 
     # Write auditable manifest
+    commit_sha = get_git_commit_sha()
     manifest_data = {
-        "phase": "4.2",
-        "title": "Phase 4.2 Real Autonomous Intelligence & Grounding Manifest",
+        "phase": "4.2.1",
+        "title": "Phase 4.2.1 Closure Real Autonomous Intelligence & Grounding Manifest",
         "executed_at": datetime.now(timezone.utc).isoformat(),
-        "git_commit": get_git_commit_sha(),
+        "source_commit": commit_sha,
+        "git_commit": commit_sha,
         "backend": {
             "type": "AntigravityCLIBackend",
             "cli_binary": "agy",

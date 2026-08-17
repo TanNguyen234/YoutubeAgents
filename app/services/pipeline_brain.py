@@ -182,54 +182,62 @@ class BrainPipeline:
             raise
 
         # 7. Stage 5: Claim Extraction & Fact Checking Rewrite Loop
-        for attempt in range(max_rewrite_attempts + 1):
-            extracted_claims = self.extractor.extract_from_script(project.script)
-            dossier.claims = extracted_claims
+        try:
+            for attempt in range(max_rewrite_attempts + 1):
+                extracted_claims = self.extractor.extract_from_script(project.script)
+                dossier.claims = extracted_claims
 
-            report = self.checker.verify_all_claims(
-                claims=extracted_claims,
-                dossier=dossier,
-                project_id=project_id,
-            )
-
-            # Durable Checkpoint: Save fact check report after each audit pass
-            self.repo.save_fact_check_report(report)
-
-            if report.overall_verdict == QualityStatus.PASSED:
-                break
-
-            rewrite_needed = any(c.verdict.value in ["REWRITE_REQUIRED", "REMOVE", "UNVERIFIABLE"] for c in report.claims)
-            if rewrite_needed and attempt < max_rewrite_attempts:
-                flagged = [c for c in report.claims if c.verdict.value != "VERIFIED"]
-                revised_sections = self.generator.rewrite_script_sections(
-                    channel=channel,
-                    original_sections=project.script.sections,
-                    flagged_claims=flagged,
+                report = self.checker.verify_all_claims(
+                    claims=extracted_claims,
                     dossier=dossier,
+                    project_id=project_id,
                 )
-                revised_script = self.writer.build_script(
-                    script_id=f"scr-{project_id}-v{attempt+2}",
-                    title=keyword,
-                    sections=revised_sections,
-                )
-                project.script = revised_script
-                self.repo.save_video_project(project)
-            else:
-                break
 
-        # 8. Stage 6: Authoritative Verification Gate
-        if report.overall_verdict == QualityStatus.PASSED and report.failed_count == 0:
-            self.repo.update_project_state(
-                project_id=project_id,
-                to_state=VideoLifecycleState.VERIFIED,
-                reason=f"All {report.verified_count} factual claims verified against source evidence",
-            )
-        else:
+                # Durable Checkpoint: Save fact check report after each audit pass
+                self.repo.save_fact_check_report(report)
+
+                if report.overall_verdict == QualityStatus.PASSED:
+                    break
+
+                rewrite_needed = any(c.verdict.value in ["REWRITE_REQUIRED", "REMOVE", "UNVERIFIABLE"] for c in report.claims)
+                if rewrite_needed and attempt < max_rewrite_attempts:
+                    flagged = [c for c in report.claims if c.verdict.value != "VERIFIED"]
+                    revised_sections = self.generator.rewrite_script_sections(
+                        channel=channel,
+                        original_sections=project.script.sections,
+                        flagged_claims=flagged,
+                        dossier=dossier,
+                    )
+                    revised_script = self.writer.build_script(
+                        script_id=f"scr-{project_id}-v{attempt+2}",
+                        title=keyword,
+                        sections=revised_sections,
+                    )
+                    project.script = revised_script
+                    self.repo.save_video_project(project)
+                else:
+                    break
+
+            # 8. Stage 6: Authoritative Verification Gate
+            if report.overall_verdict == QualityStatus.PASSED and report.failed_count == 0 and len(report.claims) > 0:
+                self.repo.update_project_state(
+                    project_id=project_id,
+                    to_state=VideoLifecycleState.VERIFIED,
+                    reason=f"All {report.verified_count} factual claims verified against source evidence",
+                )
+            else:
+                self.repo.update_project_state(
+                    project_id=project_id,
+                    to_state=VideoLifecycleState.FAILED,
+                    reason=f"Fact check verification failed with {report.failed_count} unverified claim(s)",
+                )
+        except Exception as e:
             self.repo.update_project_state(
                 project_id=project_id,
                 to_state=VideoLifecycleState.FAILED,
-                reason=f"Fact check verification failed with {report.failed_count} unverified claim(s)",
+                reason=f"Stage 5 fact-check/extraction failure: {str(e)}",
             )
+            raise
 
         updated_project = self.repo.get_video_project(project_id) or project
         return updated_project, report

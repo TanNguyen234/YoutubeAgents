@@ -142,6 +142,27 @@ class Scene(BaseModel):
         return data
 
 
+def compose_canonical_narration(
+    hook: Optional[str] = None,
+    intro: Optional[str] = None,
+    segments: Optional[List[Scene]] = None,
+    cta: Optional[str] = None,
+) -> str:
+    """Deterministically compose the canonical continuous spoken voiceover narration from script sections."""
+    parts = []
+    if hook and hook.strip():
+        parts.append(hook.strip())
+    if intro and intro.strip():
+        parts.append(intro.strip())
+    if segments:
+        for s in segments:
+            if s.narration and s.narration.strip():
+                parts.append(s.narration.strip())
+    if cta and cta.strip():
+        parts.append(cta.strip())
+    return " ".join(parts)
+
+
 class ScriptSections(BaseModel):
     """Typed script breakdown with discrete narrative sections."""
 
@@ -149,7 +170,7 @@ class ScriptSections(BaseModel):
     intro: str = Field(description="Context setup / problem statement")
     segments: List[Scene] = Field(default_factory=list, description="Ordered scene sequence")
     cta: str = Field(description="Call to action / outro")
-    voiceover_text: str = Field(description="Consolidated full spoken narration text")
+    voiceover_text: str = Field(default="", description="Consolidated full spoken narration text")
     estimated_duration: float = Field(default=30.0, ge=1.0, description="Estimated total runtime in seconds")
 
     @model_validator(mode="before")
@@ -163,6 +184,16 @@ class ScriptSections(BaseModel):
                     data["estimated_duration"] = data["duration"]
         return data
 
+    @model_validator(mode="after")
+    def ensure_canonical_voiceover(self) -> "ScriptSections":
+        self.voiceover_text = compose_canonical_narration(
+            hook=self.hook,
+            intro=self.intro,
+            segments=self.segments,
+            cta=self.cta,
+        )
+        return self
+
 
 class Script(BaseModel):
     """Structured video script containing narrative scenes and metadata."""
@@ -175,6 +206,18 @@ class Script(BaseModel):
     estimated_duration_seconds: float = Field(ge=1.0, description="Estimated total runtime")
     sections: Optional[ScriptSections] = Field(default=None, description="Typed narrative sections breakdown")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def get_canonical_narration(self) -> str:
+        """Get the single authoritative canonical spoken voiceover narration."""
+        if self.sections and self.sections.voiceover_text.strip():
+            return self.sections.voiceover_text.strip()
+        if self.scenes:
+            parts = []
+            if self.hook and self.hook.strip():
+                parts.append(self.hook.strip())
+            parts.extend(s.narration.strip() for s in self.scenes if s.narration and s.narration.strip())
+            return " ".join(parts)
+        return ""
 
 
 class FactCheckReport(BaseModel):
