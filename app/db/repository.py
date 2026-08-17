@@ -226,6 +226,146 @@ class SQLiteRepository:
                     ),
                 )
 
+            # Persist nested Assets if present
+            if project.assets:
+                for asset in project.assets:
+                    conn.execute(
+                        """
+                        INSERT INTO assets (id, project_id, asset_type, file_path, source_url, license_type, content_sha256, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                            file_path=excluded.file_path,
+                            source_url=excluded.source_url,
+                            license_type=excluded.license_type,
+                            content_sha256=excluded.content_sha256;
+                        """,
+                        (
+                            asset.id,
+                            project.id,
+                            asset.asset_type.value,
+                            asset.file_path,
+                            asset.source_url,
+                            asset.license_type,
+                            asset.content_sha256,
+                            asset.created_at.isoformat(),
+                        ),
+                    )
+
+    def save_asset(self, asset: Asset) -> None:
+        """Persist or update an individual Asset record."""
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO assets (id, project_id, asset_type, file_path, source_url, license_type, content_sha256, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    file_path=excluded.file_path,
+                    source_url=excluded.source_url,
+                    license_type=excluded.license_type,
+                    content_sha256=excluded.content_sha256;
+                """,
+                (
+                    asset.id,
+                    asset.project_id,
+                    asset.asset_type.value,
+                    asset.file_path,
+                    asset.source_url,
+                    asset.license_type,
+                    asset.content_sha256,
+                    asset.created_at.isoformat(),
+                ),
+            )
+
+    def save_assets(self, assets: List[Asset]) -> None:
+        """Persist multiple Asset records in a single transaction."""
+        with self._get_connection() as conn:
+            for asset in assets:
+                conn.execute(
+                    """
+                    INSERT INTO assets (id, project_id, asset_type, file_path, source_url, license_type, content_sha256, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        file_path=excluded.file_path,
+                        source_url=excluded.source_url,
+                        license_type=excluded.license_type,
+                        content_sha256=excluded.content_sha256;
+                    """,
+                    (
+                        asset.id,
+                        asset.project_id,
+                        asset.asset_type.value,
+                        asset.file_path,
+                        asset.source_url,
+                        asset.license_type,
+                        asset.content_sha256,
+                        asset.created_at.isoformat(),
+                    ),
+                )
+
+    def get_assets_by_project(self, project_id: str) -> List[Asset]:
+        """Retrieve all persisted assets associated with a project."""
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT * FROM assets WHERE project_id = ? ORDER BY created_at ASC;", (project_id,)).fetchall()
+            return [
+                Asset(
+                    id=r["id"],
+                    project_id=r["project_id"],
+                    asset_type=AssetType(r["asset_type"]),
+                    file_path=r["file_path"],
+                    source_url=r["source_url"],
+                    license_type=r["license_type"],
+                    content_sha256=r["content_sha256"],
+                    created_at=datetime.fromisoformat(r["created_at"]),
+                )
+                for r in rows
+            ]
+
+    def save_quality_result(self, quality: QualityResult) -> None:
+        """Persist or update an individual QualityResult record."""
+        issues_json = json.dumps(quality.issues)
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO quality_results (id, project_id, status, loudness_lufs, duration_seconds, sync_drift_ms, issues_json, checked_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    status=excluded.status,
+                    loudness_lufs=excluded.loudness_lufs,
+                    duration_seconds=excluded.duration_seconds,
+                    sync_drift_ms=excluded.sync_drift_ms,
+                    issues_json=excluded.issues_json,
+                    checked_at=excluded.checked_at;
+                """,
+                (
+                    quality.id,
+                    quality.project_id,
+                    quality.status.value,
+                    quality.loudness_lufs,
+                    quality.duration_seconds,
+                    quality.sync_drift_ms,
+                    issues_json,
+                    quality.checked_at.isoformat(),
+                ),
+            )
+
+    def get_quality_result(self, project_id: str) -> Optional[QualityResult]:
+        """Retrieve quality result for a project."""
+        with self._get_connection() as conn:
+            q_row = conn.execute("SELECT * FROM quality_results WHERE project_id = ?", (project_id,)).fetchone()
+            if not q_row:
+                return None
+            issues = json.loads(q_row["issues_json"]) if q_row["issues_json"] else []
+            return QualityResult(
+                id=q_row["id"],
+                project_id=q_row["project_id"],
+                status=QualityStatus(q_row["status"]),
+                loudness_lufs=q_row["loudness_lufs"],
+                duration_seconds=q_row["duration_seconds"],
+                sync_drift_ms=q_row["sync_drift_ms"],
+                issues=issues,
+                checked_at=datetime.fromisoformat(q_row["checked_at"]),
+            )
+
     def update_project_state(
         self,
         project_id: str,

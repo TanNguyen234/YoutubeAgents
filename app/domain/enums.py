@@ -42,6 +42,8 @@ class AssetType(str, Enum):
     SUBTITLES = "SUBTITLES"
     THUMBNAIL = "THUMBNAIL"
     METADATA = "METADATA"
+    SCENE_CARD = "SCENE_CARD"
+    FINAL_VIDEO = "FINAL_VIDEO"
 
 
 class QualityStatus(str, Enum):

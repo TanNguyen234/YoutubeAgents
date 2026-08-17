@@ -40,6 +40,8 @@ def get_router(repo: SQLiteRepository) -> APIRouter:
             "Analytics",
             "Strategy Feedback",
         ]
+        from app.media.capabilities import check_media_capabilities
+        caps = check_media_capabilities()
         return {
             "version": __version__,
             "stages": stages,
@@ -48,6 +50,7 @@ def get_router(repo: SQLiteRepository) -> APIRouter:
             "reasoning_backend": "Antigravity Runtime (Local)",
             "evidence_assistant": "NotebookLM MCP",
             "rendering_engine": "FFmpeg",
+            "media_capabilities": caps.model_dump(),
         }
 
     @router.get("/videos", response_model=List[VideoProject], tags=["Videos"])
