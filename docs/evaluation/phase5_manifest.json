@@ -1,8 +1,8 @@
 {
   "phase": "5",
   "title": "Phase 5 Real Media Factory, TTS, Subtitles, FFmpeg Rendering & Technical QA Manifest",
-  "executed_at": "2026-08-17T14:18:53.354443+00:00",
-  "source_commit": "128c4169735717c91ab9c1a6b0f8852d1a075d22",
+  "executed_at": "2026-08-17T14:30:56.623633+00:00",
+  "source_commit": "4d0b8eb2aea5d2e2aaf838859328f2aa0d6da1df",
   "project_id": "proj-sqlite-wal-01",
   "verified_script_id": "sc-sqlite-wal-real-01",
   "canonical_narration_sha256": "42233fefc65fd01394e440ec3957c23223e2ed33e630988dcbf1c4e389354d9f",

@@ -6,6 +6,7 @@
 **Audio Standards**: EBU R128 Integrated Loudness Normalization (`-14.0 LUFS` target, $\pm 1.5\text{ LU}$ tolerance envelope: $[-15.5, -12.5]\text{ LUFS}$)  
 **Video Standards**: 9:16 Vertical Video (`1080x1920`), `30.0 fps`, `libx264` (`yuv420p`), `aac` stereo audio  
 **Auditable Manifest**: [`docs/evaluation/phase5_manifest.json`](file:///d:/Download/YoutubeAgents/docs/evaluation/phase5_manifest.json)  
+**Source Commit**: `4d0b8eb2aea5d2e2aaf838859328f2aa0d6da1df`  
 **Date**: 2026-08-17  
 
 ---
