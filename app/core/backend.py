@@ -86,8 +86,14 @@ class AntigravityCLIBackend:
         return obj
 
     def generate_structured(self, prompt: str, schema_cls: Type[T]) -> T:
-        """Execute `agy` CLI with --json-schema and return validated Pydantic model."""
-        schema_json = json.dumps(schema_cls.model_json_schema())
+        """Execute `agy` CLI with --json-schema file and return validated Pydantic model."""
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as tf:
+            json.dump(schema_cls.model_json_schema(), tf)
+            schema_file_path = tf.name
+
         cmd = [
             self.cli_binary,
             "--print",
@@ -95,7 +101,7 @@ class AntigravityCLIBackend:
             "--output-format",
             "json",
             "--json-schema",
-            schema_json,
+            schema_file_path,
         ]
 
         try:
@@ -119,11 +125,18 @@ class AntigravityCLIBackend:
                 stdout=e.stdout or "",
                 stderr=e.stderr or "",
             )
+        finally:
+            if os.path.exists(schema_file_path):
+                try:
+                    os.unlink(schema_file_path)
+                except Exception:
+                    pass
 
         if res.returncode != 0:
-            error_type = "AUTH_ERROR" if "auth" in res.stderr.lower() or "login" in res.stderr.lower() else "EXECUTION_ERROR"
+            err_details = res.stderr.strip() or res.stdout.strip()
+            error_type = "AUTH_ERROR" if "auth" in err_details.lower() or "login" in err_details.lower() else "EXECUTION_ERROR"
             raise AntigravityBackendError(
-                message=f"Antigravity CLI failed with exit code {res.returncode}: {res.stderr.strip()}",
+                message=f"Antigravity CLI failed with exit code {res.returncode}: {err_details}",
                 error_type=error_type,
                 command=cmd,
                 returncode=res.returncode,
