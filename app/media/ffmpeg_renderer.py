@@ -79,14 +79,17 @@ class FFmpegRenderer:
             seg_cmd = [
                 ffmpeg_bin,
                 "-y",
+                "-framerate", str(self.profile.fps),
                 "-loop", "1",
                 "-i", str(Path(plan.visual_asset_path).resolve()),
                 "-t", f"{plan.target_duration_seconds:.3f}",
                 "-vf", ",".join(scene_vf),
                 "-c:v", self.profile.video_codec,
-                "-preset", "fast",
+                "-preset", "ultrafast",
+                "-tune", "stillimage",
                 "-pix_fmt", self.profile.pixel_format,
                 "-r", str(self.profile.fps),
+                "-threads", "2",
                 str(seg_path),
             ]
             executed_commands.append(seg_cmd)
@@ -129,18 +132,26 @@ class FFmpegRenderer:
             "-i", str(audio_path),
         ]
         if vf_filters:
-            final_cmd.extend(["-vf", ",".join(vf_filters)])
+            final_cmd.extend([
+                "-vf", ",".join(vf_filters),
+                "-c:v", self.profile.video_codec,
+                "-preset", "ultrafast",
+                "-tune", "stillimage",
+                "-pix_fmt", self.profile.pixel_format,
+                "-r", str(self.profile.fps),
+            ])
+        else:
+            final_cmd.extend([
+                "-c:v", "copy",
+            ])
 
         final_cmd.extend([
             "-af", audio_filter_str,
-            "-c:v", self.profile.video_codec,
-            "-preset", "fast",
-            "-pix_fmt", self.profile.pixel_format,
-            "-r", str(self.profile.fps),
             "-c:a", self.profile.audio_codec,
             "-b:a", self.profile.audio_bitrate,
             "-ar", str(self.profile.audio_sample_rate),
             "-t", f"{total_duration:.3f}",
+            "-threads", "2",
             str(output_video_path),
         ])
         executed_commands.append(final_cmd)

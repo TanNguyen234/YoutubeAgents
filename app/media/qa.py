@@ -38,7 +38,11 @@ class MediaQAInspector:
         return ffmpeg, ffprobe
 
     def _measure_real_loudness(self, video_path: Path) -> float:
-        """Measure actual integrated loudness in LUFS using FFmpeg loudnorm filter output."""
+        """Measure actual integrated loudness in LUFS using FFmpeg loudnorm filter output.
+        
+        Fail-closed: raises MediaQAError if loudness cannot be measured or parsed from audio.
+        Never fabricates or returns hardcoded fallback LUFS values.
+        """
         ffmpeg_bin, _ = self._resolve_bins()
         cmd = [
             ffmpeg_bin,
@@ -49,15 +53,22 @@ class MediaQAInspector:
         ]
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            # Find JSON block in stderr output from loudnorm
-            stderr = res.stderr or ""
-            json_match = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", stderr, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group(0))
-                return float(data.get("input_i", -14.0))
-            return -14.0
-        except Exception:
-            return -14.0
+        except Exception as e:
+            raise MediaQAError(f"FFmpeg loudnorm loudness analysis failed: {e}") from e
+
+        stderr = res.stderr or ""
+        json_match = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", stderr, re.DOTALL)
+        if not json_match:
+            err_snip = stderr[-300:].strip() if stderr else "Empty stderr"
+            raise MediaQAError(f"Could not parse 'input_i' from FFmpeg loudnorm output: {err_snip}")
+
+        try:
+            data = json.loads(json_match.group(0))
+            if "input_i" not in data:
+                raise MediaQAError("Missing 'input_i' key in loudnorm JSON output.")
+            return float(data["input_i"])
+        except Exception as e:
+            raise MediaQAError(f"Failed to decode loudnorm JSON: {e}") from e
 
     def inspect_video(
         self,
@@ -150,10 +161,18 @@ class MediaQAInspector:
         # Inspect video stream properties
         width = int(v_stream.get("width", 0)) if v_stream else 0
         height = int(v_stream.get("height", 0)) if v_stream else 0
-        v_codec = str(v_stream.get("codec_name", "unknown")) if v_stream else "none"
-        pix_fmt = str(v_stream.get("pix_fmt", "unknown")) if v_stream else "none"
+        v_codec = str(v_stream.get("codec_name", "unknown")).lower() if v_stream else "none"
+        pix_fmt = str(v_stream.get("pix_fmt", "unknown")).lower() if v_stream else "none"
 
-        # Calculate FPS
+        # Check video codec (must be h264 / libx264)
+        if v_stream and v_codec not in ("h264", "libx264"):
+            issues.append(f"Invalid video codec '{v_codec}'; expected 'h264' or 'libx264'.")
+
+        # Check pixel format (must match profile.pixel_format, e.g. yuv420p)
+        if v_stream and pix_fmt != profile.pixel_format.lower():
+            issues.append(f"Invalid pixel format '{pix_fmt}'; expected '{profile.pixel_format}'.")
+
+        # Calculate & check FPS
         fps = 0.0
         if v_stream and "r_frame_rate" in v_stream:
             try:
@@ -161,6 +180,14 @@ class MediaQAInspector:
                 fps = float(num) / float(den) if float(den) != 0 else 0.0
             except Exception:
                 fps = 0.0
+
+        if v_stream and abs(fps - profile.fps) > profile.min_fps_tolerance:
+            issues.append(f"Frame rate mismatch: measured {fps:.2f} fps, expected {profile.fps} fps.")
+
+        # Audio stream properties & codec check (must be aac)
+        a_codec = str(a_stream.get("codec_name", "unknown")).lower() if a_stream else "none"
+        if a_stream and a_codec not in ("aac",):
+            issues.append(f"Invalid audio codec '{a_codec}'; expected 'aac'.")
 
         # Duration inspection
         format_info = data.get("format", {})
@@ -170,8 +197,6 @@ class MediaQAInspector:
         duration_drift = abs(v_duration - a_duration) if (v_stream and a_stream) else 999.0
         sync_drift_ms = round(duration_drift * 1000.0, 2)
 
-        a_codec = str(a_stream.get("codec_name", "unknown")) if a_stream else "none"
-
         # Check resolution
         if width != profile.width or height != profile.height:
             issues.append(f"Resolution mismatch: expected {profile.width}x{profile.height}, got {width}x{height}.")
@@ -179,15 +204,28 @@ class MediaQAInspector:
         # Check duration drift
         if duration_drift > profile.max_duration_drift_seconds:
             issues.append(
-                f"Audio-video duration drift ({duration_drift:.2f}s) exceeds maximum tolerance ({profile.max_duration_drift_seconds}s)."
+                f"Audio-video duration drift ({duration_drift:.3f}s) exceeds maximum tolerance ({profile.max_duration_drift_seconds}s)."
             )
 
         # Check minimum duration
         if container_duration <= 0.0:
             issues.append(f"Invalid non-positive video duration ({container_duration}s).")
 
-        # 4. Measure Real Loudness LUFS
-        measured_loudness = self._measure_real_loudness(video_path)
+        # 4. Measure Real Loudness LUFS (Fail-Closed)
+        measured_loudness = -999.0
+        if a_stream and video_path.exists():
+            try:
+                measured_loudness = self._measure_real_loudness(video_path)
+                min_lufs = profile.target_loudness_lufs - profile.loudness_tolerance_lu
+                max_lufs = profile.target_loudness_lufs + profile.loudness_tolerance_lu
+                if not (min_lufs <= measured_loudness <= max_lufs):
+                    issues.append(
+                        f"Measured integrated loudness ({measured_loudness:.2f} LUFS) is outside acceptable tolerance range [{min_lufs:.1f}, {max_lufs:.1f}] LUFS."
+                    )
+            except Exception as e:
+                issues.append(f"Loudness measurement failed: {e}")
+        else:
+            issues.append("Cannot measure loudness: missing audio stream or file not found.")
 
         qa_passed = len(issues) == 0
         overall_status = QualityStatus.PASSED if qa_passed else QualityStatus.FAILED

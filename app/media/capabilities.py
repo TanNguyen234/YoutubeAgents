@@ -93,7 +93,10 @@ def check_media_capabilities(
     # 3. TTS backend detection
     tts_available = False
     actual_tts_backend = None
-    if tts_backend_name == "edge-tts":
+    if tts_backend_name in ("mock-tts", "mock", "test"):
+        tts_available = True
+        actual_tts_backend = tts_backend_name
+    elif tts_backend_name == "edge-tts":
         try:
             import edge_tts  # noqa: F401
             tts_available = True

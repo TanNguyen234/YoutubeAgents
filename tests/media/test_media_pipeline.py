@@ -8,13 +8,16 @@ from app.db.repository import SQLiteRepository
 from app.db.schema import init_database
 from app.domain.enums import AssetType, PlatformFormat, QualityStatus, VideoLifecycleState
 from app.domain.models import Channel, Scene, Script, VideoProject
-from app.media.models import TTSResult
+from app.media.models import RenderProfile, TTSResult
 from app.media.pipeline import MediaProductionPipeline
 from tests.media.test_ffmpeg_renderer import _create_dummy_wav
 
 
 class MockTTSBackend:
     """Deterministic TTS double for testing pipeline state machine."""
+
+    backend_name = "mock-tts"
+    default_voice = "mock-voice"
 
     def __init__(self, duration_seconds: float = 4.0):
         self.duration = duration_seconds
@@ -35,7 +38,7 @@ class MockTTSBackend:
             duration_seconds=self.duration,
             sample_rate=44100,
             backend="mock-tts",
-            voice=voice or "mock-voice",
+            voice=voice or self.default_voice,
             rate=rate,
             pitch=pitch,
             canonical_narration_sha256=hashlib.sha256(text.strip().encode("utf-8")).hexdigest(),
@@ -227,3 +230,152 @@ def test_media_pipeline_failure_does_not_strand_in_producing(repo_with_verified_
 
     curr_p = repo.get_video_project(project_id)
     assert curr_p.state == VideoLifecycleState.FAILED
+
+
+def _create_verified_project_in_repo(repo: SQLiteRepository, project_id: str, scenes=None) -> str:
+    script = Script(
+        id=f"sc-{project_id}",
+        title="SQLite WAL Architecture",
+        hook="How does SQLite WAL mode work?",
+        scenes=scenes or [
+            Scene(index=0, narration="First scene explaining WAL readers.", hook="Hook 1", visual_prompt="P1"),
+            Scene(index=1, narration="Second scene explaining WAL writers.", hook="Hook 2", visual_prompt="P2"),
+        ],
+        total_word_count=12,
+        estimated_duration_seconds=6.0,
+    )
+    project = VideoProject(
+        id=project_id,
+        channel_id="chan-01",
+        title="SQLite WAL Architecture",
+        format=PlatformFormat.SHORTS_9_16,
+        state=VideoLifecycleState.CREATED,
+        script=script,
+    )
+    repo.save_video_project(project)
+    repo.update_project_state(project.id, to_state=VideoLifecycleState.RESEARCHING)
+    repo.update_project_state(project.id, to_state=VideoLifecycleState.PLANNED)
+    repo.update_project_state(project.id, to_state=VideoLifecycleState.SCRIPTED)
+    repo.update_project_state(project.id, to_state=VideoLifecycleState.VERIFIED)
+    return project.id
+
+
+def test_media_pipeline_voice_change_invalidates_cache(repo_with_verified_project, tmp_path: Path):
+    """Changing voice must produce a different fingerprint and force a new render."""
+    repo, project_id = repo_with_verified_project
+    p2_id = _create_verified_project_in_repo(repo, "proj-voice-02")
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_voice")
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id, voice="en-US-GuyNeural")
+    assert manifest_1.voice == "en-US-GuyNeural"
+
+    _, _, manifest_2 = pipeline.run_production(project_id=p2_id, voice="en-US-JennyNeural")
+    assert manifest_2.voice == "en-US-JennyNeural"
+    assert manifest_2.production_fingerprint != manifest_1.production_fingerprint
+
+
+def test_media_pipeline_rate_change_invalidates_cache(repo_with_verified_project, tmp_path: Path):
+    """Changing TTS rate must produce a different fingerprint and force a new render."""
+    repo, project_id = repo_with_verified_project
+    p2_id = _create_verified_project_in_repo(repo, "proj-rate-02")
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_rate")
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id, rate="+0%")
+    _, _, manifest_2 = pipeline.run_production(project_id=p2_id, rate="+15%")
+    assert manifest_2.tts_rate == "+15%"
+    assert manifest_2.production_fingerprint != manifest_1.production_fingerprint
+
+
+def test_media_pipeline_pitch_change_invalidates_cache(repo_with_verified_project, tmp_path: Path):
+    """Changing TTS pitch must produce a different fingerprint and force a new render."""
+    repo, project_id = repo_with_verified_project
+    p2_id = _create_verified_project_in_repo(repo, "proj-pitch-02")
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_pitch")
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id, pitch="+0Hz")
+    _, _, manifest_2 = pipeline.run_production(project_id=p2_id, pitch="-50Hz")
+    assert manifest_2.tts_pitch == "-50Hz"
+    assert manifest_2.production_fingerprint != manifest_1.production_fingerprint
+
+
+def test_media_pipeline_profile_change_invalidates_cache(repo_with_verified_project, tmp_path: Path):
+    """Changing render profile dimensions must produce a different fingerprint and force a new render."""
+    repo, project_id = repo_with_verified_project
+    p2_id = _create_verified_project_in_repo(repo, "proj-prof-02")
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_prof")
+
+    prof_1 = RenderProfile(name="SHORTS_9_16", width=1080, height=1920)
+    prof_2 = RenderProfile(name="LANDSCAPE_16_9", width=1920, height=1080)
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id, profile=prof_1)
+    _, _, manifest_2 = pipeline.run_production(project_id=p2_id, profile=prof_2)
+    assert manifest_2.render_profile == "LANDSCAPE_16_9"
+    assert manifest_2.production_fingerprint != manifest_1.production_fingerprint
+
+
+def test_media_pipeline_scene_change_invalidates_cache(repo_with_verified_project, tmp_path: Path):
+    """Mutating scene narration text must produce a different fingerprint and force a new render."""
+    repo, project_id = repo_with_verified_project
+    mutated_scenes = [
+        Scene(index=0, narration="Mutated narration altering the first scene completely.", hook="Hook 1", visual_prompt="P1"),
+        Scene(index=1, narration="Second scene explaining WAL writers.", hook="Hook 2", visual_prompt="P2"),
+    ]
+    p2_id = _create_verified_project_in_repo(repo, "proj-scene-02", scenes=mutated_scenes)
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_scene")
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id)
+    _, _, manifest_2 = pipeline.run_production(project_id=p2_id)
+    assert manifest_2.production_fingerprint != manifest_1.production_fingerprint
+
+
+def test_media_pipeline_blocked_on_missing_capabilities(repo_with_verified_project, tmp_path: Path, monkeypatch):
+    """Missing pre-flight binary or pillow library must transition project to BLOCKED cleanly."""
+    from app.media.capabilities import MediaCapabilities
+    from app.media.pipeline import MediaProductionBlockerError
+
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_blk")
+
+    def mock_check_caps(*args, **kwargs):
+        return MediaCapabilities(
+            ffmpeg_available=False,
+            ffprobe_available=True,
+            tts_available=True,
+            pillow_available=False,
+            output_writable=True,
+            blockers=["Simulated missing FFmpeg", "Simulated missing Pillow"],
+        )
+
+    monkeypatch.setattr("app.media.pipeline.check_media_capabilities", mock_check_caps)
+
+    with pytest.raises(MediaProductionBlockerError, match="Media capabilities unmet"):
+        pipeline.run_production(project_id=project_id)
+
+    curr_p = repo.get_video_project(project_id)
+    assert curr_p.state == VideoLifecycleState.BLOCKED
+
+
+def test_media_pipeline_blocked_on_tts_network_error(repo_with_verified_project, tmp_path: Path, monkeypatch):
+    """Environmental network failure during TTS synthesis must transition project to BLOCKED."""
+    from app.media.tts.edge_tts_backend import TTSBlockerError
+
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_tts_blk")
+
+    def mock_synthesize_net_fail(*args, **kwargs):
+        raise TTSBlockerError("EdgeTTS network/environmental connectivity failure: connection refused")
+
+    monkeypatch.setattr(pipeline.tts, "synthesize", mock_synthesize_net_fail)
+
+    with pytest.raises(TTSBlockerError, match="connectivity failure"):
+        pipeline.run_production(project_id=project_id)
+
+    curr_p = repo.get_video_project(project_id)
+    assert curr_p.state == VideoLifecycleState.BLOCKED

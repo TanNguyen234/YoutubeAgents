@@ -24,7 +24,7 @@ from app.media.qa import MediaQAInspector
 from app.media.scene_planner import ScenePlanner
 from app.media.subtitles import SubtitleGenerator
 from app.media.tts.base import TTSBackend
-from app.media.tts.edge_tts_backend import EdgeTTSBackend
+from app.media.tts.edge_tts_backend import EdgeTTSBackend, TTSBlockerError
 
 
 class MediaProductionError(RuntimeError):
@@ -33,12 +33,12 @@ class MediaProductionError(RuntimeError):
 
 
 class MediaProductionBlockerError(RuntimeError):
-    """Raised when media production is blocked by missing environmental capabilities."""
+    """Raised when production cannot proceed due to environmental or dependency blockers."""
     pass
 
 
 class MediaProductionPipeline:
-    """End-to-end media production orchestrator for turning VERIFIED projects into verified MP4 videos."""
+    """Coordinates real TTS voiceover synthesis, visual scene card composition, subtitles, FFmpeg rendering, and QA."""
 
     def __init__(
         self,
@@ -56,14 +56,16 @@ class MediaProductionPipeline:
         self.qa = qa_inspector or MediaQAInspector()
         self.planner = scene_planner or ScenePlanner()
         self.sub_gen = subtitle_generator or SubtitleGenerator()
+        self.subtitles = self.sub_gen
         self.base_output_dir = base_output_dir or Path("output/projects")
 
-    def _get_git_commit(self) -> str:
+    def _get_git_commit(self) -> Optional[str]:
+        """Fetch current git commit SHA for provenance recording."""
         try:
             res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
             return res.stdout.strip()
         except Exception:
-            return "UNKNOWN"
+            return None
 
     def run_production(
         self,
@@ -113,8 +115,16 @@ class MediaProductionPipeline:
         manifest_path = manifest_dir / "render_manifest.json"
 
         # 4. Check capabilities before mutating state
-        caps = check_media_capabilities(output_dir=self.base_output_dir)
-        if not caps.ffmpeg_available or not caps.ffprobe_available or not caps.output_writable:
+        resolved_voice = voice or (self.tts.default_voice if hasattr(self.tts, "default_voice") else "en-US-GuyNeural") or "en-US-GuyNeural"
+        tts_backend_name = getattr(self.tts, "backend_name", "edge-tts") if hasattr(self.tts, "backend_name") else "edge-tts"
+        if hasattr(self.tts, "__class__") and "Mock" in self.tts.__class__.__name__:
+            tts_backend_name = "mock-tts"
+
+        caps = check_media_capabilities(
+            output_dir=self.base_output_dir,
+            tts_backend_name=tts_backend_name,
+        )
+        if not caps.is_production_ready:
             # Block cleanly without corrupting lifecycle
             blocker_msg = f"Media capabilities unmet: {', '.join(caps.blockers)}"
             if project.state == VideoLifecycleState.VERIFIED:
@@ -126,14 +136,14 @@ class MediaProductionPipeline:
                 )
             raise MediaProductionBlockerError(blocker_msg)
 
-        # 5. Check Idempotency: Has this exact production combination already succeeded?
-        resolved_voice = voice or (self.tts.default_voice if hasattr(self.tts, "default_voice") else "en-US-GuyNeural") or "en-US-GuyNeural"
-        tts_backend_name = getattr(self.tts, "backend_name", "edge-tts") if hasattr(self.tts, "backend_name") else "edge-tts"
-        if hasattr(self.tts, "__class__") and "Mock" in self.tts.__class__.__name__:
-            tts_backend_name = "mock-tts"
-
-        # Preliminary fingerprint based on script & settings
-        initial_fingerprint = compute_production_fingerprint(
+        # 5. Compute Requested Fingerprint BEFORE any reuse decision
+        scene_hashes = [
+            hashlib.sha256(
+                f"{getattr(s, 'scene_index', getattr(s, 'index', idx))}|{s.narration.strip()}|{(getattr(s, 'hook', '') or '').strip()}|{project.script.title.strip()}|{render_prof.width}x{render_prof.height}".encode("utf-8")
+            ).hexdigest()
+            for idx, s in enumerate(project.script.scenes)
+        ]
+        requested_production_fingerprint = compute_production_fingerprint(
             canonical_narration_sha256=expected_narration_hash,
             render_profile_name=render_prof.name,
             tts_backend=tts_backend_name,
@@ -141,14 +151,19 @@ class MediaProductionPipeline:
             tts_rate=rate,
             tts_pitch=pitch,
             subtitle_format="srt",
+            ordered_scene_asset_hashes=scene_hashes,
         )
 
         if not force_rebuild and manifest_path.exists():
             try:
                 cached_manifest = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
                 if (
-                    cached_manifest.canonical_narration_sha256 == expected_narration_hash
+                    cached_manifest.production_fingerprint == requested_production_fingerprint
+                    and cached_manifest.canonical_narration_sha256 == expected_narration_hash
                     and cached_manifest.render_profile == render_prof.name
+                    and cached_manifest.voice == resolved_voice
+                    and cached_manifest.tts_rate == rate
+                    and cached_manifest.tts_pitch == pitch
                     and cached_manifest.qa_verdict == "PASSED"
                     and Path(cached_manifest.final_video_path).exists()
                 ):
@@ -159,6 +174,9 @@ class MediaProductionPipeline:
                         expected_narration_hash=expected_narration_hash,
                         actual_narration_hash=cached_manifest.canonical_narration_sha256,
                         expected_profile=render_prof,
+                        tts_input_hash=cached_manifest.tts_input_sha256,
+                        subtitle_source_hash=cached_manifest.subtitle_source_sha256,
+                        render_input_hash=cached_manifest.render_input_narration_sha256,
                     )
                     if qa_res.passed:
                         # Ensure project state is synchronized
@@ -274,7 +292,7 @@ class MediaProductionPipeline:
                 created_assets.append(card_asset)
                 ordered_scene_hashes.append(plan.visual_asset_sha256)
 
-            # Compute definitive production fingerprint
+            # Compute definitive production fingerprint matching requested fingerprint
             production_fingerprint = compute_production_fingerprint(
                 canonical_narration_sha256=expected_narration_hash,
                 render_profile_name=render_prof.name,
@@ -283,7 +301,7 @@ class MediaProductionPipeline:
                 tts_rate=tts_res.rate,
                 tts_pitch=tts_res.pitch,
                 subtitle_format="srt",
-                ordered_scene_asset_hashes=ordered_scene_hashes,
+                ordered_scene_asset_hashes=scene_hashes,
             )
 
             # 10. Authoritative FFmpeg Video Render
@@ -314,7 +332,7 @@ class MediaProductionPipeline:
             self.repo.update_project_state(
                 project_id=project_id,
                 to_state=VideoLifecycleState.RENDERED,
-                reason="FFmpeg video rendering completed successfully",
+                reason=f"Authoritative FFmpeg rendering completed at {render_res.video_path}",
                 expected_current_state=VideoLifecycleState.PRODUCING,
             )
 
@@ -403,7 +421,7 @@ class MediaProductionPipeline:
             # Handle failure cleanly without stranding in active state
             curr_proj = self.repo.get_video_project(project_id)
             if curr_proj and curr_proj.state in (VideoLifecycleState.PRODUCING, VideoLifecycleState.RENDERED):
-                target_fail_state = VideoLifecycleState.BLOCKED if isinstance(e, MediaProductionBlockerError) else VideoLifecycleState.FAILED
+                target_fail_state = VideoLifecycleState.BLOCKED if isinstance(e, (MediaProductionBlockerError, TTSBlockerError)) else VideoLifecycleState.FAILED
                 self.repo.update_project_state(
                     project_id=project_id,
                     to_state=target_fail_state,

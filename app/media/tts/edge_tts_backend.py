@@ -17,8 +17,18 @@ except Exception:
 from app.media.models import TTSResult
 
 
-class TTSSynthesisError(RuntimeError):
-    """Raised when TTS audio synthesis fails."""
+class TTSError(RuntimeError):
+    """Base exception for TTS operations."""
+    pass
+
+
+class TTSSynthesisError(TTSError):
+    """Raised when TTS audio synthesis fails due to data or parameters."""
+    pass
+
+
+class TTSBlockerError(TTSError):
+    """Raised when TTS audio synthesis fails due to environmental or network connectivity issues."""
     pass
 
 
@@ -92,6 +102,9 @@ class EdgeTTSBackend:
         try:
             asyncio.run(self._synthesize_async(clean_text, output_path, voice_to_use, rate=rate, pitch=pitch))
         except Exception as e:
+            err_str = str(e).lower()
+            if any(term in err_str for term in ("connect", "network", "timeout", "handshake", "socket", "ssl", "dns", "unreachable", "10061", "10054")):
+                raise TTSBlockerError(f"EdgeTTS network/environmental connectivity failure: {e}") from e
             raise TTSSynthesisError(f"EdgeTTS synthesis failed: {e}") from e
 
         if not output_path.exists() or output_path.stat().st_size == 0:

@@ -33,6 +33,7 @@ def real_pipeline_and_repo():
         gc.collect()
 
 
+@pytest.mark.live
 def test_real_live_e2e_sqlite_wal_mode(real_pipeline_and_repo):
     """REAL E2E Topic 1: Live HTTP fetch from sqlite.org, Antigravity topic scoring, script generation, and fact checking."""
     pipeline, repo = real_pipeline_and_repo

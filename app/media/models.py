@@ -21,7 +21,9 @@ class RenderProfile(BaseModel):
     pixel_format: str = Field(default="yuv420p", description="Pixel color format for web player compatibility")
     audio_bitrate: str = Field(default="192k", description="Target audio bitrate")
     audio_sample_rate: int = Field(default=44100, description="Target audio sampling rate in Hz")
-    target_loudness_lufs: float = Field(default=-14.0, description="EBU R128 integrated loudness target")
+    target_loudness_lufs: float = Field(default=-14.0, description="EBU R128 integrated loudness target in LUFS")
+    loudness_tolerance_lu: float = Field(default=1.5, description="Allowed deviation in LU from target loudness (acceptable range: -15.5 to -12.5 LUFS)")
+    min_fps_tolerance: float = Field(default=0.5, description="Allowed frame rate deviation in fps")
     max_duration_drift_seconds: float = Field(default=0.5, description="Allowed duration mismatch between audio and video")
 
 

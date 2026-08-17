@@ -176,3 +176,176 @@ def test_media_qa_fails_on_provenance_hash_mismatch(tmp_path: Path):
     assert qa_res.passed is False
     assert quality.status == QualityStatus.FAILED
     assert any("TTS input hash" in issue for issue in quality.issues)
+
+
+def test_media_qa_fails_on_loudness_parse_error(tmp_path: Path, monkeypatch):
+    """When FFmpeg loudnorm measurement fails or cannot parse input_i, QA must FAIL and never fabricate -14.0."""
+    from app.media.qa import MediaQAError
+
+    inspector = MediaQAInspector()
+    fake_video = tmp_path / "fake_loud_err.mp4"
+    fake_video.write_bytes(b"dummy video bytes exceeding 1000 length" * 30)
+
+    def mock_probe(*args, **kwargs):
+        class MockRes:
+            stdout = '{"streams": [{"codec_type": "video", "codec_name": "h264", "width": 1080, "height": 1920, "r_frame_rate": "30/1", "duration": "2.0", "pix_fmt": "yuv420p"}, {"codec_type": "audio", "codec_name": "aac", "duration": "2.0"}], "format": {"duration": "2.0"}}'
+        return MockRes()
+
+    def mock_measure_fail(video_path):
+        raise MediaQAError("Simulated FFmpeg loudnorm parse crash: corrupt json")
+
+    monkeypatch.setattr("subprocess.run", mock_probe)
+    monkeypatch.setattr(inspector, "_measure_real_loudness", mock_measure_fail)
+
+    quality, qa_res = inspector.inspect_video(
+        project_id="p-qa-loud-err",
+        video_path=fake_video,
+        expected_narration_hash="valid",
+        actual_narration_hash="valid",
+    )
+
+    assert qa_res.passed is False
+    assert quality.status == QualityStatus.FAILED
+    assert quality.loudness_lufs == -999.0
+    assert any("Loudness measurement failed" in issue for issue in quality.issues)
+
+
+def test_media_qa_fails_on_loudness_outside_tolerance(tmp_path: Path, monkeypatch):
+    """When measured loudness is outside the [-15.5, -12.5] LUFS tolerance envelope, QA must FAIL."""
+    inspector = MediaQAInspector()
+    fake_video = tmp_path / "fake_loud_out.mp4"
+    fake_video.write_bytes(b"dummy video bytes exceeding 1000 length" * 30)
+
+    def mock_probe(*args, **kwargs):
+        class MockRes:
+            stdout = '{"streams": [{"codec_type": "video", "codec_name": "h264", "width": 1080, "height": 1920, "r_frame_rate": "30/1", "duration": "2.0", "pix_fmt": "yuv420p"}, {"codec_type": "audio", "codec_name": "aac", "duration": "2.0"}], "format": {"duration": "2.0"}}'
+        return MockRes()
+
+    monkeypatch.setattr("subprocess.run", mock_probe)
+    # Mock measured loudness to -22.5 LUFS (too quiet, outside [-15.5, -12.5])
+    monkeypatch.setattr(inspector, "_measure_real_loudness", lambda vp: -22.5)
+
+    quality, qa_res = inspector.inspect_video(
+        project_id="p-qa-loud-out",
+        video_path=fake_video,
+        expected_narration_hash="valid",
+        actual_narration_hash="valid",
+    )
+
+    assert qa_res.passed is False
+    assert quality.status == QualityStatus.FAILED
+    assert any("outside acceptable tolerance range" in issue for issue in quality.issues)
+
+
+def test_media_qa_fails_on_wrong_video_codec(tmp_path: Path, monkeypatch):
+    """Video with unexpected codec (e.g. vp9 or hevc when h264 is required) must fail QA."""
+    inspector = MediaQAInspector()
+    fake_video = tmp_path / "fake.mp4"
+    fake_video.write_bytes(b"dummy video bytes exceeding 1000 length" * 30)
+
+    import subprocess
+    def mock_probe(*args, **kwargs):
+        class MockRes:
+            stdout = '{"streams": [{"codec_type": "video", "codec_name": "vp9", "width": 1080, "height": 1920, "r_frame_rate": "30/1", "duration": "2.0", "pix_fmt": "yuv420p"}, {"codec_type": "audio", "codec_name": "aac", "duration": "2.0"}], "format": {"duration": "2.0"}}'
+        return MockRes()
+
+    monkeypatch.setattr("subprocess.run", mock_probe)
+    monkeypatch.setattr(inspector, "_measure_real_loudness", lambda vp: -14.0)
+
+    quality, qa_res = inspector.inspect_video("p-codec", fake_video, "h", "h")
+    assert qa_res.passed is False
+    assert any("Invalid video codec 'vp9'" in issue for issue in quality.issues)
+
+
+def test_media_qa_fails_on_wrong_audio_codec(tmp_path: Path, monkeypatch):
+    """Audio with unexpected codec (e.g. mp3 or opus when aac is required) must fail QA."""
+    inspector = MediaQAInspector()
+    fake_video = tmp_path / "fake.mp4"
+    fake_video.write_bytes(b"dummy video bytes exceeding 1000 length" * 30)
+
+    def mock_probe(*args, **kwargs):
+        class MockRes:
+            stdout = '{"streams": [{"codec_type": "video", "codec_name": "h264", "width": 1080, "height": 1920, "r_frame_rate": "30/1", "duration": "2.0", "pix_fmt": "yuv420p"}, {"codec_type": "audio", "codec_name": "mp3", "duration": "2.0"}], "format": {"duration": "2.0"}}'
+        return MockRes()
+
+    monkeypatch.setattr("subprocess.run", mock_probe)
+    monkeypatch.setattr(inspector, "_measure_real_loudness", lambda vp: -14.0)
+
+    quality, qa_res = inspector.inspect_video("p-acodec", fake_video, "h", "h")
+    assert qa_res.passed is False
+    assert any("Invalid audio codec 'mp3'" in issue for issue in quality.issues)
+
+
+def test_media_qa_fails_on_wrong_pixel_format(tmp_path: Path, monkeypatch):
+    """Pixel format other than yuv420p (e.g. yuv444p) must fail QA."""
+    inspector = MediaQAInspector()
+    fake_video = tmp_path / "fake.mp4"
+    fake_video.write_bytes(b"dummy video bytes exceeding 1000 length" * 30)
+
+    def mock_probe(*args, **kwargs):
+        class MockRes:
+            stdout = '{"streams": [{"codec_type": "video", "codec_name": "h264", "width": 1080, "height": 1920, "r_frame_rate": "30/1", "duration": "2.0", "pix_fmt": "yuv444p"}, {"codec_type": "audio", "codec_name": "aac", "duration": "2.0"}], "format": {"duration": "2.0"}}'
+        return MockRes()
+
+    monkeypatch.setattr("subprocess.run", mock_probe)
+    monkeypatch.setattr(inspector, "_measure_real_loudness", lambda vp: -14.0)
+
+    quality, qa_res = inspector.inspect_video("p-pixfmt", fake_video, "h", "h")
+    assert qa_res.passed is False
+    assert any("Invalid pixel format 'yuv444p'" in issue for issue in quality.issues)
+
+
+def test_media_qa_fails_on_wrong_fps(tmp_path: Path, monkeypatch):
+    """FPS outside tolerance (e.g. 15fps when 30fps is expected) must fail QA."""
+    inspector = MediaQAInspector()
+    fake_video = tmp_path / "fake.mp4"
+    fake_video.write_bytes(b"dummy video bytes exceeding 1000 length" * 30)
+
+    def mock_probe(*args, **kwargs):
+        class MockRes:
+            stdout = '{"streams": [{"codec_type": "video", "codec_name": "h264", "width": 1080, "height": 1920, "r_frame_rate": "15/1", "duration": "2.0", "pix_fmt": "yuv420p"}, {"codec_type": "audio", "codec_name": "aac", "duration": "2.0"}], "format": {"duration": "2.0"}}'
+        return MockRes()
+
+    monkeypatch.setattr("subprocess.run", mock_probe)
+    monkeypatch.setattr(inspector, "_measure_real_loudness", lambda vp: -14.0)
+
+    quality, qa_res = inspector.inspect_video("p-fps", fake_video, "h", "h")
+    assert qa_res.passed is False
+    assert any("Frame rate mismatch" in issue for issue in quality.issues)
+
+
+def test_media_qa_fails_on_missing_video_stream(tmp_path: Path, monkeypatch):
+    """Container without video stream must fail QA."""
+    inspector = MediaQAInspector()
+    fake_video = tmp_path / "fake.mp4"
+    fake_video.write_bytes(b"dummy video bytes exceeding 1000 length" * 30)
+
+    def mock_probe(*args, **kwargs):
+        class MockRes:
+            stdout = '{"streams": [{"codec_type": "audio", "codec_name": "aac", "duration": "2.0"}], "format": {"duration": "2.0"}}'
+        return MockRes()
+
+    monkeypatch.setattr("subprocess.run", mock_probe)
+    monkeypatch.setattr(inspector, "_measure_real_loudness", lambda vp: -14.0)
+
+    quality, qa_res = inspector.inspect_video("p-novid", fake_video, "h", "h")
+    assert qa_res.passed is False
+    assert any("Missing video stream" in issue for issue in quality.issues)
+
+
+def test_media_qa_fails_on_missing_audio_stream(tmp_path: Path, monkeypatch):
+    """Container without audio stream must fail QA."""
+    inspector = MediaQAInspector()
+    fake_video = tmp_path / "fake.mp4"
+    fake_video.write_bytes(b"dummy video bytes exceeding 1000 length" * 30)
+
+    def mock_probe(*args, **kwargs):
+        class MockRes:
+            stdout = '{"streams": [{"codec_type": "video", "codec_name": "h264", "width": 1080, "height": 1920, "r_frame_rate": "30/1", "duration": "2.0", "pix_fmt": "yuv420p"}], "format": {"duration": "2.0"}}'
+        return MockRes()
+
+    monkeypatch.setattr("subprocess.run", mock_probe)
+
+    quality, qa_res = inspector.inspect_video("p-noaud", fake_video, "h", "h")
+    assert qa_res.passed is False
+    assert any("Missing audio stream" in issue for issue in quality.issues)
