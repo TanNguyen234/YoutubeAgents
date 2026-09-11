@@ -7,6 +7,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.core.backend import ReasoningBackend
 from app.domain.models import FactCheckReport, ResearchDossier, Script
 from app.media.director.beat_decomposer import BeatDecomposer
 from app.media.director.modality_router import VisualModalityRouter
@@ -14,6 +15,7 @@ from app.media.director.models import (
     ChannelCreativeProfile,
     ContentFormat,
     NarrativeBeat,
+    ShotAssetResult,
     ShotSpec,
     ShotTimeline,
     Storyboard,
@@ -50,9 +52,11 @@ class AutoDirectorService:
         visual_factory: Optional[VisualFactory] = None,
         gflow_provider: Optional[Any] = None,
         evaluator: Optional[VisualShotEvaluator] = None,
+        reasoning_backend: Optional[ReasoningBackend] = None,
     ):
         self.profile = profile or ChannelCreativeProfile()
-        self.decomposer = decomposer or BeatDecomposer()
+        self.backend = reasoning_backend
+        self.decomposer = decomposer or BeatDecomposer(backend=self.backend)
         self.router = router or VisualModalityRouter(profile=self.profile)
         self.planner = planner or StoryboardPlanner(router=self.router, profile=self.profile)
         self.visual_factory = visual_factory or VisualFactory()
@@ -70,6 +74,18 @@ class AutoDirectorService:
         self.shot_evaluations: Dict[str, VisualEvaluation] = {}
         self.shot_attempt_counts: Dict[str, int] = {}
 
+    def apply_profile(self, profile: ChannelCreativeProfile) -> None:
+        """Propagate creative profile across all dependent director components."""
+        self.profile = profile
+        if hasattr(self, "router") and self.router:
+            self.router.profile = profile
+        if hasattr(self, "planner") and self.planner:
+            self.planner.profile = profile
+            if hasattr(self.planner, "router") and self.planner.router:
+                self.planner.router.profile = profile
+        if hasattr(self, "evaluator") and self.evaluator:
+            self.evaluator.profile = profile
+
     def plan_and_render_timeline(
         self,
         project_id: str,
@@ -82,16 +98,33 @@ class AutoDirectorService:
         fact_report: Optional[FactCheckReport] = None,
     ) -> Tuple[ShotTimeline, Storyboard]:
         """Execute full director workflow: Decompose -> Plan Storyboard -> Dispatch Renderers -> QA Evaluate -> Selective Retry -> Assemble Timeline."""
+        # Reset state between runs so project A state cannot leak into project B
+        self.asset_attempts.clear()
+        self.shot_evaluations.clear()
+        self.shot_attempt_counts.clear()
+
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         shots_dir = output_dir / "shots"
         shots_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. Narrative Beat Decomposition
+        claims = []
+        if fact_report and fact_report.claims:
+            claims.extend(fact_report.claims)
+        if dossier and dossier.claims:
+            for c in dossier.claims:
+                if not any(ec.id == c.id for ec in claims):
+                    claims.append(c)
+
+        sources = dossier.sources if dossier else []
+
+        # 1. Narrative Beat Decomposition with claims and sources propagation
         beats = self.decomposer.decompose_script(
             script=script,
             total_audio_duration=total_audio_duration,
             content_format=content_format,
+            claims=claims,
+            sources=sources,
         )
 
         # 2. Storyboard Planning
@@ -120,7 +153,7 @@ class AutoDirectorService:
             actual_dur = round(shot_end - shot_start, 3)
             cur_time = shot_end
 
-            asset_path, asset_hash = self._generate_shot_asset(
+            asset_res = self._generate_shot_asset(
                 shot=shot,
                 shot_index=shot_idx,
                 output_dir=shots_dir,
@@ -129,6 +162,12 @@ class AutoDirectorService:
                 dossier=dossier,
                 fact_report=fact_report,
             )
+            asset_path = Path(asset_res.path)
+            asset_hash = asset_res.sha256
+
+            # Correct fallback modality accounting
+            shot.requested_modality = asset_res.requested_modality
+            shot.visual_modality = asset_res.actual_modality
 
             # 14. Execute evaluate_shot() before final render
             asset_exists = Path(asset_path).exists() and Path(asset_path).stat().st_size > 0
@@ -149,28 +188,40 @@ class AutoDirectorService:
                 if fallback_mod:
                     shot.visual_modality = fallback_mod
 
-                asset_path, asset_hash = self._generate_shot_asset(
+                asset_res = self._generate_shot_asset(
                     shot=shot,
                     shot_index=shot_idx,
                     output_dir=shots_dir,
                     script_title=script.title,
                     channel_name=channel_name,
                     dossier=dossier,
+                    fact_report=fact_report,
                 )
+                asset_path = Path(asset_res.path)
+                asset_hash = asset_res.sha256
+                shot.requested_modality = asset_res.requested_modality
+                shot.visual_modality = asset_res.actual_modality
+
                 asset_exists = Path(asset_path).exists() and Path(asset_path).stat().st_size > 0
                 evaluation = self.evaluator.evaluate_shot(shot=shot, asset_exists=asset_exists)
 
             # Safe semantic fallback if still failing after retries
             if evaluation.recommendation == "REGENERATE" and not asset_exists:
                 shot.visual_modality = VisualModality.DIAGRAM
-                asset_path, asset_hash = self._generate_shot_asset(
+                asset_res = self._generate_shot_asset(
                     shot=shot,
                     shot_index=shot_idx,
                     output_dir=shots_dir,
                     script_title=script.title,
                     channel_name=channel_name,
                     dossier=dossier,
+                    fact_report=fact_report,
                 )
+                asset_path = Path(asset_res.path)
+                asset_hash = asset_res.sha256
+                shot.requested_modality = asset_res.requested_modality
+                shot.visual_modality = asset_res.actual_modality
+
                 asset_exists = Path(asset_path).exists()
                 evaluation = self.evaluator.evaluate_shot(shot=shot, asset_exists=asset_exists)
 
@@ -211,15 +262,18 @@ class AutoDirectorService:
         channel_name: str,
         dossier: Optional[ResearchDossier] = None,
         fact_report: Optional[FactCheckReport] = None,
-    ) -> Tuple[Path, str]:
+    ) -> ShotAssetResult:
         """Dispatch asset generation to the best available renderer or provider for the shot modality."""
         t0 = time.time()
+        requested_modality = shot.visual_modality
         modality = shot.visual_modality
         shot_id = shot.shot_id
+        fallback_reason = None
 
         # Stock video check: if requested but no stock provider is installed, explicitly record fallback attempt and route
         if modality == VisualModality.STOCK_VIDEO:
             fallback_modality = VisualModality.GENERATED_VIDEO if (self.gflow_provider and hasattr(self.gflow_provider, "generate_video")) else VisualModality.MOTION_GRAPHICS
+            fallback_reason = f"STOCK_VIDEO is unsupported: routed to {fallback_modality.value}"
             self.asset_attempts.append(
                 AssetGenerationAttempt(
                     shot_id=shot_id,
@@ -257,7 +311,14 @@ class AutoDirectorService:
                         latency_ms=int((time.time() - t0) * 1000),
                     )
                 )
-                return Path(p), h
+                return ShotAssetResult(
+                    path=str(p),
+                    sha256=h,
+                    requested_modality=requested_modality,
+                    actual_modality=VisualModality.DIAGRAM,
+                    provider="diagram_renderer",
+                    fallback_reason=fallback_reason,
+                )
             except Exception as e:
                 self.asset_attempts.append(
                     AssetGenerationAttempt(
@@ -312,10 +373,11 @@ class AutoDirectorService:
                         output_path=target_path,
                         title=shot.headline_text or "Data Analysis",
                     )
+                provider_name = "motion_renderer" if (is_llm_token or shot.chart_data) else "chart_renderer"
                 self.asset_attempts.append(
                     AssetGenerationAttempt(
                         shot_id=shot_id,
-                        provider="motion_renderer" if (is_llm_token or shot.chart_data) else "chart_renderer",
+                        provider=provider_name,
                         modality=modality.value,
                         prompt=instr,
                         success=True,
@@ -323,7 +385,14 @@ class AutoDirectorService:
                         latency_ms=int((time.time() - t0) * 1000),
                     )
                 )
-                return Path(p), h
+                return ShotAssetResult(
+                    path=str(p),
+                    sha256=h,
+                    requested_modality=requested_modality,
+                    actual_modality=VisualModality.DATA_VISUALIZATION,
+                    provider=provider_name,
+                    fallback_reason=fallback_reason,
+                )
             except Exception as e:
                 # If ungrounded or failed, gracefully fall back to Diagram
                 target_path = output_dir / f"{shot_id}_diagram_fallback.png"
@@ -332,7 +401,14 @@ class AutoDirectorService:
                     output_path=target_path,
                     title=shot.subject or script_title,
                 )
-                return Path(p), h
+                return ShotAssetResult(
+                    path=str(p),
+                    sha256=h,
+                    requested_modality=requested_modality,
+                    actual_modality=VisualModality.DIAGRAM,
+                    provider="diagram_renderer",
+                    fallback_reason=f"DATA_VISUALIZATION failed ({e}), fell back to diagram",
+                )
 
         # Modality C: CODE_ANIMATION / UI_SIMULATION
         elif modality in (VisualModality.CODE_ANIMATION, VisualModality.UI_SIMULATION):
@@ -369,7 +445,14 @@ class AutoDirectorService:
                         latency_ms=int((time.time() - t0) * 1000),
                     )
                 )
-                return Path(p), h
+                return ShotAssetResult(
+                    path=str(p),
+                    sha256=h,
+                    requested_modality=requested_modality,
+                    actual_modality=modality,
+                    provider="motion_renderer",
+                    fallback_reason=fallback_reason,
+                )
             except Exception as e:
                 self.asset_attempts.append(
                     AssetGenerationAttempt(
@@ -395,7 +478,14 @@ class AutoDirectorService:
                     output_path=target_path,
                     title=shot.subject or script_title,
                 )
-                return Path(p), h
+                return ShotAssetResult(
+                    path=str(p),
+                    sha256=h,
+                    requested_modality=requested_modality,
+                    actual_modality=VisualModality.DIAGRAM,
+                    provider="diagram_renderer",
+                    fallback_reason="Incomplete comparison points, fell back to diagram",
+                )
 
             try:
                 p, h = self.motion_renderer.render_before_after_comparison(
@@ -416,7 +506,14 @@ class AutoDirectorService:
                         latency_ms=int((time.time() - t0) * 1000),
                     )
                 )
-                return Path(p), h
+                return ShotAssetResult(
+                    path=str(p),
+                    sha256=h,
+                    requested_modality=requested_modality,
+                    actual_modality=VisualModality.COMPARISON,
+                    provider="motion_renderer",
+                    fallback_reason=fallback_reason,
+                )
             except Exception as e:
                 self.asset_attempts.append(
                     AssetGenerationAttempt(
@@ -462,7 +559,14 @@ class AutoDirectorService:
                     output_path=target_path,
                     title=shot.subject or script_title,
                 )
-                return Path(p), h
+                return ShotAssetResult(
+                    path=str(p),
+                    sha256=h,
+                    requested_modality=requested_modality,
+                    actual_modality=VisualModality.DIAGRAM,
+                    provider="diagram_renderer",
+                    fallback_reason="Ungrounded evidence binding, fell back to diagram",
+                )
 
             try:
                 is_verbatim = bool(binding.source_excerpt and binding.excerpt_is_verbatim)
@@ -487,7 +591,14 @@ class AutoDirectorService:
                         latency_ms=int((time.time() - t0) * 1000),
                     )
                 )
-                return Path(p), h
+                return ShotAssetResult(
+                    path=str(p),
+                    sha256=h,
+                    requested_modality=requested_modality,
+                    actual_modality=VisualModality.DOCUMENT_EVIDENCE,
+                    provider="evidence_renderer",
+                    fallback_reason=fallback_reason,
+                )
             except Exception as e:
                 self.asset_attempts.append(
                     AssetGenerationAttempt(
@@ -514,7 +625,14 @@ class AutoDirectorService:
                     output_path=target_path,
                     title=shot.subject or script_title,
                 )
-                return Path(p), h
+                return ShotAssetResult(
+                    path=str(p),
+                    sha256=h,
+                    requested_modality=requested_modality,
+                    actual_modality=VisualModality.DIAGRAM,
+                    provider="diagram_renderer",
+                    fallback_reason="No grounded stat metric, fell back to diagram",
+                )
 
             try:
                 p, h = self.motion_renderer.render_stat_callout(
@@ -533,7 +651,14 @@ class AutoDirectorService:
                         latency_ms=int((time.time() - t0) * 1000),
                     )
                 )
-                return Path(p), h
+                return ShotAssetResult(
+                    path=str(p),
+                    sha256=h,
+                    requested_modality=requested_modality,
+                    actual_modality=VisualModality.MOTION_GRAPHICS,
+                    provider="motion_renderer",
+                    fallback_reason=fallback_reason,
+                )
             except Exception as e:
                 self.asset_attempts.append(
                     AssetGenerationAttempt(
@@ -575,7 +700,14 @@ class AutoDirectorService:
                                     latency_ms=int((time.time() - t0) * 1000),
                                 )
                             )
-                            return Path(vid_p), vid_h
+                            return ShotAssetResult(
+                                path=str(vid_p),
+                                sha256=vid_h,
+                                requested_modality=requested_modality,
+                                actual_modality=VisualModality.GENERATED_VIDEO,
+                                provider="gflow",
+                                fallback_reason=fallback_reason,
+                            )
                     except Exception as e:
                         self.asset_attempts.append(
                             AssetGenerationAttempt(
@@ -611,7 +743,14 @@ class AutoDirectorService:
                                     latency_ms=int((time.time() - t0) * 1000),
                                 )
                             )
-                            return Path(img_p), img_h
+                            return ShotAssetResult(
+                                path=str(img_p),
+                                sha256=img_h,
+                                requested_modality=requested_modality,
+                                actual_modality=VisualModality.GENERATED_IMAGE,
+                                provider="gflow",
+                                fallback_reason="Video generation failed, fell back to AI image" if modality == VisualModality.GENERATED_VIDEO else fallback_reason,
+                            )
                     except Exception as e:
                         self.asset_attempts.append(
                             AssetGenerationAttempt(
@@ -633,7 +772,14 @@ class AutoDirectorService:
                 output_path=target_path,
                 title=shot.subject or script_title,
             )
-            return Path(p), h
+            return ShotAssetResult(
+                path=str(p),
+                sha256=h,
+                requested_modality=requested_modality,
+                actual_modality=VisualModality.DIAGRAM,
+                provider="diagram_renderer",
+                fallback_reason="GFlow generation unavailable or failed, fell back to diagram",
+            )
 
         # Fallback of last resort: Static Card
         card_path = output_dir / f"{shot_id}_card.png"
@@ -654,7 +800,14 @@ class AutoDirectorService:
                 latency_ms=int((time.time() - t0) * 1000),
             )
         )
-        return Path(p), h
+        return ShotAssetResult(
+            path=str(p),
+            sha256=h,
+            requested_modality=requested_modality,
+            actual_modality=VisualModality.STATIC_CARD,
+            provider="visual_factory_static_card",
+            fallback_reason="All primary renderers failed, fell back to static card",
+        )
 
     def regenerate_single_shot(
         self,
@@ -697,20 +850,23 @@ class AutoDirectorService:
             elif target_shot.visual_modality in (VisualModality.GENERATED_VIDEO, VisualModality.GENERATED_IMAGE):
                 target_shot.generation_prompt = new_instruction
 
-        asset_path, asset_hash = self._generate_shot_asset(
+        asset_res = self._generate_shot_asset(
             shot=target_shot,
             shot_index=target_idx,
             output_dir=shots_dir,
             script_title=script_title,
             channel_name=channel_name,
             dossier=dossier,
+            fact_report=None,
         )
+        target_shot.requested_modality = asset_res.requested_modality
+        target_shot.visual_modality = asset_res.actual_modality
 
         for t_shot in timeline.shots:
             if t_shot.shot_id == shot_id:
-                t_shot.asset_path = str(asset_path)
-                t_shot.asset_sha256 = asset_hash
-                t_shot.modality = target_shot.visual_modality
+                t_shot.asset_path = str(asset_res.path)
+                t_shot.asset_sha256 = asset_res.sha256
+                t_shot.modality = asset_res.actual_modality
                 break
 
         storyboard_path = output_dir / f"storyboard_{project_id}.json"

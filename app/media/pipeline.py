@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 from typing import List, Optional, Tuple
 
+from app.core.backend import ReasoningBackend
 from app.db.repository import SQLiteRepository
 from app.domain.enums import AssetType, QualityStatus, VideoLifecycleState
 from app.domain.models import Asset, QualityResult, VideoProject
@@ -68,8 +69,10 @@ class MediaProductionPipeline:
         gflow_provider: Optional[GFlowMediaProvider] = None,
         base_output_dir: Optional[Path] = None,
         director_service: Optional[AutoDirectorService] = None,
+        reasoning_backend: Optional[ReasoningBackend] = None,
     ):
         self.repo = repository
+        self.backend = reasoning_backend
         self.tts = tts_backend or EdgeTTSBackend()
         self.renderer = renderer or FFmpegRenderer()
         self.qa = qa_inspector or MediaQAInspector()
@@ -81,6 +84,7 @@ class MediaProductionPipeline:
         self.director = director_service or AutoDirectorService(
             gflow_provider=self.gflow_provider,
             visual_factory=getattr(self.planner, "visual_factory", None),
+            reasoning_backend=self.backend,
         )
         self.visual_evaluator = VisualShotEvaluator()
         self.sub_gen = subtitle_generator or SubtitleGenerator()
@@ -400,6 +404,9 @@ class MediaProductionPipeline:
                     except ValueError:
                         content_fmt = ContentFormat.EXPLAINER
 
+                research_dossier = self.repo.get_research_dossier(project_id)
+                fact_report = self.repo.get_fact_check_report(project_id)
+
                 timeline, storyboard = self.director.plan_and_render_timeline(
                     project_id=project_id,
                     script=project.script,
@@ -407,7 +414,8 @@ class MediaProductionPipeline:
                     total_audio_duration=tts_res.duration_seconds,
                     output_dir=director_output_dir,
                     content_format=content_fmt,
-                    dossier=getattr(project, "research", None),
+                    dossier=research_dossier,
+                    fact_report=fact_report,
                 )
                 if timeline and len(timeline.shots) > 0:
                     used_director = True
@@ -433,11 +441,15 @@ class MediaProductionPipeline:
                     created_assets.append(shot_asset)
                     ordered_scene_hashes.append(shot.asset_sha256)
 
-                # Construct scene_plans proxy for SoundDesigner
+                # Construct scene_plans proxy for SoundDesigner with semantic narration preserved
                 scene_plans = [
                     SceneRenderPlan(
                         scene_index=s_idx,
-                        narration_segment="",
+                        narration_segment=(
+                            storyboard.shots[s_idx].narration_segment
+                            if (storyboard and s_idx < len(storyboard.shots) and storyboard.shots[s_idx].narration_segment)
+                            else (getattr(s, "narration_segment", "") or "")
+                        ),
                         target_duration_seconds=max(0.5, s.duration),
                         visual_asset_path=s.asset_path,
                         visual_asset_sha256=s.asset_sha256,

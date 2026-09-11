@@ -181,10 +181,26 @@ class ShotSpec(BaseModel):
     evidence_binding: Optional[EvidenceBinding] = Field(default=None, description="Grounded source evidence binding")
     code_output_lines: List[str] = Field(default_factory=list, description="Verified output lines for terminal execution")
     terminal_mode: str = Field(default="ILLUSTRATIVE_TERMINAL", description="REAL_TERMINAL vs ILLUSTRATIVE_TERMINAL")
+    requested_modality: Optional[VisualModality] = Field(default=None, description="Original requested modality before fallback")
     visual_data_mode: VisualizationDataMode = Field(
         default=VisualizationDataMode.GROUNDED, description="Grounding data mode: GROUNDED vs CONCEPTUAL"
     )
     motion_cues: List[MotionCue] = Field(default_factory=list, description="Explicit temporal animation cues for true motion graphics")
+
+
+class ShotAssetResult(BaseModel):
+    """Result of visual asset generation capturing true modality accounting and fallback provenance."""
+
+    path: Path = Field(description="Local filepath of generated asset")
+    sha256: str = Field(description="SHA-256 digest of generated asset")
+    requested_modality: VisualModality = Field(description="Original modality requested by storyboard")
+    actual_modality: VisualModality = Field(description="Actual modality produced after fallback resolution")
+    provider: str = Field(description="Name of provider or renderer that generated the asset")
+    fallback_reason: Optional[str] = Field(default=None, description="Reason for modality fallback if applicable")
+
+    def __iter__(self):
+        """Allow tuple unpacking (path, sha256) for backward compatibility."""
+        return iter((self.path, self.sha256))
 
 
 class OverlaySpec(BaseModel):

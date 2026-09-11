@@ -341,6 +341,7 @@ class BrainPipeline:
             repository=self.repo,
             scene_planner=scene_planner,
             gflow_provider=gflow_prov,
+            reasoning_backend=self.backend,
         )
 
         project, qa_result, render_manifest = media_pipeline.run_production(

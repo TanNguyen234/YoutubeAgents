@@ -6,7 +6,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.core.backend import ReasoningBackend
-from app.domain.models import Scene, Script
+from app.domain.models import Claim, ResearchSource, Scene, Script
 from app.media.director.models import (
     BeatPurpose,
     ContentFormat,
@@ -34,6 +34,8 @@ class BeatDecomposer:
         total_scenes: int,
         scene_duration: float,
         topic_title: str = "",
+        claims: Optional[List[Claim]] = None,
+        sources: Optional[List[ResearchSource]] = None,
     ) -> List[NarrativeBeat]:
         """Deterministic semantic beat decomposition breaking long scene narration into 2-5 fast-paced beats."""
         raw_text = (scene.narration or "").strip()
@@ -130,6 +132,24 @@ class BeatDecomposer:
                 or word.lower() in {"sqlite", "wal", "git", "docker", "llm", "gpu", "nvidia", "linux", "cpu", "ram", "python", "ai"}
             ]
 
+            # Source refs propagation via lightweight claim matching
+            matched_source_refs: List[str] = []
+            matched_claim_stmt = None
+            if claims:
+                c_tokens = set(re.findall(r"\w+", clause.lower()))
+                for clm in claims:
+                    clm_tokens = set(re.findall(r"\w+", clm.statement.lower()))
+                    if not clm_tokens:
+                        continue
+                    overlap = len(c_tokens & clm_tokens) / len(clm_tokens)
+                    if clm.statement.lower() in clause.lower() or overlap >= 0.40:
+                        if clm.source_id:
+                            matched_source_refs.append(clm.source_id)
+                        elif clm.cited_url:
+                            matched_source_refs.append(clm.cited_url)
+                        matched_claim_stmt = clm.statement
+                        break
+
             beat = NarrativeBeat(
                 beat_id=beat_id,
                 scene_index=scene_index,
@@ -137,13 +157,14 @@ class BeatDecomposer:
                 start_hint=round(cur_time, 2),
                 duration_hint=beat_dur,
                 purpose=purpose,
-                key_claim=clause if requires_evidence else None,
+                key_claim=matched_claim_stmt or (clause if requires_evidence else None),
                 key_entities=list(dict.fromkeys(entities))[:4],
                 visual_intent=intent,
                 importance=0.8 if purpose in (BeatPurpose.HOOK, BeatPurpose.PROVE, BeatPurpose.PAYOFF) else 0.5,
-                requires_evidence=requires_evidence,
+                requires_evidence=requires_evidence or bool(matched_source_refs),
                 preferred_modalities=preferred_mods,
                 avoid_modalities=[VisualModality.STATIC_CARD],
+                source_refs=list(dict.fromkeys(matched_source_refs)),
             )
             beats.append(beat)
             cur_time += beat_dur
@@ -155,6 +176,8 @@ class BeatDecomposer:
         script: Script,
         total_audio_duration: float,
         content_format: ContentFormat = ContentFormat.EXPLAINER,
+        claims: Optional[List[Claim]] = None,
+        sources: Optional[List[ResearchSource]] = None,
     ) -> List[NarrativeBeat]:
         """Decompose an entire Script into a sequenced list of narrative beats fitting total audio duration."""
         if not script or not script.scenes:
@@ -181,6 +204,8 @@ Rule 1: ONE script scene MUST become 2 to 4 visual beats (average duration ~1.5 
 Rule 2: Narration describes. Visuals demonstrate, prove, compare, simulate, or contextualize.
 Rule 3: NEVER suggest a static slide repeating the narration words.
 Rule 4: Look for UI simulation, token animation, diagrams, code, charts, and evidence opportunities.
+Rule 5: Grounding and Truthfulness:
+Never fabricate benchmark data. Never fabricate command output. Never fabricate source quotations. If information is unavailable, choose a conceptual modality.
 
 Topic: {script.title}
 Format: {content_format.value}
@@ -208,6 +233,8 @@ Script Scenes:
                     total_scenes=total_scenes,
                     scene_duration=scene_durations[idx],
                     topic_title=script.title,
+                    claims=claims,
+                    sources=sources,
                 )
                 all_beats.extend(scene_beats)
 
