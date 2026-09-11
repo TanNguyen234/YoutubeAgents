@@ -11,6 +11,7 @@ from app.media.director.modality_router import VisualModalityRouter
 from app.media.director.models import (
     ChannelCreativeProfile,
     ChartDatum,
+    ChartDatumOrigin,
     ComparisonColumn,
     ContentFormat,
     EvidenceBinding,
@@ -19,7 +20,9 @@ from app.media.director.models import (
     Storyboard,
     VisualIntent,
     VisualModality,
+    VisualizationDataMode,
 )
+from app.media.director.quality_evaluator import validate_evidence_binding
 
 
 class StoryboardPlanner:
@@ -177,13 +180,34 @@ class StoryboardPlanner:
         if not matched_source and sources and best_claim.source_id:
             matched_source = next((s for s in sources if best_claim.source_id in s.id or s.id in best_claim.source_id), None)
 
-        source_title = matched_source.title if matched_source else (best_claim.cited_url or "Official Documentation")
-        source_url = (matched_source.url if matched_source else best_claim.cited_url) or "https://verified-source.internal"
-        source_ref = (matched_source.id if matched_source else best_claim.source_id) or "src_verified"
-
         is_verified = bool(best_claim.verified or getattr(best_claim, "verdict", None) == ClaimVerificationVerdict.VERIFIED)
+        if not is_verified:
+            return None
 
-        return EvidenceBinding(
+        source_url = matched_source.url if matched_source else best_claim.cited_url
+        if not source_url or not source_url.strip():
+            return None
+
+        url_lower = source_url.lower().strip()
+        placeholder_patterns = [
+            "verified-source.internal",
+            "localhost",
+            "127.0.0.1",
+            "example.com",
+            "placeholder",
+            ".internal",
+            "test.local",
+        ]
+        if any(pat in url_lower for pat in placeholder_patterns):
+            return None
+
+        source_ref = matched_source.id if matched_source else best_claim.source_id
+        if not source_ref or source_ref.strip() in ("src_verified", "placeholder", "fake_ref"):
+            return None
+
+        source_title = matched_source.title if matched_source else (best_claim.cited_url or "Source Reference")
+
+        binding = EvidenceBinding(
             claim_id=best_claim.id,
             source_ref=source_ref,
             source_title=source_title,
@@ -194,6 +218,8 @@ class StoryboardPlanner:
             claim_verified=is_verified,
             quote_or_excerpt=best_claim.cited_excerpt or best_claim.statement,
         )
+        is_valid, _ = validate_evidence_binding(binding)
+        return binding if is_valid else None
 
     def plan_storyboard(
         self,
@@ -229,7 +255,7 @@ class StoryboardPlanner:
 
             # Grounding enforcement & reroute checks:
             # 1. DATA_VISUALIZATION requires either explicit chart_data, extractable numbers, or conceptual token context
-            has_numbers = bool(re.findall(r"\b\d+(?:\.\d+)?%?\b", beat.narration)) or bool(beat.chart_data)
+            has_numbers = bool(re.search(r"\d+(?:\.\d+)?", beat.narration)) or bool(beat.chart_data)
             is_token_concept = any(k in beat.narration.lower() for k in ("token", "next token", "probability"))
             if selected_mod == VisualModality.DATA_VISUALIZATION and not (has_numbers or is_token_concept):
                 selected_mod = VisualModality.DIAGRAM
@@ -239,7 +265,12 @@ class StoryboardPlanner:
                 resolved_binding = self._resolve_evidence_binding(beat, dossier, fact_report)
                 if resolved_binding:
                     beat.evidence_binding = resolved_binding
-                elif not beat.evidence_binding:
+                elif beat.evidence_binding:
+                    is_valid, _ = validate_evidence_binding(beat.evidence_binding)
+                    if not is_valid:
+                        beat.evidence_binding = None
+                        selected_mod = VisualModality.DIAGRAM
+                else:
                     selected_mod = VisualModality.DIAGRAM
 
             # 3. COMPARISON requires structured comparison points or extractable entities
@@ -277,7 +308,13 @@ class StoryboardPlanner:
                 metric_pattern = r"\b(\d+(?:\.\d+)?)\s*(%|percent|ms|s|seconds|gb|mb|tb|k|m|b|\$|x faster|times faster)\b"
                 metric_matches = re.findall(metric_pattern, beat.narration, flags=re.IGNORECASE)
                 if metric_matches:
-                    shot_chart_data = []
+                    all_claims = []
+                    if fact_report and fact_report.claims:
+                        all_claims.extend(fact_report.claims)
+                    if dossier and dossier.claims:
+                        all_claims.extend([c for c in dossier.claims if c not in all_claims])
+
+                    grounded_datums: List[ChartDatum] = []
                     for i, (num_val, unit_val) in enumerate(metric_matches[:4]):
                         cleaned_unit = unit_val.strip()
                         # Detect semantic label context from surrounding text or key entities
@@ -292,16 +329,43 @@ class StoryboardPlanner:
                             else:
                                 context_label = f"Measurement {i+1} ({cleaned_unit})"
 
-                        shot_chart_data.append(
-                            ChartDatum(
-                                label=context_label,
-                                value=float(num_val),
-                                unit=cleaned_unit,
-                                source_ref=beat.source_refs[0] if beat.source_refs else None,
+                        # Grounding verification: Only chart if number matches a verified claim or external source
+                        matched_claim = None
+                        for clm in all_claims:
+                            is_clm_verified = bool(clm.verified or getattr(clm, "verdict", None) == ClaimVerificationVerdict.VERIFIED)
+                            if is_clm_verified and (num_val in clm.statement or (clm.cited_excerpt and num_val in clm.cited_excerpt)):
+                                matched_claim = clm
+                                break
+
+                        if matched_claim:
+                            grounded_datums.append(
+                                ChartDatum(
+                                    label=context_label,
+                                    value=float(num_val),
+                                    unit=cleaned_unit,
+                                    origin=ChartDatumOrigin.VERIFIED_CLAIM,
+                                    claim_id=matched_claim.id,
+                                    source_ref=matched_claim.source_id or (matched_claim.cited_url if matched_claim.cited_url else None),
+                                )
                             )
-                        )
+                        elif beat.source_refs:
+                            grounded_datums.append(
+                                ChartDatum(
+                                    label=context_label,
+                                    value=float(num_val),
+                                    unit=cleaned_unit,
+                                    origin=ChartDatumOrigin.EXTERNAL_SOURCE,
+                                    source_ref=beat.source_refs[0],
+                                )
+                            )
+
+                    if grounded_datums:
+                        shot_chart_data = grounded_datums
+                    elif selected_mod == VisualModality.DATA_VISUALIZATION:
+                        selected_mod = VisualModality.DIAGRAM
                 elif selected_mod == VisualModality.DATA_VISUALIZATION:
                     selected_mod = VisualModality.DIAGRAM
+
 
             shot = ShotSpec(
                 shot_id=f"shot_{b_idx + 1:02d}",

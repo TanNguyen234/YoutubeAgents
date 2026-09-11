@@ -145,3 +145,112 @@ def test_unverified_evidence_reroutes_to_diagram():
     assert len(storyboard.shots) == 1
     # Modality must be safely rerouted to DIAGRAM because evidence cannot be grounded
     assert storyboard.shots[0].visual_modality == VisualModality.DIAGRAM
+
+
+def test_missing_source_reroutes_to_diagram():
+    """Missing source ref or claim must reroute DOCUMENT_EVIDENCE to DIAGRAM."""
+    test_unverified_evidence_reroutes_to_diagram()
+
+
+def test_evidence_with_placeholder_url_is_rejected():
+    """Validate that placeholder URLs (internal, localhost, example.com) are rejected by evidence validation."""
+    from app.media.director.quality_evaluator import validate_evidence_binding
+
+    for bad_url in [
+        "https://verified-source.internal",
+        "http://localhost:8000/docs",
+        "https://127.0.0.1/evidence",
+        "https://example.com/source",
+        "placeholder",
+        "https://test.internal/claim",
+    ]:
+        binding = EvidenceBinding(
+            claim_id="clm_01",
+            source_ref="src_01",
+            source_title="Internal Ref",
+            source_url=bad_url,
+            claim_verified=True,
+            source_excerpt="Some excerpt",
+            excerpt_is_verbatim=True,
+        )
+        is_valid, reason = validate_evidence_binding(binding)
+        assert is_valid is False
+        assert "placeholder" in reason.lower() or "internal" in reason.lower() or "invalid" in reason.lower()
+
+
+def test_unverified_evidence_binding_fails_creative_qa():
+    """Creative QA must fail when an ungrounded or unverified evidence binding is attached to a shot."""
+    from app.media.director.models import ShotSpec, Storyboard
+    from app.media.director.quality_evaluator import VisualShotEvaluator
+
+    evaluator = VisualShotEvaluator()
+
+    unverified_binding = EvidenceBinding(
+        claim_id="clm_fake",
+        source_ref="src_fake",
+        source_title="Unverified Source",
+        source_url="https://valid-domain.org/research",
+        claim_verified=False,  # Unverified!
+        source_excerpt="Unverified text",
+        excerpt_is_verbatim=False,
+    )
+
+    shot = ShotSpec(
+        shot_id="shot_unverified_ev",
+        scene_index=0,
+        beat_id="beat_01",
+        duration_seconds=3.0,
+        visual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        evidence_binding=unverified_binding,
+        narration_segment="Some narration about facts",
+        headline_text="Facts Headline",
+    )
+
+    storyboard = Storyboard(
+        project_id="proj_ev_test",
+        shots=[shot],
+        total_duration=3.0,
+    )
+
+    report = evaluator.generate_quality_report(storyboard=storyboard)
+    assert report.creative_status == "FAIL"
+    assert any("UNGROUNDED_EVIDENCE" in issue for issue in report.critical_failures)
+
+
+def test_verified_claim_with_real_source_passes():
+    """Valid verified claim with real non-placeholder source URL must pass Creative QA evidence check."""
+    from app.media.director.models import ShotSpec, Storyboard
+    from app.media.director.quality_evaluator import VisualShotEvaluator
+
+    evaluator = VisualShotEvaluator()
+
+    valid_binding = EvidenceBinding(
+        claim_id="clm_verified",
+        source_ref="src_real",
+        source_title="PostgreSQL 16 WAL",
+        source_url="https://postgresql.org/docs/16/wal.html",
+        claim_verified=True,
+        source_excerpt="WAL records all changes before writing.",
+        excerpt_is_verbatim=True,
+    )
+
+    shot = ShotSpec(
+        shot_id="shot_verified_ev",
+        scene_index=0,
+        beat_id="beat_01",
+        duration_seconds=3.0,
+        visual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        evidence_binding=valid_binding,
+        narration_segment="PostgreSQL ensures durability via WAL.",
+        headline_text="WAL Durability",
+    )
+
+    storyboard = Storyboard(
+        project_id="proj_ev_test",
+        shots=[shot],
+        total_duration=3.0,
+    )
+
+    report = evaluator.generate_quality_report(storyboard=storyboard)
+    assert not any("UNGROUNDED_EVIDENCE" in issue for issue in report.critical_failures)
+
