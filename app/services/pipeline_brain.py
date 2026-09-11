@@ -6,6 +6,7 @@ from app.core.backend import AntigravityCLIBackend, ReasoningBackend
 from app.db.repository import SQLiteRepository
 from app.domain.enums import (
     ApprovalOrigin,
+    AssetType,
     ContentFormat,
     EditorialSlotStatus,
     PrivacyStatus,
@@ -85,6 +86,7 @@ class BrainPipeline:
         recent_topics: Optional[List[str]] = None,
         max_rewrite_attempts: int = 2,
         content_format: ContentFormat = ContentFormat.EXPLAINER,
+        series_continuity: Optional[Dict[str, Any]] = None,
     ) -> Tuple[VideoProject, FactCheckReport]:
         """Execute Stage 1 (Topic Selection) -> Stage 2 (Research) -> Stage 3 (Script) -> Stage 4 (Fact Check) -> Stage 5 (Verification Gate)."""
         recent = recent_topics or []
@@ -190,6 +192,7 @@ class BrainPipeline:
                 keyword=keyword,
                 dossier=dossier,
                 content_format=content_format,
+                series_continuity=series_continuity,
             )
             script = self.writer.build_script(
                 script_id=f"scr-{project_id}",
@@ -350,9 +353,17 @@ class BrainPipeline:
 
         # 4. Stage 11.5: High-Impact Thumbnail Generation & SEO Packaging
         seo_service = SEOOptimizerService(self.repo)
-        seo_pkg = seo_service.generate_seo_package(project_id=project_id)
+        dossier = self.repo.get_research_dossier(project_id)
+        sources_summary = "\n".join(f"- {s.title}: {s.url}" for s in dossier.sources) if dossier else ""
+        seo_pkg = seo_service.generate_and_save_seo_package(
+            project_id=project_id,
+            primary_keyword=keyword,
+            series_context=continuity,
+            sources_summary=sources_summary,
+        )
 
-        thumb_service = ThumbnailDesignerService(self.repo)
+        thumb_output_dir = Path("output/projects") / project_id / "thumbnails"
+        thumb_service = ThumbnailDesignerService(self.repo, thumb_output_dir)
         bg_asset = None
         for a in project.assets:
             if a.asset_type in (AssetType.IMAGE, AssetType.SCENE_CARD) and Path(a.file_path).exists():

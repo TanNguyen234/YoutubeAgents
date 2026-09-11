@@ -24,12 +24,34 @@ class ScriptGenerator:
         keyword: str,
         dossier: ResearchDossier,
         content_format: ContentFormat = ContentFormat.EXPLAINER,
+        series_continuity: Optional[dict] = None,
     ) -> ScriptSections:
         """Generate structured script sections strictly grounded in the provided research dossier using high-retention storytelling."""
         sources_summary = "\n".join(
             f"- {s.title} ({s.url}): {s.content_snapshot[:1500] if s.content_snapshot else 'No snapshot'}"
             for s in dossier.sources
         )
+
+        continuity_section = ""
+        if series_continuity:
+            title = series_continuity.get("series_title") or series_continuity.get("title")
+            ep_num = series_continuity.get("episode_number")
+            prev_context = series_continuity.get("previous_context")
+            cta = series_continuity.get("cta")
+            vis_cont = series_continuity.get("visual_continuity")
+            parts = []
+            if title:
+                parts.append(f"- Series: {title}")
+            if ep_num:
+                parts.append(f"- Episode Number: {ep_num}")
+            if prev_context:
+                parts.append(f"- Narrative Continuity Context: {prev_context}")
+            if cta:
+                parts.append(f"- Series Call-to-Action: {cta}")
+            if vis_cont:
+                parts.append(f"- Visual Continuity Style: {vis_cont}")
+            if parts:
+                continuity_section = "SERIES CONTINUITY CONTEXT (Preserve narrative thread & CTA, do NOT treat previous episode lore as unverified empirical claims):\n" + "\n".join(parts) + "\n\n"
 
         format_guidelines = {
             ContentFormat.EXPLAINER: (
@@ -72,7 +94,7 @@ TOPIC SEED: {keyword}
 
 {format_guidelines}
 
-VERIFIED GROUND-TRUTH RESEARCH EVIDENCE:
+{continuity_section}VERIFIED GROUND-TRUTH RESEARCH EVIDENCE:
 {sources_summary}
 
 STRICT ANTI-AI-SLOP RETENTION RULES:
