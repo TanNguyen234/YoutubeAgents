@@ -230,15 +230,16 @@ class Storyboard(BaseModel):
     project_id: str = Field(description="Associated project ID")
     total_duration: float = Field(ge=0.0, description="Planned total audio runtime in seconds")
     content_format: ContentFormat = Field(default=ContentFormat.EXPLAINER)
+    profile_name: str = Field(default="Editorial Tech Shorts", description="Resolved channel creative profile name")
     beats: List[NarrativeBeat] = Field(default_factory=list, description="Ordered narrative beats")
     shots: List[ShotSpec] = Field(default_factory=list, description="Ordered shot specs")
     modality_counts: Dict[str, int] = Field(default_factory=dict, description="Count of shots per modality")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def compute_hash(self) -> str:
-        """Compute a deterministic hash of the storyboard shots, modalities, and timing."""
+        """Compute a deterministic hash of the storyboard shots, modalities, timing, and profile."""
         import hashlib
-        raw = f"{self.project_id}|{self.total_duration:.3f}|{self.content_format.value}|" + "|".join(
+        raw = f"{self.project_id}|{self.total_duration:.3f}|{self.content_format.value}|{self.profile_name}|" + "|".join(
             f"{s.shot_id}:{s.visual_modality.value}:{s.duration_seconds:.3f}:{(s.headline_text or '').strip()}:"
             f"{(s.chart_instruction or '').strip()}:{(s.diagram_instruction or '').strip()}:{(s.code_instruction or '').strip()}"
             for s in self.shots

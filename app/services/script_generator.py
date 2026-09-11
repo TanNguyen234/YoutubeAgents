@@ -2,6 +2,7 @@
 
 from typing import List, Optional
 from app.core.backend import AntigravityCLIBackend, ReasoningBackend
+from app.domain.enums import ContentFormat
 from app.domain.models import (
     Channel,
     Claim,
@@ -22,6 +23,7 @@ class ScriptGenerator:
         channel: Channel,
         keyword: str,
         dossier: ResearchDossier,
+        content_format: ContentFormat = ContentFormat.EXPLAINER,
     ) -> ScriptSections:
         """Generate structured script sections strictly grounded in the provided research dossier using high-retention storytelling."""
         sources_summary = "\n".join(
@@ -29,11 +31,46 @@ class ScriptGenerator:
             for s in dossier.sources
         )
 
+        format_guidelines = {
+            ContentFormat.EXPLAINER: (
+                "FORMAT: EXPLAINER\n"
+                "- Focus on the core mechanism with intuitive analogy and visual proof.\n"
+                "- Pacing: Hook -> Stakes -> Inner Working -> Breakthrough Payoff."
+            ),
+            ContentFormat.DEMO: (
+                "FORMAT: DEMO / HANDS-ON TUTORIAL\n"
+                "- Focus on concrete action: show setup -> run command -> inspect result -> observe pass/fail.\n"
+                "- Pacing: Action-oriented, live syntax, no theoretical fluff."
+            ),
+            ContentFormat.COMPARISON: (
+                "FORMAT: HEAD-TO-HEAD COMPARISON (A vs B)\n"
+                "- Focus on comparison dimensions: define contrast -> A behavior -> B behavior -> empirical verdict.\n"
+                "- Pacing: Balanced, fact-grounded, clear side-by-side trade-offs."
+            ),
+            ContentFormat.CASE_STUDY: (
+                "FORMAT: PRODUCTION CASE STUDY / POST-MORTEM\n"
+                "- Focus on real events: context -> critical outage/problem -> forensic discovery -> permanent fix.\n"
+                "- Pacing: Narrative tension, forensic logs, hard lessons."
+            ),
+            ContentFormat.EXPERIMENT: (
+                "FORMAT: BENCHMARK EXPERIMENT\n"
+                "- Focus on empirical measurement: hypothesis -> methodology -> metrics -> verdict.\n"
+                "- Pacing: Scientific rigor, grounded numbers, transparent analysis."
+            ),
+            ContentFormat.NEWS: (
+                "FORMAT: INDUSTRY NEWS / BREAKTHROUGH\n"
+                "- Focus on urgent shift: what happened -> why it matters today -> downstream consequences.\n"
+                "- Pacing: Fast, high urgency, direct relevance."
+            ),
+        }.get(content_format, "FORMAT: EXPLAINER\n- Core mechanism with clear visual payoff.")
+
         prompt = f"""You are an elite YouTube creator and scriptwriter renowned for high-retention viral tech videos (in the style of Fireship and Veritasium) for '{channel.title}'.
 Audience: {channel.target_audience}
 Niche: {channel.niche}
 
 TOPIC SEED: {keyword}
+
+{format_guidelines}
 
 VERIFIED GROUND-TRUTH RESEARCH EVIDENCE:
 {sources_summary}
@@ -44,7 +81,7 @@ STRICT ANTI-AI-SLOP RETENTION RULES:
 3. STORYTELLING CADENCE (30-42 seconds total):
    - Hook (0-4s): Shocking claim, paradox, or riddle.
    - Stakes & Conflict (4-12s): What goes wrong without this? (e.g. server crashes, millions of dollars lost, locks freeze everything).
-   - Mechanism (12-28s): Explain the core solution with a vivid visual analogy.
+   - Mechanism / Action (12-28s): Explain or demonstrate the core solution.
    - Payoff (28-36s): The triumphant breakthrough / measurable win.
    - Call to Action (36-40s): Short, punchy tease for the next episode.
 4. TONE & PACING:

@@ -240,6 +240,7 @@ class StoryboardPlanner:
             project_id=project_id,
             total_duration=total_audio_duration,
             content_format=content_format,
+            profile_name=self.profile.name if self.profile else "Editorial Tech Shorts",
             beats=beats,
             shots=shots,
             modality_counts=modality_counts,

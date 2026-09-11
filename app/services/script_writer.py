@@ -3,6 +3,7 @@
 import re
 from typing import List, Optional
 
+from app.domain.enums import ContentFormat
 from app.domain.models import Scene, Script, ScriptSections
 
 
@@ -32,6 +33,7 @@ class ScriptWriter:
         script_id: str,
         title: str,
         sections: ScriptSections,
+        content_format: ContentFormat = ContentFormat.EXPLAINER,
     ) -> Script:
         """Build and validate a typed Script domain model from sections."""
         all_narrations = [s.narration for s in sections.segments if s.narration]
@@ -51,5 +53,6 @@ class ScriptWriter:
             scenes=sections.segments,
             total_word_count=total_words,
             estimated_duration_seconds=total_duration,
+            content_format=content_format,
             sections=sections,
         )

@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.core.backend import AntigravityCLIBackend, ReasoningBackend
 from app.db.repository import SQLiteRepository
 from app.domain.enums import (
+    ContentFormat,
     EditorialSlotStatus,
     PrivacyStatus,
     QualityStatus,
@@ -82,6 +83,7 @@ class BrainPipeline:
         seed_urls: List[str],
         recent_topics: Optional[List[str]] = None,
         max_rewrite_attempts: int = 2,
+        content_format: ContentFormat = ContentFormat.EXPLAINER,
     ) -> Tuple[VideoProject, FactCheckReport]:
         """Execute Stage 1 (Topic Selection) -> Stage 2 (Research) -> Stage 3 (Script) -> Stage 4 (Fact Check) -> Stage 5 (Verification Gate)."""
         recent = recent_topics or []
@@ -94,8 +96,11 @@ class BrainPipeline:
                 channel_id=channel.id,
                 title=keyword,
                 state=VideoLifecycleState.CREATED,
+                content_format=content_format,
             )
             self.repo.save_video_project(project)
+        else:
+            project.content_format = content_format
 
         # 2. Stage 1: Deterministic Duplicate Check BEFORE network research
         is_dup, dup_score, matched = self.strategist.duplicate_detector.check_duplicate(keyword, recent)
@@ -183,13 +188,16 @@ class BrainPipeline:
                 channel=channel,
                 keyword=keyword,
                 dossier=dossier,
+                content_format=content_format,
             )
             script = self.writer.build_script(
                 script_id=f"scr-{project_id}",
                 title=keyword,
                 sections=sections,
+                content_format=content_format,
             )
             project.script = script
+            project.content_format = content_format
             # Durable Checkpoint: Save script & video project
             self.repo.save_video_project(project)
 
@@ -285,7 +293,8 @@ class BrainPipeline:
         rate: str = "+0%",
         pitch: str = "+0Hz",
         scheduled_time: Optional[datetime] = None,
-        simulate_analytics_views: int = 1500,
+        simulate_analytics_views: Optional[int] = None,
+        content_format: ContentFormat = ContentFormat.EXPLAINER,
     ) -> Dict[str, Any]:
         """Execute the complete 15-stage YouTube Autopilot lifecycle from Topic Selection to Strategy Feedback."""
         # 0. Editorial Series & Calendar Context
@@ -311,6 +320,7 @@ class BrainPipeline:
             keyword=keyword,
             seed_urls=seed_urls,
             recent_topics=recent_topics,
+            content_format=content_format,
         )
 
         if slot_id:
