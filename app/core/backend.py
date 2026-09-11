@@ -3,7 +3,8 @@
 import json
 import re
 import subprocess
-from typing import Any, Callable, Dict, Optional, Protocol, Type, TypeVar
+import time
+from typing import Any, Callable, Dict, List, Optional, Protocol, Type, TypeVar
 from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
@@ -47,9 +48,21 @@ class AntigravityCLIBackend:
     Executes structured generation using schema-enforced JSON output without external commercial API wrappers.
     """
 
-    def __init__(self, cli_binary: str = "agy", timeout_seconds: int = 120):
+    def __init__(
+        self,
+        cli_binary: str = "agy",
+        model: Optional[str] = "gemini-3.7-flash-low",
+        effort: Optional[str] = "low",
+        timeout_seconds: int = 180,
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
+    ):
         self.cli_binary = cli_binary
+        self.model = model
+        self.effort = effort
         self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
 
     @staticmethod
     def _strip_markdown_fences(raw_text: str) -> str:
@@ -64,25 +77,43 @@ class AntigravityCLIBackend:
         return clean.strip()
 
     @classmethod
+    def _extract_all_json_objects(cls, raw_text: str) -> List[Any]:
+        """Extract all valid JSON objects/arrays present in text (e.g. streaming events or line-delimited JSON)."""
+        clean = cls._strip_markdown_fences(raw_text)
+        decoder = json.JSONDecoder()
+        objects = []
+        pos = 0
+        n = len(clean)
+
+        while pos < n:
+            idx_brace = clean.find("{", pos)
+            idx_bracket = clean.find("[", pos)
+            if idx_brace != -1 and idx_bracket != -1:
+                next_start = min(idx_brace, idx_bracket)
+            elif idx_brace != -1:
+                next_start = idx_brace
+            elif idx_bracket != -1:
+                next_start = idx_bracket
+            else:
+                break
+
+            try:
+                obj, end_offset = decoder.raw_decode(clean[next_start:])
+                objects.append(obj)
+                pos = next_start + max(1, end_offset)
+            except Exception:
+                pos = next_start + 1
+
+        return objects
+
+    @classmethod
     def _extract_json_object(cls, raw_text: str) -> Any:
         """Robustly extract and decode the primary JSON object/array from string."""
-        clean = cls._strip_markdown_fences(raw_text)
-
-        # Find first opening brace or bracket
-        idx_brace = clean.find("{")
-        idx_bracket = clean.find("[")
-
-        start_idx = 0
-        if idx_brace != -1 and idx_bracket != -1:
-            start_idx = min(idx_brace, idx_bracket)
-        elif idx_brace != -1:
-            start_idx = idx_brace
-        elif idx_bracket != -1:
-            start_idx = idx_bracket
-
-        candidate = clean[start_idx:].strip()
+        objects = cls._extract_all_json_objects(raw_text)
+        if objects:
+            return objects[-1]
         decoder = json.JSONDecoder()
-        obj, _ = decoder.raw_decode(candidate)
+        obj, _ = decoder.raw_decode(cls._strip_markdown_fences(raw_text).strip())
         return obj
 
     def generate_structured(self, prompt: str, schema_cls: Type[T]) -> T:
@@ -94,37 +125,65 @@ class AntigravityCLIBackend:
             json.dump(schema_cls.model_json_schema(), tf)
             schema_file_path = tf.name
 
-        cmd = [
-            self.cli_binary,
+        cmd = [self.cli_binary]
+        if self.model:
+            cmd.extend(["--model", self.model])
+        if self.effort:
+            cmd.extend(["--effort", self.effort])
+        cmd.extend([
             "--print",
             prompt,
             "--output-format",
             "json",
             "--json-schema",
             schema_file_path,
-        ]
+        ])
 
+        res = None
         try:
-            res = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-            )
-        except FileNotFoundError:
-            raise AntigravityBackendError(
-                message=f"Antigravity CLI binary '{self.cli_binary}' not found on system PATH.",
-                error_type="CLI_UNAVAILABLE",
-                command=cmd,
-            )
-        except subprocess.TimeoutExpired as e:
-            raise AntigravityBackendError(
-                message=f"Antigravity reasoning execution timed out after {self.timeout_seconds}s.",
-                error_type="TIMEOUT",
-                command=cmd,
-                stdout=e.stdout or "",
-                stderr=e.stderr or "",
-            )
+            for attempt in range(self.max_retries):
+                try:
+                    res = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=self.timeout_seconds,
+                    )
+                except FileNotFoundError:
+                    raise AntigravityBackendError(
+                        message=f"Antigravity CLI binary '{self.cli_binary}' not found on system PATH.",
+                        error_type="CLI_UNAVAILABLE",
+                        command=cmd,
+                    )
+                except subprocess.TimeoutExpired as e:
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.retry_delay * (2 ** attempt))
+                        continue
+                    raise AntigravityBackendError(
+                        message=f"Antigravity reasoning execution timed out after {self.timeout_seconds}s.",
+                        error_type="TIMEOUT",
+                        command=cmd,
+                        stdout=e.stdout or "",
+                        stderr=e.stderr or "",
+                    )
+
+                if res.returncode != 0:
+                    err_details = res.stderr.strip() or res.stdout.strip()
+                    if attempt < self.max_retries - 1 and ("error" in err_details.lower() or res.returncode == 1):
+                        time.sleep(self.retry_delay * (2 ** attempt))
+                        continue
+                    error_type = "AUTH_ERROR" if "auth" in err_details.lower() or "login" in err_details.lower() else "EXECUTION_ERROR"
+                    raise AntigravityBackendError(
+                        message=f"Antigravity CLI failed with exit code {res.returncode}: {err_details}",
+                        error_type=error_type,
+                        command=cmd,
+                        returncode=res.returncode,
+                        stdout=res.stdout,
+                        stderr=res.stderr,
+                    )
+                break
         finally:
             if os.path.exists(schema_file_path):
                 try:
@@ -132,69 +191,86 @@ class AntigravityCLIBackend:
                 except Exception:
                     pass
 
-        if res.returncode != 0:
-            err_details = res.stderr.strip() or res.stdout.strip()
-            error_type = "AUTH_ERROR" if "auth" in err_details.lower() or "login" in err_details.lower() else "EXECUTION_ERROR"
-            raise AntigravityBackendError(
-                message=f"Antigravity CLI failed with exit code {res.returncode}: {err_details}",
-                error_type=error_type,
-                command=cmd,
-                returncode=res.returncode,
-                stdout=res.stdout,
-                stderr=res.stderr,
-            )
-
         try:
-            # Parse wrapper output from agy
+            # Robust extraction across streaming events, wrapper payloads, or direct output
+            if not res or res.stdout is None:
+                raise ValueError("Antigravity CLI returned empty or null output.")
             stdout_clean = res.stdout.strip()
-            wrapper_obj = self._extract_json_object(stdout_clean)
+            candidates = self._extract_all_json_objects(stdout_clean)
+            if not candidates:
+                raise ValueError("No valid JSON object found in CLI output.")
 
-            if isinstance(wrapper_obj, dict) and "response" in wrapper_obj:
-                raw_response = wrapper_obj["response"]
-                if isinstance(raw_response, str):
-                    clean_inner = self._strip_markdown_fences(raw_response)
-                    if "{" in clean_inner or "[" in clean_inner:
-                        inner_obj = self._extract_json_object(clean_inner)
-                    else:
-                        inner_obj = wrapper_obj
-                elif isinstance(raw_response, (dict, list)):
-                    inner_obj = raw_response
-                else:
-                    inner_obj = wrapper_obj
-            else:
-                inner_obj = wrapper_obj
+            last_error = None
+            for cand in reversed(candidates):
+                try:
+                    return schema_cls.model_validate(cand)
+                except Exception as ex:
+                    last_error = ex
 
-            return schema_cls.model_validate(inner_obj)
+                if isinstance(cand, dict) and "response" in cand:
+                    raw_response = cand["response"]
+                    if isinstance(raw_response, (dict, list)):
+                        try:
+                            return schema_cls.model_validate(raw_response)
+                        except Exception as ex:
+                            last_error = ex
+                    elif isinstance(raw_response, str):
+                        inner_candidates = self._extract_all_json_objects(raw_response)
+                        for inner in reversed(inner_candidates):
+                            try:
+                                return schema_cls.model_validate(inner)
+                            except Exception as ex:
+                                last_error = ex
+
+            if last_error:
+                raise last_error
+            return schema_cls.model_validate(candidates[-1])
         except Exception as e:
             raise AntigravityBackendError(
                 message=f"Failed to parse structured JSON output into schema '{schema_cls.__name__}': {str(e)}",
                 error_type="INVALID_STRUCTURED_OUTPUT",
                 command=cmd,
-                stdout=res.stdout,
-                stderr=res.stderr,
+                stdout=res.stdout if res else "",
+                stderr=res.stderr if res else "",
             )
 
     def generate_text(self, prompt: str) -> str:
         """Execute `agy` CLI for unstructured text generation."""
-        cmd = [self.cli_binary, "--print", prompt, "--output-format", "json"]
-        try:
-            res = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-            )
-        except Exception as e:
-            raise AntigravityBackendError(message=f"Antigravity CLI error: {str(e)}", error_type="EXECUTION_ERROR")
+        cmd = [self.cli_binary]
+        if self.model:
+            cmd.extend(["--model", self.model])
+        if self.effort:
+            cmd.extend(["--effort", self.effort])
+        cmd.extend(["--print", prompt, "--output-format", "json"])
+        res = None
+        for attempt in range(self.max_retries):
+            try:
+                res = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=self.timeout_seconds,
+                )
+            except Exception as e:
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (2 ** attempt))
+                    continue
+                raise AntigravityBackendError(message=f"Antigravity CLI error: {str(e)}", error_type="EXECUTION_ERROR")
 
-        if res.returncode != 0:
-            raise AntigravityBackendError(
-                message=f"Antigravity CLI failed: {res.stderr}",
-                error_type="EXECUTION_ERROR",
-                returncode=res.returncode,
-                stdout=res.stdout,
-                stderr=res.stderr,
-            )
+            if res.returncode != 0:
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (2 ** attempt))
+                    continue
+                raise AntigravityBackendError(
+                    message=f"Antigravity CLI failed: {res.stderr}",
+                    error_type="EXECUTION_ERROR",
+                    returncode=res.returncode,
+                    stdout=res.stdout,
+                    stderr=res.stderr,
+                )
+            break
 
         try:
             wrapper = json.loads(res.stdout)

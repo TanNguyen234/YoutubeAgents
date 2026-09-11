@@ -33,7 +33,7 @@ class ResearchAgent:
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
         self.client = http_client or httpx.Client(
             timeout=20.0,
-            headers={"User-Agent": "YouTubeAutopilot-ResearchAgent/0.1.0"},
+            headers={"User-Agent": "YouTubeAutopilot-ResearchAgent/1.0 (contact: tanntd.2005@gmail.com; https://github.com/tan-tc7tl)"},
             follow_redirects=True,
         )
 

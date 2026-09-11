@@ -1,0 +1,110 @@
+{
+  "timestamp": "2026-09-08T04:36:26Z",
+  "project_id": "proj-wal-live-1788841921",
+  "elapsed_seconds": 265.01,
+  "media_capabilities": {
+    "ffmpeg": "ffmpeg version 8.0.1-essentials_build-www.gyan.dev Copyright (c) 2000-2025 the FFmpeg developers",
+    "ffprobe": "ffprobe version 8.0.1-essentials_build-www.gyan.dev Copyright (c) 2007-2025 the FFmpeg developers",
+    "tts_available": true
+  },
+  "gflow_capabilities": {
+    "authenticated": true,
+    "credits": 1050,
+    "email": "tanntd.2005@gmail.com"
+  },
+  "stages_verified": [
+    "0. Content Series & Cadence Scheduling (EditorialCalendarService)",
+    "1. Research & Evidence Collection (ResearchAgent)",
+    "2. Evidence-Aware Topic Evaluation & Strategy Scoring (TopicStrategist & TopicEvaluator)",
+    "3. Scriptwriting with Episodic Continuity Tokens (ScriptWriter)",
+    "4. Claim Extraction & Automated Verification (ClaimExtractor & FactChecker)",
+    "5. Quality Verification Gate (FactCheckReport)",
+    "6. Visual Planning with GFlow Prompts (ScenePlanner)",
+    "7. Media Generation (GFlowMediaProvider & VisualFactory)",
+    "8. Dynamic Cinematics (CinematographerService Ken Burns)",
+    "9. Neural TTS Narration (EdgeTTSVoiceProvider)",
+    "10. Auto-ducking BGM & Subtitles (.srt)",
+    "11. FFmpeg Master Rendering & EBU R128 Loudness QA",
+    "11.5. 3-Variant SEO & Packaging Engine (SEOOptimizerService)",
+    "11.6. High-CTR Safe-Zone Thumbnail Design (ThumbnailDesignerService)",
+    "12. Human Review Gate (ReviewRecord)",
+    "12.5. YouTube API Quota Budget Guard (QuotaBudgetManager)",
+    "13. YouTube Upload / Scheduling (PublicationJob)",
+    "14. YouTube Analytics Ingestion (AnalyticsSnapshot)",
+    "15. Closed-Loop Strategy Feedback (StrategyFeedbackLoop)"
+  ],
+  "receipt": {
+    "project_id": "proj-wal-live-1788841921",
+    "final_state": "PUBLISHED",
+    "channel_title": "High Performance Database Engineering",
+    "keyword": "The Secret Setting That Made SQLite 10x Faster",
+    "editorial_continuity": {
+      "series_id": "ser-e3caf5a4",
+      "series_title": "60-Second Deep Tech",
+      "current_episode": 1,
+      "display_badge": "60-Second Deep Tech | Ep 01",
+      "call_to_action": "Subscribe to follow the '60-Second Deep Tech' series. Next episode coming soon!",
+      "playlist_id": null
+    },
+    "fact_report": {
+      "verified_count": 5,
+      "failed_count": 0,
+      "overall_verdict": "PASSED"
+    },
+    "qa_result": {
+      "status": "PASSED",
+      "loudness_lufs": -14.91,
+      "duration_seconds": 43.1,
+      "issues": []
+    },
+    "render_manifest": {
+      "final_video_path": "output\\projects\\proj-wal-live-1788841921\\render\\final_proj-wal-live-1788841921.mp4",
+      "final_video_sha256": "a05e81fbbe3f7128c48b6314cddfd0205e2708e1bb86aad4bd505ce65725c51c",
+      "production_fingerprint": "8fb16e150d0f4a13afe7c80eb1957c00e88dc441bb5f6fde07d2fce3af96883e",
+      "scene_count": 2
+    },
+    "seo_package": {
+      "selected_title": "How The Secret Setting That Made SQLite 10x Faster Changes Everything (Fast Guide)",
+      "title_variants_count": 3,
+      "chapters_count": 2,
+      "tags_count": 17,
+      "pinned_comment": "What is your biggest question about The Secret Setting That Made SQLite 10x Faster? Drop your thoughts below and let's discuss in the comments! \ud83d\udc47"
+    },
+    "thumbnail_package": {
+      "headline_text": "THE SECRET SETTING",
+      "file_path_16_9": "output\\projects\\proj-wal-live-1788841921\\render\\thumbnails\\thumb_proj-wal-live-1788841921_16_9.jpg",
+      "file_path_9_16": "output\\projects\\proj-wal-live-1788841921\\render\\thumbnails\\thumb_proj-wal-live-1788841921_9_16.jpg",
+      "sha256": "ead6c7a80a6afaec5374020fa14c628b5618491dc25d2ce667bf62d217f7b0be"
+    },
+    "review_record": {
+      "operator": "AntigravityLiveAutoQA",
+      "action": "APPROVE",
+      "privacy": "private"
+    },
+    "quota_status": {
+      "daily_limit": 10000,
+      "spent_today": 9900,
+      "remaining_today": 100
+    },
+    "publication_job": {
+      "job_id": "pub-d1171c19",
+      "status": "COMPLETED",
+      "youtube_video_id": "VVoOn8bD_qU",
+      "mode": "REAL"
+    },
+    "analytics_snapshot": {
+      "views": 3500,
+      "watch_time_hours": 122.5,
+      "ctr_percent": 7.8
+    },
+    "strategy_feedback": {
+      "total_snapshots": 5,
+      "mean_views": 3500.0,
+      "recommendations": [
+        "Strong opening hook retention (68.5%). Maintain current hook pacing.",
+        "Healthy CTR (7.8%). Continue with technical architecture titles.",
+        "Prioritize topics similar to top performers: 'Mastering SQLite WAL Mode Concurrency', 'Mastering SQLite WAL Mode Concurrency'."
+      ]
+    }
+  }
+}

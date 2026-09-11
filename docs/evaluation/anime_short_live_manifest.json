@@ -1,0 +1,83 @@
+{
+  "timestamp": "2026-09-08T08:11:11Z",
+  "project_id": "proj-akira-live-1788853809",
+  "elapsed_seconds": 1262.07,
+  "visual_format": "Cinematic Anime Motion Illustrations (No Slides / No Terminal Windows)",
+  "audio_format": "Studio AI-Generated Lo-Fi Anime BGM with Sidechain Compressor Audio Ducking",
+  "youtube_video_id": "uwPYmTEhPJs",
+  "youtube_url": "https://youtu.be/uwPYmTEhPJs",
+  "receipt": {
+    "project_id": "proj-akira-live-1788853809",
+    "final_state": "PUBLISHED",
+    "channel_title": "Anime Animation Secrets",
+    "keyword": "How Akira's 160,000 Hand-Drawn Frames Revolutionized Anime",
+    "editorial_continuity": {
+      "series_id": "ser-b8d8ffc9",
+      "series_title": "Legendary Anime Frames",
+      "current_episode": 1,
+      "display_badge": "Legendary Anime Frames | Ep 01",
+      "call_to_action": "Subscribe to follow the 'Legendary Anime Frames' series. Next episode coming soon!",
+      "playlist_id": null
+    },
+    "fact_report": {
+      "verified_count": 4,
+      "failed_count": 0,
+      "overall_verdict": "PASSED"
+    },
+    "qa_result": {
+      "status": "PASSED",
+      "loudness_lufs": -15.44,
+      "duration_seconds": 38.8,
+      "issues": []
+    },
+    "render_manifest": {
+      "final_video_path": "output\\projects\\proj-akira-live-1788853809\\render\\final_proj-akira-live-1788853809.mp4",
+      "final_video_sha256": "cf357878bde7c816ade300c90a2dfb8e01d600010bcf5bf5d0f7c7148c77ef1d",
+      "production_fingerprint": "06404a90eee20a41c16ec10739c26bcf9c1082c3c71a9f86acbd905ebd37906e",
+      "scene_count": 2
+    },
+    "seo_package": {
+      "selected_title": "How How Akira's 160,000 Hand-Drawn Frames Revolutionized Anime Changes Everything (Fast Guide)",
+      "title_variants_count": 3,
+      "chapters_count": 2,
+      "tags_count": 16,
+      "pinned_comment": "What is your biggest question about How Akira's 160,000 Hand-Drawn Frames Revolutionized Anime? Drop your thoughts below and let's discuss in the comments! \ud83d\udc47"
+    },
+    "thumbnail_package": {
+      "headline_text": "HOW AKIRA'S 160,000",
+      "file_path_16_9": "output\\projects\\proj-akira-live-1788853809\\render\\thumbnails\\thumb_proj-akira-live-1788853809_16_9.jpg",
+      "file_path_9_16": "output\\projects\\proj-akira-live-1788853809\\render\\thumbnails\\thumb_proj-akira-live-1788853809_9_16.jpg",
+      "sha256": "fe6f255c35fd592c69cb5ca2a964f1e97d00349b802543f0ad555fb633640ffb"
+    },
+    "review_record": {
+      "operator": "AntigravityAnimeOperator",
+      "action": "APPROVE",
+      "privacy": "private"
+    },
+    "quota_status": {
+      "daily_limit": 10000,
+      "spent_today": 1650,
+      "remaining_today": 8350
+    },
+    "publication_job": {
+      "job_id": "pub-532575c6",
+      "status": "COMPLETED",
+      "youtube_video_id": "uwPYmTEhPJs",
+      "mode": "REAL"
+    },
+    "analytics_snapshot": {
+      "views": 5000,
+      "watch_time_hours": 175.0,
+      "ctr_percent": 7.8
+    },
+    "strategy_feedback": {
+      "total_snapshots": 1,
+      "mean_views": 5000.0,
+      "recommendations": [
+        "Strong opening hook retention (68.5%). Maintain current hook pacing.",
+        "Healthy CTR (7.8%). Continue with technical architecture titles.",
+        "Prioritize topics similar to top performers: 'How Akira's 160,000 Hand-Drawn Frames Revolutionized Anime'."
+      ]
+    }
+  }
+}
