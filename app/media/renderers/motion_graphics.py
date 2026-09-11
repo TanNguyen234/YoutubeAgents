@@ -198,6 +198,7 @@ class MotionGraphicsRenderer:
         cmd = [
             ffmpeg_bin,
             "-y",
+            "-loglevel", "error",
             "-f", "rawvideo",
             "-vcodec", "rawvideo",
             "-s", f"{self.width}x{self.height}",
@@ -209,11 +210,18 @@ class MotionGraphicsRenderer:
             "-preset", "ultrafast",
             str(output_path),
         ]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        for frame in frame_images:
-            proc.stdin.write(frame.tobytes())
-        proc.stdin.close()
-        proc.wait(timeout=30)
+        input_bytes = b"".join(frame.tobytes() for frame in frame_images)
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        _, stderr_data = proc.communicate(input=input_bytes, timeout=60)
+        if proc.returncode != 0:
+            logger.warning(
+                f"FFmpeg motion encoding returned {proc.returncode}: {stderr_data.decode(errors='replace')}"
+            )
 
         if not output_path.exists() or output_path.stat().st_size == 0:
             fallback_png = output_path.with_suffix(".png")

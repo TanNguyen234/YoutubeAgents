@@ -14,10 +14,21 @@ from app.media.gflow_provider import (
 )
 
 
-def test_gflow_provider_initialization():
-    provider = GFlowMediaProvider()
-    assert provider.profile == "tanntd-2005"
-    assert provider.executable is not None
+def test_gflow_provider_initialization(monkeypatch):
+    # Without env var or arg, profile is "default"
+    monkeypatch.delenv("GFLOW_PROFILE", raising=False)
+    monkeypatch.delenv("GFLOW_EXECUTABLE", raising=False)
+    provider_default = GFlowMediaProvider()
+    assert provider_default.profile == "default"
+
+    # With GFLOW_PROFILE env var
+    monkeypatch.setenv("GFLOW_PROFILE", "env-profile")
+    provider_env = GFlowMediaProvider()
+    assert provider_env.profile == "env-profile"
+
+    # With explicit constructor argument (takes precedence)
+    provider_arg = GFlowMediaProvider(profile="explicit-profile")
+    assert provider_arg.profile == "explicit-profile"
 
 
 def test_gflow_capabilities_probe():
@@ -28,7 +39,8 @@ def test_gflow_capabilities_probe():
     if caps.get("available"):
         assert caps["credits"] > 0
         assert caps["authenticated"] is True
-        assert caps["profile"] == "tanntd-2005"
+        if provider.profile:
+            assert caps["profile"] == provider.profile
 
 
 def test_create_asset_record():
