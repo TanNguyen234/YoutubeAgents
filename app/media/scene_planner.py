@@ -2,9 +2,11 @@
 
 import hashlib
 from pathlib import Path
+import time
 from typing import Any, List, Optional
 
 from app.domain.models import Scene, Script
+from app.media.gflow_provider import AssetGenerationAttempt
 from app.media.models import SceneRenderPlan, SubtitleTrack
 from app.media.visual_factory import VisualFactory
 
@@ -24,6 +26,7 @@ class ScenePlanner:
     ):
         self.visual_factory = visual_factory or VisualFactory()
         self.gflow_provider = gflow_provider
+        self.asset_attempts: List[AssetGenerationAttempt] = []
 
     def build_cinematic_veo_prompt(
         self,
@@ -116,33 +119,93 @@ class ScenePlanner:
             motion_video_path: Optional[Path] = None
 
             if self.gflow_provider:
-                try:
-                    # For Scene 0 (Hook) or video-enabled providers, attempt motion video first
-                    if hasattr(self.gflow_provider, "generate_video"):
-                        try:
-                            raw_video_path = output_scenes_dir / f"veo_clip_{idx:02d}.mp4"
-                            vid_file, _, _ = self.gflow_provider.generate_video(
-                                prompt=cinematic_prompt,
-                                output_path=raw_video_path,
-                                duration_seconds=min(10, max(4, int(round(scene_dur)))),
-                            )
-                            if Path(vid_file).exists() and Path(vid_file).stat().st_size > 0:
-                                motion_video_path = Path(vid_file)
-                        except Exception:
-                            motion_video_path = None
+                # For Scene 0 (Hook) or video-enabled providers, attempt motion video first
+                if hasattr(self.gflow_provider, "generate_video"):
+                    t0 = time.time()
+                    raw_video_path = output_scenes_dir / f"veo_clip_{idx:02d}.mp4"
+                    try:
+                        import inspect
+                        sig = inspect.signature(self.gflow_provider.generate_video)
+                        gen_kwargs = {"prompt": cinematic_prompt, "output_path": raw_video_path}
+                        dur_val = min(10, max(4, int(round(scene_dur))))
+                        if "duration" in sig.parameters:
+                            gen_kwargs["duration"] = dur_val
+                        if "duration_seconds" in sig.parameters:
+                            gen_kwargs["duration_seconds"] = dur_val
+                        if "duration" not in gen_kwargs and "duration_seconds" not in gen_kwargs:
+                            gen_kwargs["duration"] = dur_val
 
-                    # If motion video not generated, fallback to high-fidelity AI image
-                    if not motion_video_path and hasattr(self.gflow_provider, "generate_image"):
-                        raw_gflow_path = output_scenes_dir / f"veo_art_{idx:02d}.png"
+                        vid_file, _, _ = self.gflow_provider.generate_video(**gen_kwargs)
+                        if Path(vid_file).exists() and Path(vid_file).stat().st_size > 0:
+                            motion_video_path = Path(vid_file)
+                            self.asset_attempts.append(
+                                AssetGenerationAttempt(
+                                    shot_id=f"scene_{idx:02d}",
+                                    provider="gflow",
+                                    modality="GENERATED_VIDEO",
+                                    attempt=1,
+                                    prompt=cinematic_prompt,
+                                    success=True,
+                                    output_path=str(vid_file),
+                                    latency_ms=int((time.time() - t0) * 1000),
+                                )
+                            )
+                        else:
+                            raise RuntimeError(f"Video file missing or empty: {vid_file}")
+                    except Exception as e:
+                        motion_video_path = None
+                        self.asset_attempts.append(
+                            AssetGenerationAttempt(
+                                shot_id=f"scene_{idx:02d}",
+                                provider="gflow",
+                                modality="GENERATED_VIDEO",
+                                attempt=1,
+                                prompt=cinematic_prompt,
+                                success=False,
+                                error_type=type(e).__name__,
+                                error_message=str(e),
+                                latency_ms=int((time.time() - t0) * 1000),
+                            )
+                        )
+
+                # If motion video not generated, fallback to high-fidelity AI image
+                if not motion_video_path and hasattr(self.gflow_provider, "generate_image"):
+                    t0 = time.time()
+                    raw_gflow_path = output_scenes_dir / f"veo_art_{idx:02d}.png"
+                    try:
                         gflow_file, _, _ = self.gflow_provider.generate_image(
                             prompt=cinematic_prompt,
                             output_path=raw_gflow_path,
                             aspect="9:16",
                         )
                         bg_path = Path(gflow_file)
-                except Exception:
-                    bg_path = None
-                    motion_video_path = None
+                        self.asset_attempts.append(
+                            AssetGenerationAttempt(
+                                shot_id=f"scene_{idx:02d}",
+                                provider="gflow",
+                                modality="GENERATED_IMAGE",
+                                attempt=1,
+                                prompt=cinematic_prompt,
+                                success=True,
+                                output_path=str(gflow_file),
+                                latency_ms=int((time.time() - t0) * 1000),
+                            )
+                        )
+                    except Exception as e:
+                        bg_path = None
+                        self.asset_attempts.append(
+                            AssetGenerationAttempt(
+                                shot_id=f"scene_{idx:02d}",
+                                provider="gflow",
+                                modality="GENERATED_IMAGE",
+                                attempt=1,
+                                prompt=cinematic_prompt,
+                                success=False,
+                                error_type=type(e).__name__,
+                                error_message=str(e),
+                                latency_ms=int((time.time() - t0) * 1000),
+                            )
+                        )
 
             if motion_video_path and motion_video_path.exists():
                 file_path = str(motion_video_path)

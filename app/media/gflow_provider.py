@@ -7,11 +7,27 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
+from pydantic import BaseModel, Field
 
 from app.domain.enums import AssetType
 from app.domain.models import Asset
+
+
+class AssetGenerationAttempt(BaseModel):
+    """Structured record of an individual asset generation attempt."""
+
+    shot_id: str = Field(description="Unique shot identifier")
+    provider: str = Field(description="Visual provider name (e.g. gflow, local_diagram, local_chart)")
+    modality: str = Field(description="Target visual modality")
+    attempt: int = Field(default=1, ge=1, description="1-based attempt sequence number")
+    prompt: Optional[str] = Field(default=None, description="Prompt or instruction used")
+    success: bool = Field(description="Whether generation succeeded")
+    output_path: Optional[str] = Field(default=None, description="Output file path if successful")
+    error_type: Optional[str] = Field(default=None, description="Error classification category")
+    error_message: Optional[str] = Field(default=None, description="Detailed error diagnostic")
+    latency_ms: Optional[int] = Field(default=None, ge=0, description="Execution duration in milliseconds")
 
 
 class GFlowError(RuntimeError):
@@ -187,12 +203,16 @@ class GFlowMediaProvider:
         duration: int = 6,
         initial_frame: Optional[Path] = None,
         timeout_seconds: int = 300,
+        duration_seconds: Optional[int] = None,
     ) -> Tuple[str, str, Dict[str, Any]]:
         """Generate an AI video clip using Google Flow Veo / omni-flash model.
 
         Supports text-to-video (t2v) and image-to-video (i2v via initial_frame).
         Returns (file_path, content_sha256, metadata).
         """
+        if duration_seconds is not None:
+            duration = duration_seconds
+
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 

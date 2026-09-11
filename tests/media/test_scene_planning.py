@@ -1,6 +1,7 @@
 """Tests for scene visual generation and scene duration planning."""
 
 from pathlib import Path
+from typing import Optional
 import pytest
 from PIL import Image
 
@@ -101,10 +102,18 @@ def test_scene_planner_cinematic_veo_prompt_structure():
 def test_scene_planner_with_mocked_gflow_video(tmp_path: Path):
     """Verify that ScenePlanner prioritizes motion video from GFlow provider."""
     class MockGFlowProvider:
-        def generate_video(self, prompt: str, output_path: Path, duration_seconds: int = 5):
+        def generate_video(
+            self,
+            prompt: str,
+            output_path: Path,
+            aspect: str = "9:16",
+            model: str = "omni-flash",
+            duration: int = 6,
+            duration_seconds: Optional[int] = None,
+        ):
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"fake_mp4_video_data_bytes")
-            return str(output_path), "fake_hash_123", {"model": "omni-flash"}
+            return str(output_path), "fake_hash_123", {"model": "omni-flash", "duration": duration_seconds or duration}
 
     provider = MockGFlowProvider()
     planner = ScenePlanner(gflow_provider=provider)
