@@ -65,3 +65,68 @@ def test_scene_planner_proportional_allocation(tmp_path: Path):
         assert Path(plan.visual_asset_path).exists()
         assert len(plan.visual_asset_sha256) == 64
         assert plan.target_duration_seconds > 0.0
+
+
+def test_scene_planner_cinematic_veo_prompt_structure():
+    """Verify that build_cinematic_veo_prompt adheres to the 5-7 component Veo formula."""
+    planner = ScenePlanner()
+    scene_hook = Scene(
+        scene_index=0,
+        narration="Look inside a high-frequency trading server room.",
+        hook="How fast is Wall Street?",
+        visual_prompt="Extreme close-up of optical fiber cables glowing with laser pulses",
+    )
+
+    prompt = planner.build_cinematic_veo_prompt(
+        scene=scene_hook,
+        scene_index=0,
+        total_scenes=3,
+        topic_title="HFT Network Speeds",
+    )
+
+    # 1. Camera Motion
+    assert any(term in prompt.lower() for term in ["tracking shot", "push-in", "crane", "dolly", "orbit"])
+    # 2. Subject
+    assert "optical fiber" in prompt.lower()
+    # 3. Action/Physics
+    assert any(term in prompt.lower() for term in ["kinetic", "particles", "motion blur", "physics"])
+    # 4. Environment/Lighting
+    assert any(term in prompt.lower() for term in ["lighting", "volumetric", "neon", "chiaroscuro"])
+    # 5. Style/Texture
+    assert "photorealistic 8k" in prompt.lower()
+    assert "vertical 9:16" in prompt.lower()
+    assert "no text" in prompt.lower()
+
+
+def test_scene_planner_with_mocked_gflow_video(tmp_path: Path):
+    """Verify that ScenePlanner prioritizes motion video from GFlow provider."""
+    class MockGFlowProvider:
+        def generate_video(self, prompt: str, output_path: Path, duration_seconds: int = 5):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"fake_mp4_video_data_bytes")
+            return str(output_path), "fake_hash_123", {"model": "omni-flash"}
+
+    provider = MockGFlowProvider()
+    planner = ScenePlanner(gflow_provider=provider)
+    script = Script(
+        id="sc-gflow",
+        title="AI Automation Revolution",
+        hook="Will AI replace coders?",
+        scenes=[
+            Scene(scene_index=0, narration="First scene video hook.", hook="Hook", visual_prompt="Server rack"),
+        ],
+        total_word_count=4,
+        estimated_duration_seconds=3.0,
+    )
+
+    plans = planner.plan_scenes(
+        script=script,
+        channel_name="Tech Channel",
+        total_audio_duration=3.0,
+        output_scenes_dir=tmp_path / "scenes",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].visual_asset_path.endswith(".mp4")
+    assert Path(plans[0].visual_asset_path).exists()
+

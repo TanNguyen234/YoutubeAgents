@@ -52,7 +52,7 @@ class MediaQAInspector:
             "-",
         ]
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         except Exception as e:
             raise MediaQAError(f"FFmpeg loudnorm loudness analysis failed: {e}") from e
 
@@ -143,7 +143,7 @@ class MediaQAInspector:
             str(video_path),
         ]
         try:
-            res = subprocess.run(probe_cmd, capture_output=True, text=True, check=True, timeout=15)
+            res = subprocess.run(probe_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, timeout=15)
             data = json.loads(res.stdout)
         except Exception as e:
             issues.append(f"FFprobe inspection failed: {e}")

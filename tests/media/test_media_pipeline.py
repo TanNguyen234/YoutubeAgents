@@ -437,3 +437,26 @@ def test_media_pipeline_blocked_on_tts_network_error(repo_with_verified_project,
 
     curr_p = repo.get_video_project(project_id)
     assert curr_p.state == VideoLifecycleState.BLOCKED
+
+
+def test_media_pipeline_recovers_from_failed_state(repo_with_verified_project, tmp_path: Path):
+    """A project that previously crashed and was left in FAILED can be safely re-run without deadlock."""
+    repo, project_id = repo_with_verified_project
+    # Simulate a prior crash that left the project in FAILED
+    repo.update_project_state(
+        project_id=project_id,
+        to_state=VideoLifecycleState.FAILED,
+        reason="Prior worker crashed due to out-of-memory error",
+    )
+    assert repo.get_video_project(project_id).state == VideoLifecycleState.FAILED
+
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(repository=repo, tts_backend=tts, base_output_dir=tmp_path / "out_recovery")
+
+    # Re-running production must succeed and transition through PRODUCING -> RENDERED -> READY_FOR_REVIEW
+    manifest = pipeline.run_production(project_id=project_id)
+    assert manifest is not None
+
+    curr_p = repo.get_video_project(project_id)
+    assert curr_p.state == VideoLifecycleState.READY_FOR_REVIEW
+

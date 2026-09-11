@@ -12,7 +12,9 @@ from app.domain.enums import AssetType, QualityStatus, VideoLifecycleState
 from app.domain.models import Asset, QualityResult, VideoProject
 from app.media.capabilities import check_media_capabilities
 from app.media.ffmpeg_renderer import FFmpegRenderer
+from app.media.gflow_provider import GFlowMediaProvider
 from app.media.models import (
+    AudioMode,
     compute_production_fingerprint,
     MediaQAResult,
     RenderManifest,
@@ -20,8 +22,10 @@ from app.media.models import (
     RenderResult,
     TTSResult,
 )
+from app.media.music_generator import MusicGenerator
 from app.media.qa import MediaQAInspector
 from app.media.scene_planner import ScenePlanner
+from app.media.sound_designer import SoundDesignerService
 from app.media.subtitles import SubtitleGenerator
 from app.media.tts.base import TTSBackend
 from app.media.tts.edge_tts_backend import EdgeTTSBackend, TTSBlockerError
@@ -48,21 +52,34 @@ class MediaProductionPipeline:
         qa_inspector: Optional[MediaQAInspector] = None,
         scene_planner: Optional[ScenePlanner] = None,
         subtitle_generator: Optional[SubtitleGenerator] = None,
+        music_generator: Optional[MusicGenerator] = None,
+        sound_designer: Optional[SoundDesignerService] = None,
+        gflow_provider: Optional[GFlowMediaProvider] = None,
         base_output_dir: Optional[Path] = None,
     ):
         self.repo = repository
         self.tts = tts_backend or EdgeTTSBackend()
         self.renderer = renderer or FFmpegRenderer()
         self.qa = qa_inspector or MediaQAInspector()
-        self.planner = scene_planner or ScenePlanner()
+        self.gflow_provider = gflow_provider
+        self.planner = scene_planner or ScenePlanner(gflow_provider=self.gflow_provider)
         self.sub_gen = subtitle_generator or SubtitleGenerator()
+        self.music_gen = music_generator or MusicGenerator()
+        self.sound_designer = sound_designer or SoundDesignerService()
         self.subtitles = self.sub_gen
         self.base_output_dir = base_output_dir or Path("output/projects")
 
     def _get_git_commit(self) -> Optional[str]:
         """Fetch current git commit SHA for provenance recording."""
         try:
-            res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
+            res = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+            )
             return res.stdout.strip()
         except Exception:
             return None
@@ -93,9 +110,10 @@ class MediaProductionPipeline:
             VideoLifecycleState.VERIFIED,
             VideoLifecycleState.READY_FOR_REVIEW,
             VideoLifecycleState.QA_FAILED,
+            VideoLifecycleState.FAILED,
         ):
             raise MediaProductionError(
-                f"Production requires project to be in VERIFIED, READY_FOR_REVIEW, or QA_FAILED state, but '{project_id}' is in {project.state.value}."
+                f"Production requires project to be in VERIFIED, READY_FOR_REVIEW, QA_FAILED, or FAILED state, but '{project_id}' is in {project.state.value}."
             )
 
         if not project.script:
@@ -159,6 +177,7 @@ class MediaProductionPipeline:
             tts_pitch=pitch,
             subtitle_format="srt",
             ordered_scene_asset_hashes=scene_hashes,
+            audio_mode=render_prof.audio_mode.value,
         )
 
         if not force_rebuild and manifest_path.exists():
@@ -170,6 +189,7 @@ class MediaProductionPipeline:
                     and cached_manifest.render_profile == render_prof.name
                     and cached_manifest.voice == resolved_voice
                     and cached_manifest.tts_rate == rate
+                    and getattr(cached_manifest, "audio_mode", "both") == render_prof.audio_mode.value
                     and cached_manifest.tts_pitch == pitch
                     and cached_manifest.qa_verdict == "PASSED"
                     and Path(cached_manifest.final_video_path).exists()
@@ -235,6 +255,13 @@ class MediaProductionPipeline:
                 reason="Re-rendering media for project after previous QA failure",
                 expected_current_state=VideoLifecycleState.QA_FAILED,
             )
+        elif project.state == VideoLifecycleState.FAILED:
+            self.repo.update_project_state(
+                project_id=project_id,
+                to_state=VideoLifecycleState.PRODUCING,
+                reason="Re-running media production for project after previous pipeline failure",
+                expected_current_state=VideoLifecycleState.FAILED,
+            )
 
         created_assets: List[Asset] = []
 
@@ -274,6 +301,7 @@ class MediaProductionPipeline:
                 audio_duration_seconds=tts_res.duration_seconds,
                 output_srt_path=srt_out,
                 output_ass_path=ass_out,
+                word_boundaries=tts_res.timing_events,
             )
 
             sub_asset = Asset(
@@ -323,16 +351,73 @@ class MediaProductionPipeline:
                 tts_pitch=tts_res.pitch,
                 subtitle_format="srt",
                 ordered_scene_asset_hashes=scene_hashes,
+                audio_mode=render_prof.audio_mode.value,
             )
+
+            # 9b. AI Background Music Generation (Anime Lo-Fi / Synthwave BGM)
+            bgm_out = audio_dir / f"bgm_{project_id}.wav"
+            bgm_path_str, bgm_sha256 = self.music_gen.generate_track(
+                duration_seconds=tts_res.duration_seconds,
+                output_path=bgm_out,
+                mood="anime_lofi",
+                bpm=85,
+            )
+            bgm_asset = Asset(
+                id=f"ast-bgm-{project_id}",
+                project_id=project_id,
+                asset_type=AssetType.AUDIO_BGM,
+                file_path=bgm_path_str,
+                source_url=f"local://generated/{project_id}/audio/{Path(bgm_path_str).name}",
+                license_type="ORIGINAL_GENERATED",
+                content_sha256=bgm_sha256,
+            )
+            created_assets.append(bgm_asset)
+
+            # 9c. AI Sound Design Sequencing (Transition whooshes & hook impact)
+            sfx_out = audio_dir / f"sfx_{project_id}.wav"
+            sfx_path_str, sfx_sha256 = self.sound_designer.generate_sfx_track(
+                scene_plans=scene_plans,
+                total_duration_seconds=tts_res.duration_seconds,
+                output_path=sfx_out,
+            )
+            sfx_asset = Asset(
+                id=f"ast-sfx-{project_id}",
+                project_id=project_id,
+                asset_type=AssetType.AUDIO_BGM,
+                file_path=sfx_path_str,
+                source_url=f"local://generated/{project_id}/audio/{Path(sfx_path_str).name}",
+                license_type="ORIGINAL_GENERATED",
+                content_sha256=sfx_sha256,
+            )
+            created_assets.append(sfx_asset)
+
+            # Handle AudioMode branching (VOICE_ONLY, SOUND_ONLY, BOTH)
+            render_audio_path = Path(tts_res.audio_path)
+            render_bgm_path = Path(bgm_path_str) if render_prof.audio_mode in (AudioMode.BOTH, AudioMode.SOUND_ONLY) else None
+            render_sfx_path = Path(sfx_path_str) if render_prof.audio_mode in (AudioMode.BOTH, AudioMode.SOUND_ONLY) else None
+
+            if render_prof.audio_mode == AudioMode.SOUND_ONLY:
+                # In SOUND_ONLY mode, generate a silent voice track to keep subtitle alignment without spoken audio
+                silent_voice_path = audio_dir / f"silent_voice_{project_id}.wav"
+                import wave
+                num_samples = int(tts_res.duration_seconds * 44100)
+                with wave.open(str(silent_voice_path), "wb") as wf:
+                    wf.setnchannels(2)
+                    wf.setsampwidth(2)
+                    wf.setframerate(44100)
+                    wf.writeframes(b"\x00\x00\x00\x00" * num_samples)
+                render_audio_path = silent_voice_path
 
             # 10. Authoritative FFmpeg Video Render
             video_out = render_dir / f"final_{project_id}.mp4"
             render_res: RenderResult = self.renderer.render_video(
                 project_id=project_id,
                 scene_plans=scene_plans,
-                audio_path=Path(tts_res.audio_path),
+                audio_path=render_audio_path,
                 output_video_path=video_out,
                 subtitle_path=Path(sub_track.file_path),
+                bgm_path=render_bgm_path,
+                sfx_path=render_sfx_path,
             )
 
             video_asset = Asset(
@@ -412,6 +497,7 @@ class MediaProductionPipeline:
                 audio_codec=qa_res.audio_codec,
                 resolution=f"{qa_res.width}x{qa_res.height}",
                 fps=qa_res.fps,
+                audio_mode=render_prof.audio_mode.value,
                 measured_loudness_lufs=qa_res.loudness_lufs,
                 qa_verdict="PASSED" if qa_res.passed else "FAILED",
                 qa_issues=qa_res.issues,

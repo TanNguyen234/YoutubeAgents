@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import static_ffmpeg
@@ -64,7 +64,15 @@ class EdgeTTSBackend:
             str(audio_path),
         ]
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+                timeout=10,
+            )
             data = json.loads(res.stdout)
             duration = float(data.get("format", {}).get("duration", 0.0))
             streams = data.get("streams", [])
@@ -75,10 +83,29 @@ class EdgeTTSBackend:
         except Exception as e:
             raise TTSSynthesisError(f"ffprobe audio measurement failed on {audio_path}: {e}") from e
 
-    async def _synthesize_async(self, text: str, output_path: Path, voice: str, rate: str = "+0%", pitch: str = "+0Hz") -> None:
+    async def _synthesize_async(
+        self, text: str, output_path: Path, voice: str, rate: str = "+0%", pitch: str = "+0Hz"
+    ) -> List[Dict[str, Any]]:
         import edge_tts
-        communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-        await communicate.save(str(output_path))
+
+        communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, boundary="WordBoundary")
+        timing_events: List[Dict[str, Any]] = []
+        with open(output_path, "wb") as audio_file:
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_file.write(chunk["data"])
+                elif chunk["type"] == "WordBoundary":
+                    offset_s = chunk.get("offset", 0) / 10_000_000.0
+                    duration_s = chunk.get("duration", 0) / 10_000_000.0
+                    timing_events.append({
+                        "type": "WordBoundary",
+                        "text": chunk.get("text", ""),
+                        "offset": chunk.get("offset", 0),
+                        "duration": chunk.get("duration", 0),
+                        "start_time": round(offset_s, 3),
+                        "end_time": round(offset_s + duration_s, 3),
+                    })
+        return timing_events
 
     def synthesize(
         self,
@@ -100,7 +127,9 @@ class EdgeTTSBackend:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            asyncio.run(self._synthesize_async(clean_text, output_path, voice_to_use, rate=rate, pitch=pitch))
+            timing_events = asyncio.run(
+                self._synthesize_async(clean_text, output_path, voice_to_use, rate=rate, pitch=pitch)
+            )
         except Exception as e:
             err_str = str(e).lower()
             if any(term in err_str for term in ("connect", "network", "timeout", "handshake", "socket", "ssl", "dns", "unreachable", "10061", "10054")):
@@ -125,6 +154,7 @@ class EdgeTTSBackend:
             voice=voice_to_use,
             rate=rate,
             pitch=pitch,
+            timing_events=timing_events or [],
             canonical_narration_sha256=canonical_sha256,
             audio_sha256=audio_sha256,
         )

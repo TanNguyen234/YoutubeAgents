@@ -59,6 +59,8 @@ def check_media_capabilities(
                 [ffmpeg_path, "-version"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=True,
             )
@@ -80,6 +82,8 @@ def check_media_capabilities(
                 [ffprobe_path, "-version"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=True,
             )

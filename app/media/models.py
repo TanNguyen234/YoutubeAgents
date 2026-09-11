@@ -1,6 +1,7 @@
 """Domain models and typed contracts for media production, TTS, subtitles, and FFmpeg rendering."""
 
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
@@ -8,11 +9,19 @@ from pydantic import BaseModel, Field
 from app.domain.enums import PlatformFormat, QualityStatus
 
 
+class AudioMode(str, Enum):
+    """Audio composition mode for the final render."""
+    VOICE_ONLY = "voice_only"    # Only spoken speech narration
+    SOUND_ONLY = "sound_only"    # Only Foley, environmental sound effects, and BGM
+    BOTH = "both"                # Full multi-stem mix: Voiceover + Realistic Foley + Ducked BGM
+
+
 class RenderProfile(BaseModel):
     """Configuration profile for video rendering."""
 
     name: str = Field(default="SHORTS_9_16", description="Profile identifier name")
     format: PlatformFormat = Field(default=PlatformFormat.SHORTS_9_16)
+    audio_mode: AudioMode = Field(default=AudioMode.BOTH, description="Audio mode: voice_only, sound_only, or both")
     width: int = Field(default=1080, description="Video frame width in pixels")
     height: int = Field(default=1920, description="Video frame height in pixels")
     fps: int = Field(default=30, description="Frames per second")
@@ -153,6 +162,7 @@ class RenderManifest(BaseModel):
     audio_codec: str = Field(default="aac")
     resolution: str = Field(default="1080x1920")
     fps: float = Field(default=30.0)
+    audio_mode: str = Field(default="both", description="Audio composition mode: voice_only, sound_only, both")
     measured_loudness_lufs: float = Field(description="Real measured EBU R128 loudness in LUFS")
     qa_verdict: str = Field(description="PASSED or FAILED")
     qa_issues: List[str] = Field(default_factory=list)
@@ -169,11 +179,12 @@ def compute_production_fingerprint(
     tts_pitch: str = "+0Hz",
     subtitle_format: str = "srt",
     ordered_scene_asset_hashes: Optional[List[str]] = None,
+    audio_mode: str = "both",
 ) -> str:
     """Compute a deterministic SHA-256 fingerprint uniquely identifying a production combination."""
     import hashlib
     raw = (
         f"{canonical_narration_sha256}|{render_profile_name}|{tts_backend}|{voice}|"
-        f"{tts_rate}|{tts_pitch}|{subtitle_format}|{','.join(ordered_scene_asset_hashes or [])}"
+        f"{tts_rate}|{tts_pitch}|{subtitle_format}|{','.join(ordered_scene_asset_hashes or [])}|{audio_mode}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

@@ -14,6 +14,7 @@ try:
 except Exception:
     pass
 
+from app.media.cinematographer import CinematographerService
 from app.media.models import RenderProfile, RenderResult, SceneRenderPlan
 
 
@@ -24,18 +25,21 @@ class RenderError(RuntimeError):
 
 def escape_ffmpeg_filter_path(file_path: Path) -> str:
     """Escape a file path for use inside FFmpeg filter parameters on Windows and Unix."""
-    # Convert to absolute path with forward slashes
     posix_path = file_path.resolve().as_posix()
-    # In FFmpeg filter graph, colon ':' in drive letters (e.g. C:) must be escaped as '\:'
-    escaped = posix_path.replace(":", "\\:")
+    escaped = posix_path.replace("'", "\\'").replace(":", "\\:")
     return escaped
 
 
 class FFmpegRenderer:
     """Renders video scenes, audio narration, and burned subtitles into standard MP4 via FFmpeg."""
 
-    def __init__(self, profile: Optional[RenderProfile] = None):
+    def __init__(
+        self,
+        profile: Optional[RenderProfile] = None,
+        cinematographer: Optional[CinematographerService] = None,
+    ):
         self.profile = profile or RenderProfile()
+        self.cinematographer = cinematographer or CinematographerService()
 
     def _resolve_ffmpeg_binary(self) -> str:
         bin_path = shutil.which("ffmpeg")
@@ -50,6 +54,8 @@ class FFmpegRenderer:
         audio_path: Path,
         output_video_path: Path,
         subtitle_path: Optional[Path] = None,
+        bgm_path: Optional[Path] = None,
+        sfx_path: Optional[Path] = None,
     ) -> RenderResult:
         """Execute authoritative FFmpeg composition to render 1080x1920 MP4."""
         ffmpeg_bin = self._resolve_ffmpeg_binary()
@@ -68,33 +74,76 @@ class FFmpegRenderer:
 
         # 1. Encode normalized video segment for each individual scene
         scene_video_paths: List[Path] = []
+        motions = ["zoom_in", "pan_right", "zoom_out", "pan_left"]
+
         for idx, plan in enumerate(scene_plans):
             seg_path = scenes_dir / f"scene_{idx:02d}.mp4"
-            scene_vf = [
-                f"fps={self.profile.fps}",
-                f"scale={self.profile.width}:{self.profile.height}:force_original_aspect_ratio=decrease",
-                f"pad={self.profile.width}:{self.profile.height}:(ow-iw)/2:(oh-ih)/2",
-                f"format={self.profile.pixel_format}",
-            ]
-            seg_cmd = [
-                ffmpeg_bin,
-                "-y",
-                "-framerate", str(self.profile.fps),
-                "-loop", "1",
-                "-i", str(Path(plan.visual_asset_path).resolve()),
-                "-t", f"{plan.target_duration_seconds:.3f}",
-                "-vf", ",".join(scene_vf),
-                "-c:v", self.profile.video_codec,
-                "-preset", "ultrafast",
-                "-tune", "stillimage",
-                "-pix_fmt", self.profile.pixel_format,
-                "-r", str(self.profile.fps),
-                "-threads", "2",
-                str(seg_path),
-            ]
+            asset_path = Path(plan.visual_asset_path).resolve()
+            is_video = asset_path.suffix.lower() in [".mp4", ".mov", ".webm", ".mkv", ".m4v"]
+
+            if is_video:
+                scene_vf = [
+                    f"fps={self.profile.fps}",
+                    f"scale={self.profile.width}:{self.profile.height}:force_original_aspect_ratio=decrease",
+                    f"pad={self.profile.width}:{self.profile.height}:(ow-iw)/2:(oh-ih)/2",
+                    f"format={self.profile.pixel_format}",
+                ]
+                seg_cmd = [
+                    ffmpeg_bin,
+                    "-y",
+                    "-stream_loop", "-1",
+                    "-i", str(asset_path),
+                    "-t", f"{plan.target_duration_seconds:.3f}",
+                    "-vf", ",".join(scene_vf),
+                    "-c:v", self.profile.video_codec,
+                    "-preset", "ultrafast",
+                    "-pix_fmt", self.profile.pixel_format,
+                    "-r", str(self.profile.fps),
+                    "-an",
+                    "-threads", "2",
+                    str(seg_path),
+                ]
+            else:
+                # Kinetic Ken Burns camera motion on still images
+                chosen_motion = motions[idx % len(motions)]
+                kb_filter = self.cinematographer.build_ken_burns_filter(
+                    duration_seconds=plan.target_duration_seconds,
+                    fps=self.profile.fps,
+                    width=self.profile.width,
+                    height=self.profile.height,
+                    motion_type=chosen_motion,
+                )
+                scene_vf = [
+                    f"scale={self.profile.width}:{self.profile.height}:force_original_aspect_ratio=increase",
+                    f"crop={self.profile.width}:{self.profile.height}",
+                    kb_filter,
+                    f"format={self.profile.pixel_format}",
+                ]
+                seg_cmd = [
+                    ffmpeg_bin,
+                    "-y",
+                    "-loop", "1",
+                    "-i", str(asset_path),
+                    "-t", f"{plan.target_duration_seconds:.3f}",
+                    "-vf", ",".join(scene_vf),
+                    "-c:v", self.profile.video_codec,
+                    "-preset", "ultrafast",
+                    "-pix_fmt", self.profile.pixel_format,
+                    "-r", str(self.profile.fps),
+                    "-threads", "2",
+                    str(seg_path),
+                ]
             executed_commands.append(seg_cmd)
             try:
-                subprocess.run(seg_cmd, capture_output=True, text=True, check=True, timeout=60)
+                subprocess.run(
+                    seg_cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                    timeout=60,
+                )
             except subprocess.CalledProcessError as e:
                 err_msg = e.stderr or e.stdout or str(e)
                 raise RenderError(f"FFmpeg scene {idx} segment encoding failed with code {e.returncode}: {err_msg}") from e
@@ -110,19 +159,13 @@ class FFmpegRenderer:
         concat_lines = []
         for seg_p in scene_video_paths:
             posix_p = seg_p.resolve().as_posix()
-            concat_lines.append(f"file '{posix_p}'")
+            escaped_p = posix_p.replace("'", "'\\''")
+            concat_lines.append(f"file '{escaped_p}'")
         concat_script_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
 
-        # 3. Build Final Filter Graph (subtitles overlay + audio loudnorm)
-        vf_filters: List[str] = []
-        if subtitle_path and subtitle_path.exists():
-            esc_sub = escape_ffmpeg_filter_path(subtitle_path)
-            vf_filters.append(f"subtitles='{esc_sub}'")
-
-        audio_filter_str = f"loudnorm=I={self.profile.target_loudness_lufs}:LRA=11:TP=-1.5"
         total_duration = max(0.5, sum(p.target_duration_seconds for p in scene_plans))
 
-        # 4. Construct Final Mux Command
+        # 3. Build Composition Command
         final_cmd = [
             ffmpeg_bin,
             "-y",
@@ -131,22 +174,129 @@ class FFmpegRenderer:
             "-i", str(concat_script_path),
             "-i", str(audio_path),
         ]
-        if vf_filters:
+
+        has_bgm = bgm_path and Path(bgm_path).exists()
+        has_sfx = sfx_path and Path(sfx_path).exists()
+        has_sub = subtitle_path and Path(subtitle_path).exists()
+
+        curr_input_idx = 2
+        bgm_input_idx = None
+        sfx_input_idx = None
+
+        if has_bgm:
+            final_cmd.extend(["-i", str(Path(bgm_path).resolve())])
+            bgm_input_idx = curr_input_idx
+            curr_input_idx += 1
+
+        if has_sfx:
+            final_cmd.extend(["-i", str(Path(sfx_path).resolve())])
+            sfx_input_idx = curr_input_idx
+            curr_input_idx += 1
+
+        filter_complex_parts: List[str] = []
+
+        # Video filter branch (burn subtitles)
+        if has_sub:
+            esc_sub = escape_ffmpeg_filter_path(subtitle_path)
+            if subtitle_path.suffix.lower() == ".ass":
+                filter_complex_parts.append(f"[0:v]ass='{esc_sub}'[vout]")
+            else:
+                filter_complex_parts.append(f"[0:v]subtitles='{esc_sub}'[vout]")
+            video_map = "[vout]"
+        else:
+            video_map = "0:v"
+
+        # Audio filter branch (3-stem mixing: Voiceover [1:a], Ducked BGM, SFX)
+        raw_mode = getattr(self.profile, "audio_mode", "both")
+        mode_str = raw_mode.value.lower() if hasattr(raw_mode, "value") else str(raw_mode).lower()
+        is_sound_only = "sound_only" in mode_str
+
+        if is_sound_only:
+            if has_bgm and has_sfx:
+                audio_fc = (
+                    f"[1:a]volume=0.001[silence];"
+                    f"[{bgm_input_idx}:a]volume=1.5,aloop=loop=-1:size=2e+09[bgm_loop];"
+                    f"[{sfx_input_idx}:a]volume=1.0[sfx_vol];"
+                    f"[silence][bgm_loop][sfx_vol]amix=inputs=3:duration=first:dropout_transition=0:weights=0.001 1.5 1.0[a_mixed];"
+                    f"[a_mixed]loudnorm=I={self.profile.target_loudness_lufs}:LRA=11:TP=-1.5:linear=true[aout]"
+                )
+            elif has_bgm:
+                audio_fc = (
+                    f"[1:a]volume=0.001[silence];"
+                    f"[{bgm_input_idx}:a]volume=1.5,aloop=loop=-1:size=2e+09[bgm_loop];"
+                    f"[silence][bgm_loop]amix=inputs=2:duration=first:dropout_transition=0:weights=0.001 1.5[a_mixed];"
+                    f"[a_mixed]loudnorm=I={self.profile.target_loudness_lufs}:LRA=11:TP=-1.5:linear=true[aout]"
+                )
+            elif has_sfx:
+                audio_fc = (
+                    f"[1:a]volume=0.001[silence];"
+                    f"[{sfx_input_idx}:a]volume=1.5[sfx_vol];"
+                    f"[silence][sfx_vol]amix=inputs=2:duration=first:dropout_transition=0:weights=0.001 1.5[a_mixed];"
+                    f"[a_mixed]loudnorm=I={self.profile.target_loudness_lufs}:LRA=11:TP=-1.5:linear=true[aout]"
+                )
+            else:
+                audio_fc = f"[1:a]loudnorm=I={self.profile.target_loudness_lufs}:LRA=11:TP=-1.5:linear=true[aout]"
+            filter_complex_parts.append(audio_fc)
+            audio_map = "[aout]"
+        elif has_bgm and has_sfx:
+            audio_fc = (
+                f"[{bgm_input_idx}:a]volume=0.20,aloop=loop=-1:size=2e+09[bgm_loop];"
+                f"[bgm_loop][1:a]sidechaincompress=threshold=0.08:ratio=4:attack=50:release=300[ducked_bgm];"
+                f"[{sfx_input_idx}:a]volume=0.35[sfx_vol];"
+                f"[1:a][ducked_bgm][sfx_vol]amix=inputs=3:duration=first:dropout_transition=2[a_mixed];"
+                f"[a_mixed]loudnorm=I={self.profile.target_loudness_lufs}:LRA=11:TP=-1.5[aout]"
+            )
+            filter_complex_parts.append(audio_fc)
+            audio_map = "[aout]"
+        elif has_bgm and not has_sfx:
+            audio_fc = (
+                f"[{bgm_input_idx}:a]volume=0.22,aloop=loop=-1:size=2e+09[bgm_loop];"
+                f"[bgm_loop][1:a]sidechaincompress=threshold=0.08:ratio=4:attack=50:release=300[ducked_bgm];"
+                f"[1:a][ducked_bgm]amix=inputs=2:duration=first:dropout_transition=2[a_mixed];"
+                f"[a_mixed]loudnorm=I={self.profile.target_loudness_lufs}:LRA=11:TP=-1.5[aout]"
+            )
+            filter_complex_parts.append(audio_fc)
+            audio_map = "[aout]"
+        elif not has_bgm and has_sfx:
+            audio_fc = (
+                f"[{sfx_input_idx}:a]volume=0.35[sfx_vol];"
+                f"[1:a][sfx_vol]amix=inputs=2:duration=first:dropout_transition=2[a_mixed];"
+                f"[a_mixed]loudnorm=I={self.profile.target_loudness_lufs}:LRA=11:TP=-1.5[aout]"
+            )
+            filter_complex_parts.append(audio_fc)
+            audio_map = "[aout]"
+        elif has_sub:
+            filter_complex_parts.append(f"[1:a]loudnorm=I={self.profile.target_loudness_lufs}:LRA=11:TP=-1.5[aout]")
+            audio_map = "[aout]"
+        else:
+            audio_map = "1:a"
+
+        if filter_complex_parts:
             final_cmd.extend([
-                "-vf", ",".join(vf_filters),
-                "-c:v", self.profile.video_codec,
-                "-preset", "ultrafast",
-                "-tune", "stillimage",
-                "-pix_fmt", self.profile.pixel_format,
-                "-r", str(self.profile.fps),
+                "-filter_complex", ";".join(filter_complex_parts),
+                "-map", video_map,
+                "-map", audio_map,
             ])
+            if has_sub:
+                final_cmd.extend([
+                    "-c:v", self.profile.video_codec,
+                    "-preset", "ultrafast",
+                    "-pix_fmt", self.profile.pixel_format,
+                    "-r", str(self.profile.fps),
+                ])
+            else:
+                final_cmd.extend([
+                    "-c:v", "copy",
+                ])
         else:
             final_cmd.extend([
+                "-map", "0:v",
+                "-map", "1:a",
                 "-c:v", "copy",
+                "-af", f"loudnorm=I={self.profile.target_loudness_lufs}:LRA=11:TP=-1.5",
             ])
 
         final_cmd.extend([
-            "-af", audio_filter_str,
             "-c:a", self.profile.audio_codec,
             "-b:a", self.profile.audio_bitrate,
             "-ar", str(self.profile.audio_sample_rate),
@@ -161,6 +311,8 @@ class FFmpegRenderer:
                 final_cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=True,
                 timeout=180,
             )

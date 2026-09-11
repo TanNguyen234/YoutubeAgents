@@ -128,3 +128,151 @@ def test_ffmpeg_renderer_nonzero_exit_raises_render_error(monkeypatch, tmp_path:
             audio_path=audio_path,
             output_video_path=tmp_path / "fail.mp4",
         )
+
+
+def test_ffmpeg_renderer_with_bgm_ducking(tmp_path: Path):
+    """FFmpegRenderer must mix narration voice and background music with sidechain ducking."""
+    img_path = tmp_path / "scene.png"
+    img = Image.new("RGB", (1080, 1920), color=(15, 23, 42))
+    img.save(img_path)
+    img_sha256 = hashlib.sha256(img_path.read_bytes()).hexdigest()
+
+    voice_path = tmp_path / "narration.wav"
+    _create_dummy_wav(voice_path, duration_seconds=2.5)
+
+    bgm_path = tmp_path / "music.wav"
+    _create_dummy_wav(bgm_path, duration_seconds=4.0)
+
+    plan = SceneRenderPlan(
+        scene_index=0,
+        narration_segment="Scene with BGM.",
+        target_duration_seconds=2.5,
+        visual_asset_path=str(img_path),
+        visual_asset_sha256=img_sha256,
+    )
+
+    renderer = FFmpegRenderer()
+    out_video = tmp_path / "output_with_bgm.mp4"
+
+    res = renderer.render_video(
+        project_id="proj-bgm-test",
+        scene_plans=[plan],
+        audio_path=voice_path,
+        output_video_path=out_video,
+        bgm_path=bgm_path,
+    )
+
+    assert out_video.exists()
+    assert out_video.stat().st_size > 1000
+    assert res.width == 1080
+    assert res.height == 1920
+
+
+def test_ffmpeg_renderer_with_video_input(tmp_path: Path):
+    """FFmpegRenderer must support animated motion video files (.mp4) as visual scene assets."""
+    # First generate a small base video to use as input asset
+    renderer = FFmpegRenderer()
+    base_img = tmp_path / "seed.png"
+    Image.new("RGB", (1080, 1920), color=(30, 40, 60)).save(base_img)
+    base_audio = tmp_path / "base_audio.wav"
+    _create_dummy_wav(base_audio, duration_seconds=1.5)
+
+    base_plan = SceneRenderPlan(
+        scene_index=0,
+        narration_segment="Base clip",
+        target_duration_seconds=1.5,
+        visual_asset_path=str(base_img),
+        visual_asset_sha256=hashlib.sha256(base_img.read_bytes()).hexdigest(),
+    )
+    seed_video = tmp_path / "seed_motion.mp4"
+    renderer.render_video("seed-proj", [base_plan], base_audio, seed_video)
+
+    # Now use this seed_motion.mp4 as visual asset for a new scene
+    motion_plan = SceneRenderPlan(
+        scene_index=0,
+        narration_segment="Testing motion video asset.",
+        target_duration_seconds=2.0,
+        visual_asset_path=str(seed_video),
+        visual_asset_sha256=hashlib.sha256(seed_video.read_bytes()).hexdigest(),
+    )
+
+    out_motion_video = tmp_path / "final_motion_output.mp4"
+    test_audio = tmp_path / "test_audio.wav"
+    _create_dummy_wav(test_audio, duration_seconds=2.0)
+
+    res = renderer.render_video(
+        project_id="proj-motion-test",
+        scene_plans=[motion_plan],
+        audio_path=test_audio,
+        output_video_path=out_motion_video,
+    )
+
+    assert out_motion_video.exists()
+    assert out_motion_video.stat().st_size > 1000
+    assert res.width == 1080
+    assert res.height == 1920
+
+
+def test_escape_ffmpeg_filter_path():
+    """Verify that filter paths escape colons and single quotes correctly."""
+    from app.media.ffmpeg_renderer import escape_ffmpeg_filter_path
+
+    # Test Windows drive colon and single quotes in directory name
+    p = Path("C:/workspace/it's_a_test/subtitles.ass")
+    esc = escape_ffmpeg_filter_path(p)
+    assert "\\:" in esc
+    assert "\\'" in esc
+    assert "it\\'s_a_test" in esc
+
+
+def test_ffmpeg_renderer_with_3stem_and_ass_subtitles(tmp_path: Path):
+    """FFmpegRenderer must compose 3 audio stems (Voiceover, BGM, SFX) and burn ASS subtitles."""
+    img_path = tmp_path / "card.png"
+    Image.new("RGB", (1080, 1920), color=(10, 20, 30)).save(img_path)
+    img_sha = hashlib.sha256(img_path.read_bytes()).hexdigest()
+
+    voice_path = tmp_path / "voice.wav"
+    _create_dummy_wav(voice_path, duration_seconds=2.0)
+    bgm_path = tmp_path / "bgm.wav"
+    _create_dummy_wav(bgm_path, duration_seconds=3.0)
+    sfx_path = tmp_path / "sfx.wav"
+    _create_dummy_wav(sfx_path, duration_seconds=2.0)
+
+    ass_path = tmp_path / "test.ass"
+    ass_path.write_text(
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Arial,76,&H0000FFFF,&H00FFFFFF,&H00000000,&H90000000,-1,0,0,0,100,100,1,0,1,6,3,2,60,60,720,1\n\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,{\\k50}Kinetic {\\k50}Karaoke {\\k100}Shorts\n",
+        encoding="utf-8",
+    )
+
+    plan = SceneRenderPlan(
+        scene_index=0,
+        narration_segment="3-stem mix with ASS test.",
+        target_duration_seconds=2.0,
+        visual_asset_path=str(img_path),
+        visual_asset_sha256=img_sha,
+    )
+
+    renderer = FFmpegRenderer()
+    out_video = tmp_path / "output_3stem.mp4"
+
+    res = renderer.render_video(
+        project_id="proj-3stem-test",
+        scene_plans=[plan],
+        audio_path=voice_path,
+        output_video_path=out_video,
+        subtitle_path=ass_path,
+        bgm_path=bgm_path,
+        sfx_path=sfx_path,
+    )
+
+    assert out_video.exists()
+    assert out_video.stat().st_size > 1000
+    assert res.width == 1080
+    assert res.height == 1920
+    assert any("sidechaincompress" in " ".join(cmd) or "sidechaincompress" in str(cmd) for cmd in [res.ffmpeg_command])
+
+
