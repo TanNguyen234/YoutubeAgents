@@ -138,11 +138,13 @@ class Scene(BaseModel):
                     data["visual_prompt"] = data["visual_description"]
                 elif "visual" in data:
                     data["visual_prompt"] = data["visual"]
-                elif "on_screen_text" in data:
-                    data["visual_prompt"] = data["on_screen_text"]
                 else:
                     data["visual_prompt"] = "Motion graphic illustrating technical concepts."
         return data
+
+
+# Alias for backward and forward compatibility with director pipeline
+ScriptScene = Scene
 
 
 def compose_canonical_narration(
