@@ -2,10 +2,12 @@
 
 from pathlib import Path
 import re
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from app.media.director.models import (
     ChannelCreativeProfile,
+    ChartDatumOrigin,
+    EvidenceBinding,
     ShotSpec,
     ShotTimeline,
     Storyboard,
@@ -15,6 +17,45 @@ from app.media.director.models import (
     VisualModality,
     VisualizationDataMode,
 )
+
+
+def validate_evidence_binding(binding: Optional[EvidenceBinding]) -> Tuple[bool, str]:
+    """Perform strict structural validation on an EvidenceBinding.
+
+    Rejects:
+    - None or missing binding
+    - Missing claim_id
+    - Unverified claim (claim_verified is not True)
+    - Missing or empty source_url
+    - Placeholder/internal URLs (e.g. verified-source.internal, localhost, example.com, etc.)
+    - Fake/generic source refs (e.g. 'src_verified' or 'placeholder')
+    """
+    if not binding:
+        return False, "MISSING_BINDING: No EvidenceBinding attached to DOCUMENT_EVIDENCE shot."
+    if not binding.claim_id:
+        return False, "MISSING_CLAIM_ID: EvidenceBinding has no claim_id."
+    if not binding.claim_verified:
+        return False, "UNVERIFIED_CLAIM: EvidenceBinding claim is not verified by fact checker."
+    if not binding.source_url or not binding.source_url.strip():
+        return False, "MISSING_SOURCE_URL: EvidenceBinding has empty source_url."
+
+    url_lower = binding.source_url.lower().strip()
+    placeholder_patterns = [
+        "verified-source.internal",
+        "localhost",
+        "127.0.0.1",
+        "example.com",
+        "placeholder",
+        ".internal",
+        "test.local",
+    ]
+    if any(pat in url_lower for pat in placeholder_patterns):
+        return False, f"PLACEHOLDER_URL: EvidenceBinding uses disallowed placeholder URL '{binding.source_url}'."
+
+    if not binding.source_ref or binding.source_ref.strip() in ("src_verified", "placeholder", "fake_ref"):
+        return False, f"INVALID_SOURCE_REF: EvidenceBinding has ungrounded source_ref '{binding.source_ref}'."
+
+    return True, "VALID"
 
 
 def _tokenize(text: str) -> List[str]:
@@ -97,6 +138,20 @@ class VisualShotEvaluator:
             motion_value = 0.1
             issues.append("Low-priority STATIC_CARD modality used.")
 
+        # Grounding / Evidence strength validation
+        evidence_strength = None
+        if modality == VisualModality.DOCUMENT_EVIDENCE:
+            binding = getattr(shot, "evidence_binding", None)
+            is_valid, reason = validate_evidence_binding(binding)
+            if is_valid:
+                if binding.excerpt_is_verbatim and binding.source_excerpt:
+                    evidence_strength = 1.0  # strong: verified real source + verbatim excerpt
+                else:
+                    evidence_strength = 0.8  # acceptable: verified real source + paraphrased claim
+            else:
+                evidence_strength = 0.0  # FAIL
+                issues.append(f"Invalid evidence binding: {reason}")
+
         # 3. Static duration limit check
         if modality == VisualModality.STATIC_CARD and shot.duration_seconds > 4.0:
             issues.append(f"STATIC_CARD held for {shot.duration_seconds:.1f}s exceeding 4.0s maximum.")
@@ -118,7 +173,7 @@ class VisualShotEvaluator:
         )
 
         recommendation = "ACCEPT"
-        if duplication > 0.8 or not asset_exists or (modality == VisualModality.STATIC_CARD and shot.duration_seconds > 5.0):
+        if duplication > 0.8 or not asset_exists or (modality == VisualModality.STATIC_CARD and shot.duration_seconds > 5.0) or (modality == VisualModality.DOCUMENT_EVIDENCE and evidence_strength == 0.0):
             recommendation = "REGENERATE"
 
         return VisualEvaluation(
@@ -128,13 +183,14 @@ class VisualShotEvaluator:
             information_value=info_value,
             motion_value=motion_value,
             continuity=None,
-            evidence_strength=1.0 if (modality == VisualModality.DOCUMENT_EVIDENCE and getattr(shot, "evidence_binding", None)) else (0.0 if modality == VisualModality.DOCUMENT_EVIDENCE else None),
+            evidence_strength=evidence_strength,
             readability=None,
             aesthetic_quality=None,
             overall_score=overall,
             issues=issues,
             recommendation=recommendation,
         )
+
 
     def detect_visual_dead_air(
         self,
@@ -157,15 +213,19 @@ class VisualShotEvaluator:
 
     def generate_quality_report(
         self,
-        timeline: ShotTimeline,
-        storyboard: Storyboard,
+        timeline: Optional[ShotTimeline] = None,
+        storyboard: Optional[Storyboard] = None,
         failed_attempts: int = 0,
         max_static_card_ratio: float = 0.15,
         director_fallback_occurred: bool = False,
+        creative_fallback_reason: Optional[str] = None,
     ) -> VideoQualityReport:
         """Build a comprehensive machine-readable quality report for the completed video production."""
-        total_shots = len(timeline.shots)
-        total_dur = timeline.total_duration if timeline.total_duration > 0 else sum(s.duration for s in timeline.shots)
+        critical_failures: List[str] = []
+        warnings: List[str] = []
+
+        total_shots = len(timeline.shots) if timeline else 0
+        total_dur = (timeline.total_duration if timeline.total_duration > 0 else sum(s.duration for s in timeline.shots)) if timeline else 0.0
         avg_duration = round(total_dur / total_shots, 2) if total_shots > 0 else 0.0
 
         # Modality distribution and motion metrics
@@ -175,29 +235,30 @@ class VisualShotEvaluator:
         ken_burns_duration = 0.0
         true_motion_duration = 0.0
 
-        for shot in timeline.shots:
-            mod_name = shot.modality.value if hasattr(shot.modality, "value") else str(shot.modality)
-            modality_dist[mod_name] = modality_dist.get(mod_name, 0) + 1
-            is_anim = Path(shot.asset_path).suffix.lower() in [".mp4", ".mov", ".webm", ".mkv"] or getattr(shot, "is_animated", False)
-            if is_anim or shot.modality in (VisualModality.GENERATED_VIDEO, VisualModality.STOCK_VIDEO):
-                true_motion_duration += shot.duration
-            else:
-                ken_burns_duration += shot.duration
-                if shot.modality == VisualModality.STATIC_CARD:
-                    static_card_duration += shot.duration
-                elif shot.modality in (
-                    VisualModality.DIAGRAM,
-                    VisualModality.DATA_VISUALIZATION,
-                    VisualModality.COMPARISON,
-                    VisualModality.DOCUMENT_EVIDENCE,
-                    VisualModality.STATIC_DIAGRAM,
-                    VisualModality.STATIC_CHART,
-                    VisualModality.STATIC_TERMINAL,
-                    VisualModality.MOTION_GRAPHICS,
-                    VisualModality.CODE_ANIMATION,
-                    VisualModality.UI_SIMULATION,
-                ):
-                    static_semantic_duration += shot.duration
+        if timeline and timeline.shots:
+            for shot in timeline.shots:
+                mod_name = shot.modality.value if hasattr(shot.modality, "value") else str(shot.modality)
+                modality_dist[mod_name] = modality_dist.get(mod_name, 0) + 1
+                is_anim = Path(shot.asset_path).suffix.lower() in [".mp4", ".mov", ".webm", ".mkv"] or getattr(shot, "is_animated", False)
+                if is_anim or shot.modality in (VisualModality.GENERATED_VIDEO, VisualModality.STOCK_VIDEO):
+                    true_motion_duration += shot.duration
+                else:
+                    ken_burns_duration += shot.duration
+                    if shot.modality == VisualModality.STATIC_CARD:
+                        static_card_duration += shot.duration
+                    elif shot.modality in (
+                        VisualModality.DIAGRAM,
+                        VisualModality.DATA_VISUALIZATION,
+                        VisualModality.COMPARISON,
+                        VisualModality.DOCUMENT_EVIDENCE,
+                        VisualModality.STATIC_DIAGRAM,
+                        VisualModality.STATIC_CHART,
+                        VisualModality.STATIC_TERMINAL,
+                        VisualModality.MOTION_GRAPHICS,
+                        VisualModality.CODE_ANIMATION,
+                        VisualModality.UI_SIMULATION,
+                    ):
+                        static_semantic_duration += shot.duration
 
         static_card_ratio = round(static_card_duration / total_dur, 3) if total_dur > 0 else 0.0
         static_semantic_ratio = round(static_semantic_duration / total_dur, 3) if total_dur > 0 else 0.0
@@ -205,51 +266,72 @@ class VisualShotEvaluator:
         true_motion_ratio = round(true_motion_duration / total_dur, 3) if total_dur > 0 else 0.0
 
         # Dead air warnings
-        dead_air_warnings = self.detect_visual_dead_air(timeline)
+        dead_air_warnings = self.detect_visual_dead_air(timeline) if timeline else []
 
         # Narration duplication warnings
         duplication_warnings: List[str] = []
-        for spec in storyboard.shots:
-            dup_score = calculate_narration_duplication(spec.narration_segment, spec.headline_text)
-            if dup_score >= 0.6:
-                duplication_warnings.append(
-                    f"NARRATION_DUPLICATION: shot '{spec.shot_id}' score {dup_score:.2f} repeats spoken words in headline '{spec.headline_text}'"
-                )
+        if storyboard and storyboard.shots:
+            for spec in storyboard.shots:
+                dup_score = calculate_narration_duplication(spec.narration_segment, spec.headline_text)
+                if dup_score >= 0.6:
+                    duplication_warnings.append(
+                        f"NARRATION_DUPLICATION: shot '{spec.shot_id}' score {dup_score:.2f} repeats spoken words in headline '{spec.headline_text}'"
+                    )
 
-        critical_failures: List[str] = []
-        warnings: List[str] = []
+        # 0. Director fallback check - critical creative failure in production
+        if director_fallback_occurred:
+            critical_failures.append(
+                f"CREATIVE_PIPELINE_FALLBACK: AutoDirector fallback occurred ({creative_fallback_reason or 'pipeline fallback'}). Legacy slideshow output cannot be published to production."
+            )
 
         # 1. Timeline continuity
-        continuity_issues = timeline.validate_continuity()
-        if continuity_issues:
-            critical_failures.extend(continuity_issues)
+        if timeline:
+            continuity_issues = timeline.validate_continuity()
+            if continuity_issues:
+                critical_failures.extend(continuity_issues)
 
-        # 2. Missing assets
-        for shot in timeline.shots:
-            p = Path(shot.asset_path)
-            if not p.exists() or p.stat().st_size == 0:
-                critical_failures.append(f"MISSING_ASSET: Shot '{shot.shot_id}' asset is missing or empty at {shot.asset_path}")
+            # 2. Missing assets
+            for shot in timeline.shots:
+                p = Path(shot.asset_path)
+                if not p.exists() or p.stat().st_size == 0:
+                    critical_failures.append(f"MISSING_ASSET: Shot '{shot.shot_id}' asset is missing or empty at {shot.asset_path}")
 
         # 3. Grounding violations
-        for spec in storyboard.shots:
-            if spec.visual_modality == VisualModality.DOCUMENT_EVIDENCE and not getattr(spec, "evidence_binding", None):
-                critical_failures.append(f"UNGROUNDED_EVIDENCE: Shot '{spec.shot_id}' has DOCUMENT_EVIDENCE without verified EvidenceBinding.")
-            if spec.visual_modality == VisualModality.DATA_VISUALIZATION:
-                data_mode = getattr(spec, "visual_data_mode", VisualizationDataMode.GROUNDED)
-                if data_mode == VisualizationDataMode.GROUNDED and not getattr(spec, "chart_data", None):
-                    critical_failures.append(f"FABRICATED_DATA: Shot '{spec.shot_id}' has grounded DATA_VISUALIZATION without verified ChartDatum points.")
-                elif data_mode == VisualizationDataMode.CONCEPTUAL:
-                    # Conceptual data visualizations must not display ungrounded empirical numeric data points
-                    if getattr(spec, "chart_data", None):
-                        for cd in spec.chart_data:
-                            if getattr(cd, "value", None) is not None and getattr(cd, "source_ref", None) is None:
-                                warnings.append(f"CONCEPTUAL_NUMERIC_LABEL: Shot '{spec.shot_id}' is marked conceptual but contains ungrounded numeric data points.")
+        if storyboard and storyboard.shots:
+            for spec in storyboard.shots:
+                if spec.visual_modality == VisualModality.DOCUMENT_EVIDENCE:
+                    binding = getattr(spec, "evidence_binding", None)
+                    is_valid, reason = validate_evidence_binding(binding)
+                    if not is_valid:
+                        critical_failures.append(f"UNGROUNDED_EVIDENCE: Shot '{spec.shot_id}' {reason}")
+                elif spec.visual_modality == VisualModality.DATA_VISUALIZATION:
+                    data_mode = getattr(spec, "visual_data_mode", VisualizationDataMode.GROUNDED)
+                    if data_mode == VisualizationDataMode.GROUNDED:
+                        chart_data = getattr(spec, "chart_data", None)
+                        if not chart_data:
+                            critical_failures.append(f"FABRICATED_DATA: Shot '{spec.shot_id}' has grounded DATA_VISUALIZATION without verified ChartDatum points.")
+                        else:
+                            for cd in chart_data:
+                                if getattr(cd, "origin", None) == ChartDatumOrigin.CONCEPTUAL:
+                                    critical_failures.append(f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' has CONCEPTUAL origin in a GROUNDED chart.")
+                                elif getattr(cd, "origin", None) == ChartDatumOrigin.EXTERNAL_SOURCE and not getattr(cd, "source_ref", None):
+                                    critical_failures.append(f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' has EXTERNAL_SOURCE origin but missing source_ref.")
+                                elif getattr(cd, "origin", None) == ChartDatumOrigin.VERIFIED_CLAIM and not getattr(cd, "claim_id", None):
+                                    critical_failures.append(f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' has VERIFIED_CLAIM origin but missing claim_id.")
+                                elif not getattr(cd, "source_ref", None) and not getattr(cd, "claim_id", None):
+                                    critical_failures.append(f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' lacks both claim_id and source_ref in a GROUNDED chart.")
+                    elif data_mode == VisualizationDataMode.CONCEPTUAL:
+                        # Conceptual data visualizations must not display ungrounded empirical numeric data points
+                        if getattr(spec, "chart_data", None):
+                            for cd in spec.chart_data:
+                                if getattr(cd, "value", None) is not None and getattr(cd, "source_ref", None) is None and getattr(cd, "claim_id", None) is None:
+                                    warnings.append(f"CONCEPTUAL_NUMERIC_LABEL: Shot '{spec.shot_id}' is marked conceptual but contains ungrounded numeric data points.")
 
-        # 4. Severe duplication (> 0.85)
-        for spec in storyboard.shots:
-            dup_score = calculate_narration_duplication(spec.narration_segment, spec.headline_text)
-            if dup_score >= 0.85:
-                critical_failures.append(f"EXCESSIVE_DUPLICATION: Shot '{spec.shot_id}' duplication score {dup_score:.2f} strictly repeats spoken words.")
+            # 4. Severe duplication (> 0.85)
+            for spec in storyboard.shots:
+                dup_score = calculate_narration_duplication(spec.narration_segment, spec.headline_text)
+                if dup_score >= 0.85:
+                    critical_failures.append(f"EXCESSIVE_DUPLICATION: Shot '{spec.shot_id}' duplication score {dup_score:.2f} strictly repeats spoken words.")
 
         # 5. Static card threshold
         if static_card_ratio > max_static_card_ratio:
@@ -262,10 +344,6 @@ class VisualShotEvaluator:
         elif static_card_ratio > max_static_card_ratio:
             warnings.append(f"HIGH_STATIC_RATIO: {static_card_ratio * 100:.1f}% of runtime is static cards (target <= {max_static_card_ratio * 100:.0f}%).")
 
-        # 6. Unexpected total fallback
-        if director_fallback_occurred:
-            warnings.append("DIRECTOR_FALLBACK: AutoDirectorService encountered failure, legacy ScenePlanner was used.")
-
         warnings.extend(dead_air_warnings)
         warnings.extend(duplication_warnings)
 
@@ -275,6 +353,7 @@ class VisualShotEvaluator:
             creative_status = "PASS_WITH_WARNINGS"
         else:
             creative_status = "PASS"
+
 
         # Compute overall visual score
         score = 1.0

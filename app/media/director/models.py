@@ -22,6 +22,13 @@ class BeatPurpose(str, Enum):
     CTA = "CTA"
 
 
+class CreativeFallbackPolicy(str, Enum):
+    """Policy governing whether production pipeline can fallback to legacy slides when AutoDirector fails."""
+
+    FAIL_CLOSED = "FAIL_CLOSED"
+    ALLOW_LEGACY_PREVIEW = "ALLOW_LEGACY_PREVIEW"
+
+
 class VisualIntent(str, Enum):
     """What the viewer should visually observe or comprehend (distinct from spoken audio)."""
 
@@ -73,6 +80,14 @@ class VisualizationDataMode(str, Enum):
     CONCEPTUAL = "CONCEPTUAL"
 
 
+class ChartDatumOrigin(str, Enum):
+    """Origin category of a chart datum point."""
+
+    VERIFIED_CLAIM = "VERIFIED_CLAIM"
+    EXTERNAL_SOURCE = "EXTERNAL_SOURCE"
+    CONCEPTUAL = "CONCEPTUAL"
+
+
 from app.domain.enums import ContentFormat
 
 
@@ -88,6 +103,8 @@ class ChartDatum(BaseModel):
     value: float = Field(description="Numerical value")
     unit: Optional[str] = Field(default=None, description="Metric unit (e.g. %, ms, GB, $B)")
     source_ref: Optional[str] = Field(default=None, description="Citation or source reference ID")
+    origin: ChartDatumOrigin = Field(default=ChartDatumOrigin.CONCEPTUAL, description="Provenance origin of the datum")
+    claim_id: Optional[str] = Field(default=None, description="Associated verified Claim ID")
 
 
 class ComparisonColumn(BaseModel):

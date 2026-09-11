@@ -19,6 +19,7 @@ from app.media.director import (
     VisualModality,
     VisualShotEvaluator,
 )
+from app.media.director.models import CreativeFallbackPolicy
 from app.media.director.profiles import get_channel_profile_for_niche
 from app.media.ffmpeg_renderer import FFmpegRenderer
 from app.media.gflow_provider import GFlowMediaProvider
@@ -27,6 +28,7 @@ from app.media.models import (
     CREATIVE_PIPELINE_VERSION,
     compute_artifact_fingerprint,
     compute_production_fingerprint,
+    get_render_manifest_path,
     MediaQAResult,
     RenderManifest,
     RenderProfile,
@@ -70,12 +72,14 @@ class MediaProductionPipeline:
         base_output_dir: Optional[Path] = None,
         director_service: Optional[AutoDirectorService] = None,
         reasoning_backend: Optional[ReasoningBackend] = None,
+        fallback_policy: CreativeFallbackPolicy = CreativeFallbackPolicy.FAIL_CLOSED,
     ):
         self.repo = repository
         self.backend = reasoning_backend
         self.tts = tts_backend or EdgeTTSBackend()
         self.renderer = renderer or FFmpegRenderer()
         self.qa = qa_inspector or MediaQAInspector()
+        self.fallback_policy = fallback_policy
         # Ensure single canonical gflow_provider across pipeline, planner, and director
         self.gflow_provider = gflow_provider or (getattr(scene_planner, "gflow_provider", None) if scene_planner else None)
         self.planner = scene_planner or ScenePlanner(gflow_provider=self.gflow_provider)
@@ -86,7 +90,7 @@ class MediaProductionPipeline:
             visual_factory=getattr(self.planner, "visual_factory", None),
             reasoning_backend=self.backend,
         )
-        self.visual_evaluator = VisualShotEvaluator()
+        self.visual_evaluator = getattr(self.director, "evaluator", None) or VisualShotEvaluator()
         self.sub_gen = subtitle_generator or SubtitleGenerator()
         self.music_gen = music_generator or MusicGenerator()
         self.sound_designer = sound_designer or SoundDesignerService()
@@ -116,8 +120,10 @@ class MediaProductionPipeline:
         rate: str = "+0%",
         pitch: str = "+0Hz",
         force_rebuild: bool = False,
+        fallback_policy: Optional[CreativeFallbackPolicy] = None,
     ) -> Tuple[VideoProject, MediaQAResult, RenderManifest]:
         """Execute full media production for a VERIFIED project with strict idempotency."""
+        active_fallback_policy = fallback_policy or self.fallback_policy
         render_prof = profile or RenderProfile()
         self.renderer.profile = render_prof
         self.qa.profile = render_prof
@@ -161,12 +167,12 @@ class MediaProductionPipeline:
         for d in (audio_dir, sub_dir, scenes_dir, render_dir, manifest_dir):
             d.mkdir(parents=True, exist_ok=True)
 
-        manifest_path = manifest_dir / "render_manifest.json"
+        manifest_path = get_render_manifest_path(project_id, self.base_output_dir)
 
         # 4. Check capabilities before mutating state
         resolved_voice = voice or (self.tts.default_voice if hasattr(self.tts, "default_voice") else "en-US-GuyNeural") or "en-US-GuyNeural"
         tts_backend_name = getattr(self.tts, "backend_name", "edge-tts") if hasattr(self.tts, "backend_name") else "edge-tts"
-        if hasattr(self.tts, "__class__") and "Mock" in self.tts.__class__.__name__:
+        if hasattr(self.tts, "__class__") and any(m in self.tts.__class__.__name__ for m in ("Mock", "Fake")):
             tts_backend_name = "mock-tts"
 
         caps = check_media_capabilities(
@@ -191,12 +197,17 @@ class MediaProductionPipeline:
 
         # Resolve Creative Profile
         resolved_profile = getattr(self.director, "profile", None)
-        if not resolved_profile or resolved_profile.name == "Tech Engineering Channel":
+        if not resolved_profile or resolved_profile.name in ("Tech Engineering Channel", "default"):
             resolved_profile = get_channel_profile_for_niche(channel_niche)
             if hasattr(self.director, "apply_profile"):
                 self.director.apply_profile(resolved_profile)
             elif hasattr(self.director, "profile"):
                 self.director.profile = resolved_profile
+
+        # P1-6: Unify creative evaluator profile with canonical director evaluator
+        self.visual_evaluator = getattr(self.director, "evaluator", self.visual_evaluator)
+        if resolved_profile:
+            self.visual_evaluator.profile = resolved_profile
         creative_profile_name = resolved_profile.name if resolved_profile else "default"
 
         # Resolve Content Format
@@ -393,6 +404,8 @@ class MediaProductionPipeline:
             channel_name = channel.title if channel else "YouTube Channel"
 
             used_director = False
+            director_fallback_occurred = False
+            creative_fallback_reason: Optional[str] = None
             timeline = None
             storyboard = None
             scene_plans: List[SceneRenderPlan] = []
@@ -422,11 +435,18 @@ class MediaProductionPipeline:
                 if timeline and len(timeline.shots) > 0:
                     used_director = True
             except Exception as exc:
+                if active_fallback_policy == CreativeFallbackPolicy.FAIL_CLOSED:
+                    raise MediaProductionError(
+                        f"AutoDirector failed in FAIL_CLOSED mode: {exc}"
+                    ) from exc
+
                 logging.warning(
                     f"CREATIVE_PIPELINE_FALLBACK: AutoDirectorService encountered failure ({exc}), "
-                    f"falling back to legacy ScenePlanner."
+                    f"falling back to legacy ScenePlanner under policy {active_fallback_policy}."
                 )
                 used_director = False
+                director_fallback_occurred = True
+                creative_fallback_reason = str(exc)
 
             ordered_scene_hashes = []
             if used_director and timeline:
@@ -611,13 +631,24 @@ class MediaProductionPipeline:
 
             # 12b. Creative Visual Quality Evaluation Report
             visual_report = None
+            failed_attempts = len([a for a in getattr(self.director, "asset_attempts", []) if not a.success])
             if used_director and timeline and storyboard:
-                failed_attempts = len([a for a in getattr(self.director, "asset_attempts", []) if not a.success])
                 visual_report = self.visual_evaluator.generate_quality_report(
                     timeline=timeline,
                     storyboard=storyboard,
                     failed_attempts=failed_attempts,
-                    director_fallback_occurred=not used_director,
+                    director_fallback_occurred=False,
+                )
+                report_path = proj_dir / "manifests" / f"creative_qa_report_{project_id}.json"
+                report_path.write_text(visual_report.model_dump_json(indent=2), encoding="utf-8")
+            elif director_fallback_occurred:
+                # Even under ALLOW_LEGACY_PREVIEW, Creative QA MUST run and fail publication
+                visual_report = self.visual_evaluator.generate_quality_report(
+                    timeline=None,
+                    storyboard=None,
+                    failed_attempts=failed_attempts,
+                    director_fallback_occurred=True,
+                    creative_fallback_reason=creative_fallback_reason,
                 )
                 report_path = proj_dir / "manifests" / f"creative_qa_report_{project_id}.json"
                 report_path.write_text(visual_report.model_dump_json(indent=2), encoding="utf-8")
@@ -657,10 +688,22 @@ class MediaProductionPipeline:
                     if modality_val in ("GENERATED_IMAGE", "GENERATED_VIDEO", "IMAGE_TO_VIDEO"):
                         contains_synthetic = True
                         break
+                    if getattr(s, "provider", None) == "gflow":
+                        contains_synthetic = True
+                        break
+                    if getattr(s, "asset_path", "") and ("gflow" in str(s.asset_path).lower() or "synthetic" in str(s.asset_path).lower()):
+                        contains_synthetic = True
+                        break
+                if not contains_synthetic and hasattr(self.director, "asset_attempts"):
+                    for attempt in self.director.asset_attempts:
+                        if getattr(attempt, "success", False) and getattr(attempt, "provider", "") == "gflow":
+                            contains_synthetic = True
+                            break
             else:
                 for a in created_assets:
                     url = (a.source_url or "").lower()
-                    if "gflow" in url or "synthetic" in url:
+                    fp = (str(a.file_path) or "").lower()
+                    if "gflow" in url or "synthetic" in url or "gflow" in fp or "synthetic" in fp:
                         contains_synthetic = True
                         break
 
@@ -712,6 +755,9 @@ class MediaProductionPipeline:
                 measured_loudness_lufs=qa_res.loudness_lufs,
                 qa_verdict="PASSED" if qa_passed else "FAILED",
                 qa_issues=all_qa_issues,
+                director_used=used_director,
+                director_fallback_occurred=director_fallback_occurred,
+                creative_fallback_reason=creative_fallback_reason,
                 contains_synthetic_media=contains_synthetic,
             )
 

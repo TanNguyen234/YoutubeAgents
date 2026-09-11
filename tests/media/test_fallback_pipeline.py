@@ -59,18 +59,44 @@ def repo_with_verified_project(tmp_path: Path):
     return repo, project.id
 
 
-def test_creative_pipeline_fallback_to_scene_planner(repo_with_verified_project, tmp_path: Path, caplog):
-    """When AutoDirectorService fails, pipeline must emit CREATIVE_PIPELINE_FALLBACK and use ScenePlanner."""
+def test_director_failure_blocks_production_by_default(repo_with_verified_project, tmp_path: Path):
+    """By default (FAIL_CLOSED), AutoDirector failure must raise MediaProductionError and fail production."""
     repo, project_id = repo_with_verified_project
     tts = MockTTSBackend(duration_seconds=3.0)
 
     pipeline = MediaProductionPipeline(
         repository=repo,
         tts_backend=tts,
-        base_output_dir=tmp_path / "out_fallback",
+        base_output_dir=tmp_path / "out_fallback_default",
+        # default fallback_policy is FAIL_CLOSED
     )
 
-    # Force AutoDirectorService to fail
+    def failing_director(*args, **kwargs):
+        raise RuntimeError("Simulated creative director model timeout")
+
+    pipeline.director.plan_and_render_timeline = failing_director
+
+    with pytest.raises(Exception) as exc_info:
+        pipeline.run_production(project_id=project_id)
+
+    assert "AutoDirector failed in FAIL_CLOSED mode" in str(exc_info.value)
+    proj = repo.get_video_project(project_id)
+    assert proj.state in (VideoLifecycleState.FAILED, VideoLifecycleState.PRODUCING)
+
+
+def test_legacy_fallback_requires_explicit_preview_policy(repo_with_verified_project, tmp_path: Path, caplog):
+    """When explicitly configured with ALLOW_LEGACY_PREVIEW, pipeline renders legacy preview but Creative QA fails."""
+    from app.media.director.models import CreativeFallbackPolicy
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_fallback_preview",
+        fallback_policy=CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW,
+    )
+
     def failing_director(*args, **kwargs):
         raise RuntimeError("Simulated creative director model timeout")
 
@@ -79,13 +105,46 @@ def test_creative_pipeline_fallback_to_scene_planner(repo_with_verified_project,
     with caplog.at_level(logging.WARNING):
         proj, qa_res, manifest = pipeline.run_production(project_id=project_id)
 
-    # Must complete safely
-    assert proj.state == VideoLifecycleState.READY_FOR_REVIEW
-    assert qa_res.passed is True
-    assert Path(manifest.final_video_path).exists()
-
-    # Must log the observable fallback warning
+    # Legacy slides are generated for developer inspection, but Creative QA MUST fail
+    assert proj.state == VideoLifecycleState.QA_FAILED
+    assert manifest.director_used is False
+    assert manifest.director_fallback_occurred is True
+    assert "Simulated creative director model timeout" in (manifest.creative_fallback_reason or "")
+    assert manifest.qa_verdict == "FAILED"
+    assert any("AutoDirector fallback occurred" in issue for issue in manifest.qa_issues)
     assert any("CREATIVE_PIPELINE_FALLBACK" in rec.message for rec in caplog.records)
+
+
+def test_director_fallback_cannot_reach_approved_publication(repo_with_verified_project, tmp_path: Path):
+    """Director fallback must never reach READY_FOR_REVIEW or allow publication approval."""
+    from app.media.director.models import CreativeFallbackPolicy
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_fallback_no_publish",
+        fallback_policy=CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW,
+    )
+
+    def failing_director(*args, **kwargs):
+        raise RuntimeError("Creative failure")
+
+    pipeline.director.plan_and_render_timeline = failing_director
+
+    proj, qa_res, manifest = pipeline.run_production(project_id=project_id)
+
+    assert proj.state == VideoLifecycleState.QA_FAILED
+    assert manifest.qa_verdict == "FAILED"
+
+    # Verifying state machine reject transition to REVIEW_APPROVED from QA_FAILED
+    with pytest.raises(Exception):
+        repo.update_project_state(
+            project_id=project_id,
+            to_state=VideoLifecycleState.REVIEW_APPROVED,
+            expected_current_state=VideoLifecycleState.READY_FOR_REVIEW,
+        )
 
 
 def test_selective_shot_regeneration(tmp_path: Path):

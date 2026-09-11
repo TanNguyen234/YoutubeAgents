@@ -175,9 +175,17 @@ class RenderManifest(BaseModel):
     measured_loudness_lufs: float = Field(description="Real measured EBU R128 loudness in LUFS")
     qa_verdict: str = Field(description="PASSED or FAILED")
     qa_issues: List[str] = Field(default_factory=list)
+    director_used: bool = Field(default=True, description="Whether AutoDirector was used to plan and render the visual timeline")
+    director_fallback_occurred: bool = Field(default=False, description="Whether fallback to legacy ScenePlanner occurred due to director failure")
+    creative_fallback_reason: Optional[str] = Field(default=None, description="Reason for director fallback if occurred")
     contains_synthetic_media: bool = Field(default=False, description="Whether final video contains photorealistic synthetic/AI-generated media")
     lifecycle: List[str] = Field(default_factory=lambda: ["VERIFIED", "PRODUCING", "RENDERED", "READY_FOR_REVIEW"])
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+def get_render_manifest_path(project_id: str, base_dir: Path | str = Path("output/projects")) -> Path:
+    """Return the canonical filesystem path to the render manifest for a project."""
+    return Path(base_dir) / project_id / "manifests" / "render_manifest.json"
 
 
 def compute_production_fingerprint(
