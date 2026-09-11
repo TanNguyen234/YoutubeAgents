@@ -7,6 +7,9 @@ from typing import Dict, List, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
 
+from app.media.director.models import MissingGroundedVisualData
+
+
 class ChartRenderer:
     """Renders 1080x1920 9:16 high-contrast data visualizations and charts using Pillow."""
 
@@ -27,13 +30,17 @@ class ChartRenderer:
         self,
         title: str,
         categories: List[str],
-        values: List[float],
+        values: Optional[List[float]],
         output_path: Path,
         unit: str = "%",
         highlight_index: int = 0,
         subtitle: Optional[str] = None,
+        show_numeric_labels: bool = True,
     ) -> Tuple[str, str]:
         """Render horizontal bar chart ideal for probability distributions, benchmarks, and rankings."""
+        if not values and show_numeric_labels:
+            raise MissingGroundedVisualData("Cannot render empirical chart without grounded numerical values.")
+
         img = Image.new("RGB", (self.width, self.height), color=(15, 23, 42))  # Slate dark
         draw = ImageDraw.Draw(img)
 
@@ -56,7 +63,7 @@ class ChartRenderer:
         # 3. Bar Chart Calculations
         num_items = min(5, len(categories))
         cats = categories[:num_items]
-        vals = values[:num_items] if values else [82.0, 12.0, 4.0, 2.0]
+        vals = values[:num_items] if values else [80.0, 30.0, 15.0, 8.0][:num_items]
         max_val = max(vals) if max(vals) > 0 else 100.0
 
         bar_start_y = 380
@@ -88,11 +95,15 @@ class ChartRenderer:
             bar_color = (52, 211, 153) if is_highlight else (56, 189, 248)
             draw.rounded_rectangle([bar_left, y, bar_left + bar_w, y + bar_height], radius=14, fill=bar_color)
 
-            # Value Label
-            val_text = f"{val:.1f}{unit}" if isinstance(val, float) and val % 1 != 0 else f"{int(val)}{unit}"
-            # Text inside bar or right of bar
-            text_x = bar_left + bar_w + 24
-            draw.text((text_x, y + bar_height // 2), val_text, font=val_font, fill=(255, 255, 255), anchor="lm")
+            # Value Label (Rendered only if grounded numeric labels enabled)
+            if show_numeric_labels:
+                val_text = f"{val:.1f}{unit}" if isinstance(val, float) and val % 1 != 0 else f"{int(val)}{unit}"
+                text_x = bar_left + bar_w + 24
+                draw.text((text_x, y + bar_height // 2), val_text, font=val_font, fill=(255, 255, 255), anchor="lm")
+            else:
+                # Conceptual unnumbered indicator
+                text_x = bar_left + bar_w + 24
+                draw.text((text_x, y + bar_height // 2), "—", font=val_font, fill=(100, 116, 139), anchor="lm")
 
             # Selection / Star badge for highlighted winner
             if is_highlight:
@@ -110,38 +121,52 @@ class ChartRenderer:
         cats = []
         vals = []
 
-        # Check for token probability case (e.g. Paris 82%, Lyon 6%, London 2%)
+        # Extract explicit numbers from instruction if present
+        raw_nums = re.findall(r"\b\d+(?:\.\d+)?%?\b", instruction)
+        numbers = [float(n.replace("%", "")) for n in raw_nums]
+
+        # Check for token probability case (e.g. Paris vs Lyon vs London)
         if "token" in instruction.lower() or "paris" in instruction.lower() or "llm" in instruction.lower():
             cats = ['"Paris"', '"Lyon"', '"London"', '"Berlin"']
-            vals = [82.0, 8.0, 6.0, 4.0]
             title = "Next-Token Probability"
             subtitle = 'Prompt: "The capital of France is..."'
-        elif "nvidia" in instruction.lower() or "revenue" in instruction.lower():
-            cats = ["2024 (AI Boom)", "2023", "2022", "2021"]
-            vals = [26.0, 13.5, 6.7, 5.0]
-            title = "NVIDIA Quarterly Data Center Rev"
-            subtitle = "Data Center Compute Explosion ($B USD)"
-        elif "benchmark" in instruction.lower() or "improved" in instruction.lower() or "%" in instruction.lower():
-            numbers = [float(n.replace("%", "")) for n in re.findall(r"\b\d+(?:\.\d+)?%?\b", instruction)]
             if numbers:
-                vals = numbers[:4]
-                cats = [f"Model v{i+1}" for i in range(len(vals))]
+                vals = numbers[:len(cats)]
+                return self.render_horizontal_bar_chart(
+                    title=title,
+                    categories=cats,
+                    values=vals,
+                    output_path=output_path,
+                    unit="%",
+                    highlight_index=0,
+                    subtitle=subtitle,
+                    show_numeric_labels=True,
+                )
             else:
-                cats = ["Target Optimization", "Baseline Model", "Legacy System"]
-                vals = [94.0, 76.0, 52.0]
-            title = "Benchmark Accuracy Delta"
-            subtitle = "Evaluation against Standardized Test Suite"
-        else:
-            cats = ["Primary Variant", "Alternative A", "Alternative B"]
-            vals = [78.0, 15.0, 7.0]
-            subtitle = "Comparative Performance Metric"
+                # Conceptual next-token probability bars WITHOUT fake numeric labels
+                return self.render_horizontal_bar_chart(
+                    title=title,
+                    categories=cats,
+                    values=[80.0, 25.0, 15.0, 8.0],
+                    output_path=output_path,
+                    unit="",
+                    highlight_index=0,
+                    subtitle=subtitle,
+                    show_numeric_labels=False,
+                )
 
+        if not numbers:
+            raise MissingGroundedVisualData(f"No grounded empirical numbers found in chart instruction: '{instruction}'")
+
+        vals = numbers[:4]
+        cats = [f"Item {i+1}" for i in range(len(vals))]
         return self.render_horizontal_bar_chart(
             title=title,
             categories=cats,
             values=vals,
             output_path=output_path,
-            unit="%" if max(vals) <= 100 else "$B",
+            unit="%" if max(vals) <= 100 else "",
             highlight_index=0,
-            subtitle=subtitle,
+            subtitle="Grounded Empirical Distribution",
+            show_numeric_labels=True,
         )

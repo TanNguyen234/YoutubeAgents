@@ -69,6 +69,7 @@ class MediaProductionPipeline:
         self.repo = repository
         self.tts = tts_backend or EdgeTTSBackend()
         self.renderer = renderer or FFmpegRenderer()
+        self.qa = qa_inspector or MediaQAInspector()
         # Ensure single canonical gflow_provider across pipeline, planner, and director
         self.gflow_provider = gflow_provider or (getattr(scene_planner, "gflow_provider", None) if scene_planner else None)
         self.planner = scene_planner or ScenePlanner(gflow_provider=self.gflow_provider)

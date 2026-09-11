@@ -6,9 +6,11 @@ import re
 from typing import List, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
+from app.media.director.models import MissingGroundedVisualData
+
 
 class MotionGraphicsRenderer:
-    """Renders 1080x1920 9:16 visual components for comparisons, code/terminal simulations, and stat callouts."""
+    """Renders 1080x1920 9:16 high-impact kinetic typography, stat callouts, and comparisons."""
 
     def __init__(self, width: int = 1080, height: int = 1920):
         self.width = width
@@ -129,15 +131,20 @@ class MotionGraphicsRenderer:
         label: str,
         context_detail: str,
         output_path: Path,
+        badge_text: Optional[str] = None,
     ) -> Tuple[str, str]:
         """Render high-impact stat callout card (e.g. +18% Benchmark Improvement, $26B Revenue)."""
+        if not big_stat or not str(big_stat).strip():
+            raise MissingGroundedVisualData("render_stat_callout requires an explicit grounded big_stat metric.")
+
         img = Image.new("RGB", (self.width, self.height), color=(15, 23, 42))
         draw = ImageDraw.Draw(img)
 
         # Header Badge
         header_font = self._get_font(28)
         draw.rounded_rectangle([80, 160, self.width - 80, 230], radius=16, fill=(30, 41, 59), outline=(168, 85, 247), width=2)
-        draw.text((self.width // 2, 195), "🎯 CRITICAL BREAKTHROUGH", font=header_font, fill=(168, 85, 247), anchor="mm")
+        badge_title = badge_text or "KEY METRIC"
+        draw.text((self.width // 2, 195), f"🎯 {badge_title.upper()}", font=header_font, fill=(168, 85, 247), anchor="mm")
 
         # Huge Stat Box
         box_y1, box_y2 = 360, 960

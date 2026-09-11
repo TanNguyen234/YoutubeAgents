@@ -215,11 +215,21 @@ class AutoDirectorService:
             target_path = output_dir / f"{shot_id}_chart.png"
             instr = shot.chart_instruction or shot.narration_segment
             try:
-                p, h = self.chart_renderer.render_from_instruction(
-                    instruction=instr,
-                    output_path=target_path,
-                    title=shot.headline_text or "Data Analysis",
-                )
+                if shot.chart_data:
+                    p, h = self.chart_renderer.render_horizontal_bar_chart(
+                        title=shot.headline_text or "Data Analysis",
+                        categories=[d.label for d in shot.chart_data],
+                        values=[d.value for d in shot.chart_data],
+                        output_path=target_path,
+                        unit=shot.chart_data[0].unit or "%",
+                        show_numeric_labels=True,
+                    )
+                else:
+                    p, h = self.chart_renderer.render_from_instruction(
+                        instruction=instr,
+                        output_path=target_path,
+                        title=shot.headline_text or "Data Analysis",
+                    )
                 self.asset_attempts.append(
                     AssetGenerationAttempt(
                         shot_id=shot_id,
@@ -233,37 +243,37 @@ class AutoDirectorService:
                 )
                 return Path(p), h
             except Exception as e:
-                self.asset_attempts.append(
-                    AssetGenerationAttempt(
-                        shot_id=shot_id,
-                        provider="chart_renderer",
-                        modality=modality.value,
-                        prompt=instr,
-                        success=False,
-                        error_type=type(e).__name__,
-                        error_message=str(e),
-                        latency_ms=int((time.time() - t0) * 1000),
-                    )
+                # If ungrounded or failed, gracefully fall back to Diagram
+                target_path = output_dir / f"{shot_id}_diagram_fallback.png"
+                p, h = self.diagram_renderer.render_from_instruction(
+                    instruction=shot.narration_segment,
+                    output_path=target_path,
+                    title=shot.subject or script_title,
                 )
+                return Path(p), h
 
         # Modality C: CODE_ANIMATION / UI_SIMULATION
         elif modality in (VisualModality.CODE_ANIMATION, VisualModality.UI_SIMULATION):
             target_path = output_dir / f"{shot_id}_terminal.png"
             cmd_text = shot.code_instruction or shot.screen_instruction or shot.narration_segment
-            # Clean command
             cmd_clean = re.sub(r"^[^:]+:\s*", "", cmd_text)
+
+            # Distinguish REAL_TERMINAL vs ILLUSTRATIVE_TERMINAL: never invent fake execution latency or fake pass states
+            if shot.terminal_mode == "REAL_TERMINAL" and shot.code_output_lines:
+                output_lines = shot.code_output_lines
+            else:
+                # Illustrative terminal demonstrates syntax and conceptual structure without fake latency/timing
+                output_lines = [
+                    f"# Demonstrating syntax: {shot.subject or 'command sequence'}",
+                    f"$ {cmd_clean[:42]}",
+                    "# [Illustrative execution structure]",
+                ]
             try:
                 p, h = self.motion_renderer.render_code_terminal(
                     command=cmd_clean[:40],
-                    output_lines=[
-                        "Resolving dependencies...",
-                        "State verification: PASSED",
-                        f"Target: {shot.subject or 'system'}",
-                        "Executing pipeline stage...",
-                        "Done in 14.2ms. Status: OK",
-                    ],
+                    output_lines=output_lines,
                     output_path=target_path,
-                    window_title=f"terminal — {shot.subject or 'engine'}",
+                    window_title=f"terminal — {shot.subject or 'syntax'}",
                 )
                 self.asset_attempts.append(
                     AssetGenerationAttempt(
@@ -294,13 +304,23 @@ class AutoDirectorService:
         # Modality D: COMPARISON
         elif modality == VisualModality.COMPARISON:
             target_path = output_dir / f"{shot_id}_comparison.png"
+            # Require grounded comparison columns; never use hardcoded domain-specific defaults
+            if not shot.comparison_left or not shot.comparison_right or not shot.comparison_left.points or not shot.comparison_right.points:
+                target_path = output_dir / f"{shot_id}_diagram_fallback.png"
+                p, h = self.diagram_renderer.render_from_instruction(
+                    instruction=shot.narration_segment,
+                    output_path=target_path,
+                    title=shot.subject or script_title,
+                )
+                return Path(p), h
+
             try:
                 p, h = self.motion_renderer.render_before_after_comparison(
                     title=shot.subject or "Comparative Analysis",
-                    before_label="Legacy Architecture",
-                    before_points=["Global lock contention", "Blocking concurrent readers", "High latency spikes"],
-                    after_label="Modern Solution",
-                    after_points=["Lock-free concurrent reads", "Sequential log append (WAL)", "Sub-millisecond latency"],
+                    before_label=shot.comparison_left.label,
+                    before_points=shot.comparison_left.points,
+                    after_label=shot.comparison_right.label,
+                    after_points=shot.comparison_right.points,
                     output_path=target_path,
                 )
                 self.asset_attempts.append(
@@ -330,18 +350,37 @@ class AutoDirectorService:
         # Modality E: DOCUMENT_EVIDENCE / SCREENSHOT
         elif modality in (VisualModality.DOCUMENT_EVIDENCE, VisualModality.SCREENSHOT):
             target_path = output_dir / f"{shot_id}_evidence.png"
-            src_url = "https://official-documentation.org"
-            src_title = script_title
-            if dossier and dossier.sources:
-                src_url = dossier.sources[0].url
-                src_title = dossier.sources[0].title
+
+            # Resolve grounded evidence binding
+            binding = shot.evidence_binding
+            if not binding and dossier and dossier.sources and shot.source_refs:
+                matched_source = next((s for s in dossier.sources if s.id in shot.source_refs or s.url in shot.source_refs), None)
+                if matched_source:
+                    from app.media.director.models import EvidenceBinding
+                    binding = EvidenceBinding(
+                        source_ref=matched_source.id,
+                        source_title=matched_source.title,
+                        source_url=matched_source.url,
+                        quote_or_excerpt=shot.evidence_instruction or shot.narration_segment,
+                    )
+
+            if not binding or not binding.source_url or "official-documentation.org" in binding.source_url:
+                # No grounded source binding: DOCUMENT_EVIDENCE must not be rendered. Route to Diagram.
+                target_path = output_dir / f"{shot_id}_diagram_fallback.png"
+                p, h = self.diagram_renderer.render_from_instruction(
+                    instruction=shot.narration_segment,
+                    output_path=target_path,
+                    title=shot.subject or script_title,
+                )
+                return Path(p), h
+
             try:
                 p, h = self.evidence_renderer.render_evidence_card(
-                    source_title=src_title,
-                    source_url=src_url,
-                    highlighted_claim=shot.evidence_instruction or shot.narration_segment,
+                    source_title=binding.source_title,
+                    source_url=binding.source_url,
+                    highlighted_claim=binding.quote_or_excerpt or shot.narration_segment,
                     output_path=target_path,
-                    benchmark_name="VERIFIED RESULT",
+                    benchmark_name="SOURCE CITATION",
                 )
                 self.asset_attempts.append(
                     AssetGenerationAttempt(
@@ -370,10 +409,22 @@ class AutoDirectorService:
         # Modality F: MOTION_GRAPHICS
         elif modality in (VisualModality.MOTION_GRAPHICS, VisualModality.TIMELINE):
             target_path = output_dir / f"{shot_id}_stat.png"
+            stat_match = re.search(r"(\+?-?\d+(?:\.\d+)?(?:%|x|ms|s|GB|MB|K|M|B)?|\b[A-Z]{2,}\b)", shot.narration_segment)
+            big_stat = shot.headline_text or (stat_match.group(1) if stat_match else None)
+            if not big_stat:
+                # No grounded stat metric: route to diagram rather than inventing fake 10x FASTER
+                target_path = output_dir / f"{shot_id}_diagram_fallback.png"
+                p, h = self.diagram_renderer.render_from_instruction(
+                    instruction=shot.narration_segment,
+                    output_path=target_path,
+                    title=shot.subject or script_title,
+                )
+                return Path(p), h
+
             try:
                 p, h = self.motion_renderer.render_stat_callout(
-                    big_stat=shot.headline_text or "10x FASTER",
-                    label=shot.action or "Architecture Win",
+                    big_stat=big_stat,
+                    label=shot.action or "System Insight",
                     context_detail=shot.narration_segment[:45],
                     output_path=target_path,
                 )

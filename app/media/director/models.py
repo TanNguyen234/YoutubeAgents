@@ -81,6 +81,38 @@ class ContentFormat(str, Enum):
     PROBLEM_SOLUTION = "PROBLEM_SOLUTION"
 
 
+class MissingGroundedVisualData(ValueError):
+    """Raised when an empirical visual modality is requested without grounded factual data."""
+    pass
+
+
+class ChartDatum(BaseModel):
+    """Grounded datum point for data visualization shots."""
+
+    label: str = Field(description="Category or series label")
+    value: float = Field(description="Numerical value")
+    unit: Optional[str] = Field(default=None, description="Metric unit (e.g. %, ms, GB, $B)")
+    source_ref: Optional[str] = Field(default=None, description="Citation or source reference ID")
+
+
+class ComparisonColumn(BaseModel):
+    """Grounded column details for comparison shots."""
+
+    label: str = Field(description="Subject or architecture name being compared")
+    points: List[str] = Field(default_factory=list, description="Explicit verified points or characteristics")
+    source_refs: List[str] = Field(default_factory=list, description="Source references verifying these points")
+
+
+class EvidenceBinding(BaseModel):
+    """Factually grounded source binding for DOCUMENT_EVIDENCE shots."""
+
+    claim_id: Optional[str] = Field(default=None, description="Associated claim identifier")
+    source_ref: str = Field(description="Internal source reference or ID")
+    source_title: str = Field(description="Document title or publication source")
+    source_url: str = Field(description="Verified URL of original source")
+    quote_or_excerpt: Optional[str] = Field(default=None, description="Exact quotation or benchmark excerpt")
+
+
 class NarrativeBeat(BaseModel):
     """Intermediate representation between a script scene and concrete visual shots."""
 
@@ -100,6 +132,8 @@ class NarrativeBeat(BaseModel):
         default_factory=lambda: [VisualModality.STATIC_CARD], description="Modalities that dilute impact"
     )
     source_refs: List[str] = Field(default_factory=list, description="Associated source citations")
+    chart_data: List[ChartDatum] = Field(default_factory=list, description="Explicit grounded chart numbers")
+    evidence_binding: Optional[EvidenceBinding] = Field(default=None, description="Verified source binding")
 
 
 class ShotSpec(BaseModel):
@@ -129,6 +163,12 @@ class ShotSpec(BaseModel):
     continuity_refs: List[str] = Field(default_factory=list, description="Style or entity continuity references")
     source_refs: List[str] = Field(default_factory=list, description="Source provenance citations")
     importance: float = Field(default=0.5, ge=0.0, le=1.0, description="Visual importance score")
+    chart_data: List[ChartDatum] = Field(default_factory=list, description="Structured grounded chart data points")
+    comparison_left: Optional[ComparisonColumn] = Field(default=None, description="Verified left comparison column")
+    comparison_right: Optional[ComparisonColumn] = Field(default=None, description="Verified right comparison column")
+    evidence_binding: Optional[EvidenceBinding] = Field(default=None, description="Grounded source evidence binding")
+    code_output_lines: List[str] = Field(default_factory=list, description="Verified output lines for terminal execution")
+    terminal_mode: str = Field(default="ILLUSTRATIVE_TERMINAL", description="REAL_TERMINAL vs ILLUSTRATIVE_TERMINAL")
 
 
 class OverlaySpec(BaseModel):

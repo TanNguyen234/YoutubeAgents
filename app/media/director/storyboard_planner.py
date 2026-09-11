@@ -9,7 +9,10 @@ from app.domain.models import Script
 from app.media.director.modality_router import VisualModalityRouter
 from app.media.director.models import (
     ChannelCreativeProfile,
+    ChartDatum,
+    ComparisonColumn,
     ContentFormat,
+    EvidenceBinding,
     NarrativeBeat,
     ShotSpec,
     Storyboard,
@@ -69,13 +72,25 @@ class StoryboardPlanner:
                 f"Core mechanism: {beat.key_claim or narration}. Clean dark theme, high-contrast connected nodes."
             )
         elif modality == VisualModality.DATA_VISUALIZATION:
-            # Check for numbers or probability in narration
-            num_match = re.findall(r"\b\d+(?:\.\d+)?%?\b", narration)
-            numbers_str = ", ".join(num_match) if num_match else "82%, 12%, 6%"
-            instructions["chart_instruction"] = (
-                f"Data visualization: Bar chart or probability distribution showing {entities_str}. "
-                f"Data points: [{numbers_str}]. Rising animated bars with highlighted leader."
-            )
+            if beat.chart_data:
+                chart_points_str = ", ".join(f"{d.label}: {d.value}{d.unit or ''}" for d in beat.chart_data)
+                instructions["chart_instruction"] = (
+                    f"Data visualization: Bar chart showing {entities_str}. "
+                    f"Grounded data: [{chart_points_str}]."
+                )
+            else:
+                num_match = re.findall(r"\b\d+(?:\.\d+)?%?\b", narration)
+                if num_match:
+                    numbers_str = ", ".join(num_match)
+                    instructions["chart_instruction"] = (
+                        f"Data visualization: Bar chart or probability distribution showing {entities_str}. "
+                        f"Data points: [{numbers_str}]."
+                    )
+                else:
+                    instructions["chart_instruction"] = (
+                        f"Next-token distribution: Conceptual probability bars for {entities_str}. "
+                        f"No numeric labels."
+                    )
         elif modality == VisualModality.CODE_ANIMATION:
             instructions["code_instruction"] = (
                 f"Syntax-highlighted terminal or code editor: Demonstrate {entities_str}. "
@@ -140,11 +155,56 @@ class StoryboardPlanner:
                 content_format=content_format,
                 available_modalities=available_modalities,
             )
+
+            # Grounding enforcement & reroute checks:
+            # 1. DATA_VISUALIZATION requires either explicit chart_data, extractable numbers, or conceptual token context
+            has_numbers = bool(re.findall(r"\b\d+(?:\.\d+)?%?\b", beat.narration)) or bool(beat.chart_data)
+            is_token_concept = any(k in beat.narration.lower() for k in ("token", "next token", "probability"))
+            if selected_mod == VisualModality.DATA_VISUALIZATION and not (has_numbers or is_token_concept):
+                selected_mod = VisualModality.DIAGRAM
+
+            # 2. DOCUMENT_EVIDENCE requires valid source binding or verifiable source_refs
+            if selected_mod == VisualModality.DOCUMENT_EVIDENCE:
+                if not beat.evidence_binding and not beat.source_refs:
+                    selected_mod = VisualModality.DIAGRAM
+
+            # 3. COMPARISON requires structured comparison points or extractable entities
+            comparison_left: Optional[ComparisonColumn] = None
+            comparison_right: Optional[ComparisonColumn] = None
+            if selected_mod == VisualModality.COMPARISON:
+                if len(beat.key_entities) >= 2:
+                    comparison_left = ComparisonColumn(
+                        label=beat.key_entities[0],
+                        points=[f"{beat.key_entities[0]} approach", beat.narration[:40]],
+                    )
+                    comparison_right = ComparisonColumn(
+                        label=beat.key_entities[1],
+                        points=[f"{beat.key_entities[1]} approach", beat.key_claim[:40] if beat.key_claim else "Alternative"],
+                    )
+                elif " vs " in beat.narration.lower() or " versus " in beat.narration.lower():
+                    parts = re.split(r"\s+vs\.?\s+|\s+versus\s+", beat.narration, flags=re.IGNORECASE)
+                    if len(parts) >= 2:
+                        comparison_left = ComparisonColumn(label=parts[0].strip()[:24], points=[parts[0].strip()[:35]])
+                        comparison_right = ComparisonColumn(label=parts[1].strip()[:24], points=[parts[1].strip()[:35]])
+
+                if not comparison_left or not comparison_right:
+                    # Incomplete comparison data: reroute to DIAGRAM
+                    selected_mod = VisualModality.DIAGRAM
+
             modality_counts[selected_mod.value] = modality_counts.get(selected_mod.value, 0) + 1
 
             dur = beat.duration_hint or 2.5
             instructions = self._build_modality_instructions(beat, selected_mod, script.title)
             punchline = self._extract_punchline(beat.narration)
+
+            # Build grounded chart data if available
+            shot_chart_data = beat.chart_data
+            if not shot_chart_data and has_numbers:
+                raw_nums = re.findall(r"\b\d+(?:\.\d+)?%?\b", beat.narration)
+                shot_chart_data = [
+                    ChartDatum(label=f"Metric {i+1}", value=float(n.replace("%", "")))
+                    for i, n in enumerate(raw_nums[:4])
+                ]
 
             shot = ShotSpec(
                 shot_id=f"shot_{b_idx + 1:02d}",
@@ -161,6 +221,10 @@ class StoryboardPlanner:
                 continuity_refs=[f"shot_{b_idx:02d}"] if b_idx > 0 else [],
                 source_refs=beat.source_refs,
                 importance=beat.importance,
+                chart_data=shot_chart_data,
+                comparison_left=comparison_left,
+                comparison_right=comparison_right,
+                evidence_binding=beat.evidence_binding,
                 **instructions,
             )
             shots.append(shot)
