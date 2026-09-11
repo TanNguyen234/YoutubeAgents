@@ -172,6 +172,7 @@ class AutoDirectorService:
             self.shot_evaluations[shot.shot_id] = evaluation
             self.shot_attempt_counts[shot.shot_id] = attempt_count
 
+            is_anim = Path(asset_path).suffix.lower() in [".mp4", ".mov", ".webm", ".mkv"]
             t_shot = TimelineShot(
                 shot_id=shot.shot_id,
                 scene_index=shot.scene_index,
@@ -182,6 +183,7 @@ class AutoDirectorService:
                 asset_path=str(asset_path),
                 asset_sha256=asset_hash,
                 modality=shot.visual_modality,
+                is_animated=is_anim,
                 transition_in="impact" if shot_idx == 0 else "fade",
                 transition_out="fade",
             )
@@ -266,19 +268,36 @@ class AutoDirectorService:
 
         # Modality B: DATA_VISUALIZATION
         elif modality == VisualModality.DATA_VISUALIZATION:
-            target_path = output_dir / f"{shot_id}_chart.png"
             instr = shot.chart_instruction or shot.narration_segment
+            # Special dynamic fixture detection: LLM next-token autoregressive prediction
+            is_llm_token = (
+                "the capital of france is" in shot.narration_segment.lower()
+                or ("predict" in shot.narration_segment.lower() and "token" in shot.narration_segment.lower())
+                or any(getattr(c, "cue_type", "") in ("type_prompt", "reveal_candidates") for c in shot.motion_cues)
+            )
+
             try:
-                if shot.chart_data:
-                    p, h = self.chart_renderer.render_horizontal_bar_chart(
+                if is_llm_token:
+                    target_path = output_dir / f"{shot_id}_token_anim.mp4"
+                    p, h = self.motion_renderer.render_animated_token_prediction(
+                        prompt_text="The capital of France is",
+                        candidates=[("Paris", 0.82), ("London", 0.08), ("Berlin", 0.06), ("Rome", 0.04)],
+                        selected_token="Paris",
+                        output_path=target_path,
+                        duration=shot.duration_seconds,
+                    )
+                elif shot.chart_data:
+                    target_path = output_dir / f"{shot_id}_chart_anim.mp4"
+                    p, h = self.motion_renderer.render_animated_bar_growth(
                         title=shot.headline_text or "Data Analysis",
                         categories=[d.label for d in shot.chart_data],
                         values=[d.value for d in shot.chart_data],
                         output_path=target_path,
+                        duration=shot.duration_seconds,
                         unit=shot.chart_data[0].unit or "%",
-                        show_numeric_labels=True,
                     )
                 else:
+                    target_path = output_dir / f"{shot_id}_chart.png"
                     p, h = self.chart_renderer.render_from_instruction(
                         instruction=instr,
                         output_path=target_path,
@@ -287,7 +306,7 @@ class AutoDirectorService:
                 self.asset_attempts.append(
                     AssetGenerationAttempt(
                         shot_id=shot_id,
-                        provider="chart_renderer",
+                        provider="motion_renderer" if (is_llm_token or shot.chart_data) else "chart_renderer",
                         modality=modality.value,
                         prompt=instr,
                         success=True,
@@ -308,7 +327,6 @@ class AutoDirectorService:
 
         # Modality C: CODE_ANIMATION / UI_SIMULATION
         elif modality in (VisualModality.CODE_ANIMATION, VisualModality.UI_SIMULATION):
-            target_path = output_dir / f"{shot_id}_terminal.png"
             cmd_text = shot.code_instruction or shot.screen_instruction or shot.narration_segment
             cmd_clean = re.sub(r"^[^:]+:\s*", "", cmd_text)
 
@@ -323,10 +341,12 @@ class AutoDirectorService:
                     "# [Illustrative execution structure]",
                 ]
             try:
-                p, h = self.motion_renderer.render_code_terminal(
+                target_path = output_dir / f"{shot_id}_terminal.mp4"
+                p, h = self.motion_renderer.render_animated_terminal_video(
                     command=cmd_clean[:40],
                     output_lines=output_lines,
                     output_path=target_path,
+                    duration=shot.duration_seconds,
                     window_title=f"terminal — {shot.subject or 'syntax'}",
                 )
                 self.asset_attempts.append(

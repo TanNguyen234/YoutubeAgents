@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 
 
@@ -60,6 +60,9 @@ class VisualModality(str, Enum):
     MAP = "MAP"
     TIMELINE = "TIMELINE"
     COMPARISON = "COMPARISON"
+    STATIC_DIAGRAM = "STATIC_DIAGRAM"
+    STATIC_CHART = "STATIC_CHART"
+    STATIC_TERMINAL = "STATIC_TERMINAL"
     STATIC_CARD = "STATIC_CARD"  # Explicitly low-priority fallback
 
 
@@ -121,6 +124,16 @@ class NarrativeBeat(BaseModel):
     evidence_binding: Optional[EvidenceBinding] = Field(default=None, description="Verified source binding")
 
 
+class MotionCue(BaseModel):
+    """Temporal animation cue specifying internal motion timing and targets."""
+
+    cue_type: str = Field(description="Animation primitive: 'type_prompt', 'reveal_candidates', 'grow_bars', 'highlight_pulse', 'append_token', 'terminal_typing', 'line_reveal', 'wipe'")
+    start: float = Field(description="Start time in seconds relative to shot onset")
+    duration: float = Field(description="Duration in seconds of this motion cue")
+    target: Optional[str] = Field(default=None, description="Target element, token, or layer")
+    value: Optional[Union[str, float]] = Field(default=None, description="Target value or content string")
+
+
 class ShotSpec(BaseModel):
     """Specification of an individual video shot ready for asset generation or rendering."""
 
@@ -154,6 +167,7 @@ class ShotSpec(BaseModel):
     evidence_binding: Optional[EvidenceBinding] = Field(default=None, description="Grounded source evidence binding")
     code_output_lines: List[str] = Field(default_factory=list, description="Verified output lines for terminal execution")
     terminal_mode: str = Field(default="ILLUSTRATIVE_TERMINAL", description="REAL_TERMINAL vs ILLUSTRATIVE_TERMINAL")
+    motion_cues: List[MotionCue] = Field(default_factory=list, description="Explicit temporal animation cues for true motion graphics")
 
 
 class OverlaySpec(BaseModel):
@@ -179,6 +193,7 @@ class TimelineShot(BaseModel):
     asset_path: str = Field(description="Local file path to rendered image or video asset")
     asset_sha256: str = Field(description="SHA-256 hash of asset file")
     modality: VisualModality = Field(description="Modality used for this shot")
+    is_animated: bool = Field(default=False, description="Whether shot asset is a true temporal video/animation rather than still frame")
     transition_in: Optional[str] = Field(default=None, description="Incoming transition effect")
     transition_out: Optional[str] = Field(default=None, description="Outgoing transition effect")
     overlays: List[OverlaySpec] = Field(default_factory=list, description="Overlays active during this shot")

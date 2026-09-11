@@ -177,15 +177,26 @@ class VisualShotEvaluator:
         for shot in timeline.shots:
             mod_name = shot.modality.value if hasattr(shot.modality, "value") else str(shot.modality)
             modality_dist[mod_name] = modality_dist.get(mod_name, 0) + 1
-            if shot.modality == VisualModality.STATIC_CARD:
-                static_card_duration += shot.duration
-                ken_burns_duration += shot.duration
-            elif shot.modality in (VisualModality.DIAGRAM, VisualModality.DATA_VISUALIZATION, VisualModality.COMPARISON, VisualModality.DOCUMENT_EVIDENCE):
-                static_semantic_duration += shot.duration
-            elif shot.modality == VisualModality.GENERATED_IMAGE:
-                ken_burns_duration += shot.duration
-            elif shot.modality in (VisualModality.MOTION_GRAPHICS, VisualModality.CODE_ANIMATION, VisualModality.UI_SIMULATION, VisualModality.GENERATED_VIDEO, VisualModality.STOCK_VIDEO):
+            is_anim = Path(shot.asset_path).suffix.lower() in [".mp4", ".mov", ".webm", ".mkv"] or getattr(shot, "is_animated", False)
+            if is_anim or shot.modality in (VisualModality.GENERATED_VIDEO, VisualModality.STOCK_VIDEO):
                 true_motion_duration += shot.duration
+            else:
+                ken_burns_duration += shot.duration
+                if shot.modality == VisualModality.STATIC_CARD:
+                    static_card_duration += shot.duration
+                elif shot.modality in (
+                    VisualModality.DIAGRAM,
+                    VisualModality.DATA_VISUALIZATION,
+                    VisualModality.COMPARISON,
+                    VisualModality.DOCUMENT_EVIDENCE,
+                    VisualModality.STATIC_DIAGRAM,
+                    VisualModality.STATIC_CHART,
+                    VisualModality.STATIC_TERMINAL,
+                    VisualModality.MOTION_GRAPHICS,
+                    VisualModality.CODE_ANIMATION,
+                    VisualModality.UI_SIMULATION,
+                ):
+                    static_semantic_duration += shot.duration
 
         static_card_ratio = round(static_card_duration / total_dur, 3) if total_dur > 0 else 0.0
         static_semantic_ratio = round(static_semantic_duration / total_dur, 3) if total_dur > 0 else 0.0
