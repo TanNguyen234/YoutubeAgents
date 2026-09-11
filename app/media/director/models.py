@@ -357,3 +357,6 @@ class ChannelCreativeProfile(BaseModel):
             "text slides repeating narration",
         ]
     )
+    music_mood: str = Field(default="anime_lofi", description="BGM musical mood / aesthetic")
+    music_bpm: int = Field(default=85, ge=40, le=180, description="Target tempo for background music")
+    sfx_intensity: float = Field(default=1.0, ge=0.0, le=2.0, description="Relative sound effect mixing intensity")

@@ -35,6 +35,9 @@ EDITORIAL_TECH_PROFILE = ChannelCreativeProfile(
         "generic office stock",
         "text slides repeating narration",
     ],
+    music_mood="light_modern_technology",
+    music_bpm=95,
+    sfx_intensity=1.0,
 )
 
 CODE_TUTORIAL_PROFILE = ChannelCreativeProfile(
@@ -57,6 +60,9 @@ CODE_TUTORIAL_PROFILE = ChannelCreativeProfile(
         "hooded hacker",
         "generic stock typing",
     ],
+    music_mood="minimal_electronic",
+    music_bpm=80,
+    sfx_intensity=0.8,
 )
 
 BENCHMARK_ANALYSIS_PROFILE = ChannelCreativeProfile(
@@ -79,6 +85,9 @@ BENCHMARK_ANALYSIS_PROFILE = ChannelCreativeProfile(
         "abstract floating particles",
         "slides repeating spoken numbers",
     ],
+    music_mood="editorial_pulse",
+    music_bpm=105,
+    sfx_intensity=1.2,
 )
 
 TECH_DOCUMENTARY_PROFILE = ChannelCreativeProfile(
@@ -101,6 +110,9 @@ TECH_DOCUMENTARY_PROFILE = ChannelCreativeProfile(
         "robot shaking hands with human",
         "floating futuristic compass",
     ],
+    music_mood="ambient_cinematic",
+    music_bpm=75,
+    sfx_intensity=1.1,
 )
 
 

@@ -496,13 +496,15 @@ class MediaProductionPipeline:
                 visual_plan_hash=visual_plan_hash,
             )
 
-            # 9b. AI Background Music Generation (Anime Lo-Fi / Synthwave BGM)
+            # 9b. AI Background Music Generation
+            bgm_mood = getattr(resolved_profile, "music_mood", "anime_lofi") if resolved_profile else "anime_lofi"
+            bgm_bpm = getattr(resolved_profile, "music_bpm", 85) if resolved_profile else 85
             bgm_out = audio_dir / f"bgm_{project_id}.wav"
             bgm_path_str, bgm_sha256 = self.music_gen.generate_track(
                 duration_seconds=tts_res.duration_seconds,
                 output_path=bgm_out,
-                mood="anime_lofi",
-                bpm=85,
+                mood=bgm_mood,
+                bpm=bgm_bpm,
             )
             bgm_asset = Asset(
                 id=f"ast-bgm-{project_id}",
