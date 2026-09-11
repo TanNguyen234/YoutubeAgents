@@ -104,10 +104,13 @@ def mock_lifecycle_setup(monkeypatch):
                     license_type="Public Domain",
                 )
 
+        from app.media.tts.local_fake import LocalFakeTTSBackend
+
         pipeline = BrainPipeline(
             repository=repo,
             backend=backend,
             research_agent=ContractResearchAgent(),
+            tts_backend=LocalFakeTTSBackend(duration_seconds=3.0),
         )
 
         yield pipeline, repo, channel, tmp_dir
@@ -279,14 +282,13 @@ def test_full_autonomous_lifecycle_non_live_smoke(mock_lifecycle_setup, monkeypa
     assert receipt["strategy_analysis"] is not None
 
 
-def test_lifecycle_error_handling_not_stranded(mock_lifecycle_setup, monkeypatch):
+def test_lifecycle_error_handling_not_stranded(mock_lifecycle_setup):
     """Verify that if media production fails, project does not remain stranded in PRODUCING or UPLOADING."""
     pipeline, repo, channel, tmp_dir = mock_lifecycle_setup
 
-    def mock_failing_synthesize(*args, **kwargs):
-        raise RuntimeError("TTS synthesized voice engine failure")
-
-    monkeypatch.setattr("app.media.tts.edge_tts_backend.EdgeTTSBackend.synthesize", mock_failing_synthesize)
+    class FailingTTS:
+        def synthesize(self, *args, **kwargs):
+            raise RuntimeError("TTS synthesized voice engine failure")
 
     with pytest.raises(Exception, match="TTS synthesized voice engine failure"):
         pipeline.run_full_autonomous_lifecycle(
@@ -295,8 +297,55 @@ def test_lifecycle_error_handling_not_stranded(mock_lifecycle_setup, monkeypatch
             keyword="Mastering SQLite WAL Concurrency",
             seed_urls=["https://sqlite.org/wal.html"],
             auto_approve=True,
+            tts_backend=FailingTTS(),
         )
 
     # State must transition to FAILED or BLOCKED, not remain stranded in PRODUCING
     project = repo.get_video_project("proj-fail-01")
     assert project.state in (VideoLifecycleState.FAILED, VideoLifecycleState.BLOCKED)
+
+
+def test_full_lifecycle_smoke_requires_no_external_network(mock_lifecycle_setup, monkeypatch):
+    """Level 3 integration test: executes full 15-stage lifecycle with zero outbound network calls."""
+    import socket
+
+    def guarded_connect(sock, address):
+        pytest.fail(f"Outbound network attempted during offline lifecycle test: connect({address})")
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    pipeline, repo, channel, tmp_dir = mock_lifecycle_setup
+    monkeypatch.setattr("app.services.youtube_oauth.YouTubeOAuthManager.has_valid_token", lambda self: False)
+
+    receipt = pipeline.run_full_autonomous_lifecycle(
+        project_id="proj-offline-smoke-01",
+        channel=channel,
+        keyword="Mastering SQLite WAL Concurrency",
+        seed_urls=["https://sqlite.org/wal.html"],
+        series_title="Storage Mastery",
+        enable_gflow=False,
+        auto_approve=True,
+        approved_privacy=PrivacyStatus.PRIVATE,
+        operator_name="OfflineSmokeTester",
+    )
+
+    # 1. Receipt completeness
+    assert "project" in receipt
+    assert "fact_report" in receipt
+    assert "qa_result" in receipt
+    assert "render_manifest" in receipt
+    assert "seo_package" in receipt
+    assert "thumbnail_package" in receipt
+    assert "review_record" in receipt
+    assert "publication_job" in receipt
+
+    # 2. Assert safe non-live execution reached BLOCKED (due to absence of live OAuth token)
+    project = repo.get_video_project("proj-offline-smoke-01")
+    assert project.state == VideoLifecycleState.BLOCKED
+    assert receipt["project"].state == VideoLifecycleState.BLOCKED
+
+    # 3. QA and Render Manifest Integrity
+    qa_res = receipt["qa_result"]
+    assert qa_res["passed"] is True
+    manifest = receipt["render_manifest"]
+    assert manifest["qa_verdict"] == "PASSED"
+    assert manifest["contains_synthetic_media"] is False

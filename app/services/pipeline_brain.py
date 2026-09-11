@@ -32,6 +32,7 @@ from app.media.gflow_provider import GFlowMediaProvider
 from app.media.models import MediaQAResult, RenderManifest
 from app.media.pipeline import MediaProductionPipeline
 from app.media.scene_planner import ScenePlanner
+from app.media.tts.base import TTSBackend
 from app.services.analytics_tracker import YouTubeAnalyticsTracker
 from app.services.claim_extractor import ClaimExtractor
 from app.services.editorial_calendar import EditorialCalendarService
@@ -64,6 +65,7 @@ class BrainPipeline:
         writer: Optional[ScriptWriter] = None,
         extractor: Optional[ClaimExtractor] = None,
         checker: Optional[FactChecker] = None,
+        tts_backend: Optional[TTSBackend] = None,
     ):
         self.repo = repo or repository
         if not self.repo:
@@ -76,6 +78,7 @@ class BrainPipeline:
         self.writer = writer or ScriptWriter()
         self.extractor = extractor or ClaimExtractor(backend=self.backend)
         self.checker = checker or FactChecker(backend=self.backend)
+        self.tts_backend = tts_backend
 
     def run_stage_1_to_5(
         self,
@@ -303,6 +306,7 @@ class BrainPipeline:
         scheduled_time: Optional[datetime] = None,
         simulate_analytics_views: Optional[int] = None,
         content_format: ContentFormat = ContentFormat.EXPLAINER,
+        tts_backend: Optional[TTSBackend] = None,
     ) -> Dict[str, Any]:
         """Execute the complete 15-stage YouTube Autopilot lifecycle from Topic Selection to Strategy Feedback."""
         # 0. Editorial Series & Calendar Context
@@ -339,11 +343,13 @@ class BrainPipeline:
         # Canonical GFlow provider passed cleanly
         gflow_prov = GFlowMediaProvider() if enable_gflow else None
         scene_planner = ScenePlanner(gflow_provider=gflow_prov)
+        active_tts = tts_backend or self.tts_backend
         media_pipeline = MediaProductionPipeline(
             repository=self.repo,
             scene_planner=scene_planner,
             gflow_provider=gflow_prov,
             reasoning_backend=self.backend,
+            tts_backend=active_tts,
         )
 
         project, qa_result, render_manifest = media_pipeline.run_production(

@@ -41,7 +41,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --strict-markers -p no:asyncio"
+addopts = "-v --strict-markers -p no:asyncio -m 'not live'"
 pythonpath = ["."]
 markers = [
     "live: marks tests as calling live external network services",

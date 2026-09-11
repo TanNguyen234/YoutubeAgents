@@ -97,7 +97,7 @@ def check_media_capabilities(
     # 3. TTS backend detection
     tts_available = False
     actual_tts_backend = None
-    if tts_backend_name in ("mock-tts", "mock", "test"):
+    if tts_backend_name in ("mock-tts", "mock", "test", "local-fake-tts", "fake", "local-fake"):
         tts_available = True
         actual_tts_backend = tts_backend_name
     elif tts_backend_name == "edge-tts":
