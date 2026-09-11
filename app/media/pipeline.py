@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -11,6 +12,12 @@ from app.db.repository import SQLiteRepository
 from app.domain.enums import AssetType, QualityStatus, VideoLifecycleState
 from app.domain.models import Asset, QualityResult, VideoProject
 from app.media.capabilities import check_media_capabilities
+from app.media.director import (
+    AutoDirectorService,
+    ContentFormat,
+    VisualModality,
+    VisualShotEvaluator,
+)
 from app.media.ffmpeg_renderer import FFmpegRenderer
 from app.media.gflow_provider import GFlowMediaProvider
 from app.media.models import (
@@ -20,6 +27,7 @@ from app.media.models import (
     RenderManifest,
     RenderProfile,
     RenderResult,
+    SceneRenderPlan,
     TTSResult,
 )
 from app.media.music_generator import MusicGenerator
@@ -56,6 +64,7 @@ class MediaProductionPipeline:
         sound_designer: Optional[SoundDesignerService] = None,
         gflow_provider: Optional[GFlowMediaProvider] = None,
         base_output_dir: Optional[Path] = None,
+        director_service: Optional[AutoDirectorService] = None,
     ):
         self.repo = repository
         self.tts = tts_backend or EdgeTTSBackend()
@@ -63,6 +72,11 @@ class MediaProductionPipeline:
         self.qa = qa_inspector or MediaQAInspector()
         self.gflow_provider = gflow_provider
         self.planner = scene_planner or ScenePlanner(gflow_provider=self.gflow_provider)
+        self.director = director_service or AutoDirectorService(
+            gflow_provider=self.gflow_provider,
+            visual_factory=getattr(self.planner, "visual_factory", None),
+        )
+        self.visual_evaluator = VisualShotEvaluator()
         self.sub_gen = subtitle_generator or SubtitleGenerator()
         self.music_gen = music_generator or MusicGenerator()
         self.sound_designer = sound_designer or SoundDesignerService()
@@ -315,31 +329,88 @@ class MediaProductionPipeline:
             )
             created_assets.append(sub_asset)
 
-            # 9. Scene Visual Planning & Card Composition
+            # 9. Multi-Shot Visual Planning via AutoDirector (with fallback to ScenePlanner)
             channel = self.repo.get_channel(project.channel_id)
             channel_name = channel.title if channel else "YouTube Channel"
 
-            scene_plans = self.planner.plan_scenes(
-                script=project.script,
-                channel_name=channel_name,
-                total_audio_duration=tts_res.duration_seconds,
-                output_scenes_dir=scenes_dir,
-                subtitle_track=sub_track,
-            )
+            used_director = False
+            timeline = None
+            storyboard = None
+            scene_plans: List[SceneRenderPlan] = []
+            director_output_dir = proj_dir / "director"
+
+            try:
+                content_fmt = getattr(project.script, "content_format", ContentFormat.EXPLAINER)
+                if isinstance(content_fmt, str):
+                    try:
+                        content_fmt = ContentFormat(content_fmt)
+                    except ValueError:
+                        content_fmt = ContentFormat.EXPLAINER
+
+                timeline, storyboard = self.director.plan_and_render_timeline(
+                    project_id=project_id,
+                    script=project.script,
+                    channel_name=channel_name,
+                    total_audio_duration=tts_res.duration_seconds,
+                    output_dir=director_output_dir,
+                    content_format=content_fmt,
+                    dossier=getattr(project, "research", None),
+                )
+                if timeline and len(timeline.shots) > 0:
+                    used_director = True
+            except Exception as exc:
+                logging.warning(
+                    f"CREATIVE_PIPELINE_FALLBACK: AutoDirectorService encountered failure ({exc}), "
+                    f"falling back to legacy ScenePlanner."
+                )
+                used_director = False
 
             ordered_scene_hashes = []
-            for idx, plan in enumerate(scene_plans):
-                card_asset = Asset(
-                    id=f"ast-card-{project_id}-{idx:02d}",
-                    project_id=project_id,
-                    asset_type=AssetType.SCENE_CARD,
-                    file_path=plan.visual_asset_path,
-                    source_url=f"local://generated/{project_id}/scenes/{Path(plan.visual_asset_path).name}",
-                    license_type="ORIGINAL_GENERATED",
-                    content_sha256=plan.visual_asset_sha256,
+            if used_director and timeline:
+                for idx, shot in enumerate(timeline.shots):
+                    shot_asset = Asset(
+                        id=f"ast-shot-{project_id}-{idx:02d}",
+                        project_id=project_id,
+                        asset_type=AssetType.SCENE_CARD,
+                        file_path=shot.asset_path,
+                        source_url=f"local://generated/{project_id}/shots/{Path(shot.asset_path).name}",
+                        license_type="ORIGINAL_GENERATED",
+                        content_sha256=shot.asset_sha256,
+                    )
+                    created_assets.append(shot_asset)
+                    ordered_scene_hashes.append(shot.asset_sha256)
+
+                # Construct scene_plans proxy for SoundDesigner
+                scene_plans = [
+                    SceneRenderPlan(
+                        scene_index=s_idx,
+                        narration_segment="",
+                        target_duration_seconds=max(0.5, s.duration),
+                        visual_asset_path=s.asset_path,
+                        visual_asset_sha256=s.asset_sha256,
+                    )
+                    for s_idx, s in enumerate(timeline.shots)
+                ]
+            else:
+                scene_plans = self.planner.plan_scenes(
+                    script=project.script,
+                    channel_name=channel_name,
+                    total_audio_duration=tts_res.duration_seconds,
+                    output_scenes_dir=scenes_dir,
+                    subtitle_track=sub_track,
                 )
-                created_assets.append(card_asset)
-                ordered_scene_hashes.append(plan.visual_asset_sha256)
+                for idx, plan in enumerate(scene_plans):
+                    card_asset = Asset(
+                        id=f"ast-card-{project_id}-{idx:02d}",
+                        project_id=project_id,
+                        asset_type=AssetType.SCENE_CARD,
+                        file_path=plan.visual_asset_path,
+                        source_url=f"local://generated/{project_id}/scenes/{Path(plan.visual_asset_path).name}",
+                        license_type="ORIGINAL_GENERATED",
+                        content_sha256=plan.visual_asset_sha256,
+                    )
+                    created_assets.append(card_asset)
+                    ordered_scene_hashes.append(plan.visual_asset_sha256)
 
             # Compute definitive production fingerprint matching requested fingerprint
             production_fingerprint = compute_production_fingerprint(
@@ -410,15 +481,26 @@ class MediaProductionPipeline:
 
             # 10. Authoritative FFmpeg Video Render
             video_out = render_dir / f"final_{project_id}.mp4"
-            render_res: RenderResult = self.renderer.render_video(
-                project_id=project_id,
-                scene_plans=scene_plans,
-                audio_path=render_audio_path,
-                output_video_path=video_out,
-                subtitle_path=Path(sub_track.file_path),
-                bgm_path=render_bgm_path,
-                sfx_path=render_sfx_path,
-            )
+            if used_director and timeline:
+                render_res: RenderResult = self.renderer.render_timeline(
+                    project_id=project_id,
+                    timeline=timeline,
+                    audio_path=render_audio_path,
+                    output_video_path=video_out,
+                    subtitle_path=Path(sub_track.file_path),
+                    bgm_path=render_bgm_path,
+                    sfx_path=render_sfx_path,
+                )
+            else:
+                render_res: RenderResult = self.renderer.render_video(
+                    project_id=project_id,
+                    scene_plans=scene_plans,
+                    audio_path=render_audio_path,
+                    output_video_path=video_out,
+                    subtitle_path=Path(sub_track.file_path),
+                    bgm_path=render_bgm_path,
+                    sfx_path=render_sfx_path,
+                )
 
             video_asset = Asset(
                 id=f"ast-vid-{project_id}",
@@ -454,6 +536,17 @@ class MediaProductionPipeline:
                 render_input_hash=expected_narration_hash,
             )
 
+            # 12b. Creative Visual Quality Evaluation Report
+            if used_director and timeline and storyboard:
+                failed_attempts = len([a for a in getattr(self.director, "asset_attempts", []) if not a.success])
+                visual_report = self.visual_evaluator.generate_quality_report(
+                    timeline=timeline,
+                    storyboard=storyboard,
+                    failed_attempts=failed_attempts,
+                )
+                report_path = proj_dir / "manifests" / f"creative_qa_report_{project_id}.json"
+                report_path.write_text(visual_report.model_dump_json(indent=2), encoding="utf-8")
+
             # Persist QualityResult directly and via project to DB
             self.repo.save_quality_result(quality_domain)
             project.quality = quality_domain
@@ -482,10 +575,12 @@ class MediaProductionPipeline:
                 subtitle_sha256=sub_track.content_sha256,
                 subtitle_format="srt",
                 subtitle_cue_count=sub_track.cue_count,
-                scene_count=len(scene_plans),
-                visual_assets=[
-                    {"path": p.visual_asset_path, "sha256": p.visual_asset_sha256} for p in scene_plans
-                ],
+                scene_count=len(timeline.shots) if (used_director and timeline) else len(scene_plans),
+                visual_assets=(
+                    [{"path": s.asset_path, "sha256": s.asset_sha256} for s in timeline.shots]
+                    if (used_director and timeline)
+                    else [{"path": p.visual_asset_path, "sha256": p.visual_asset_sha256} for p in scene_plans]
+                ),
                 ffmpeg_version=caps.ffmpeg_version,
                 ffprobe_version=caps.ffprobe_version,
                 ffmpeg_command=render_res.ffmpeg_command,
@@ -502,6 +597,7 @@ class MediaProductionPipeline:
                 qa_verdict="PASSED" if qa_res.passed else "FAILED",
                 qa_issues=qa_res.issues,
             )
+
 
             manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
 
