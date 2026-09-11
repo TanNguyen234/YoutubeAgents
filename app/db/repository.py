@@ -10,6 +10,7 @@ from app.db.schema import init_database
 from app.domain.enums import (
     AssetType,
     ClaimVerificationVerdict,
+    ContentFormat,
     EditorialSlotStatus,
     PlatformFormat,
     PrivacyStatus,
@@ -189,15 +190,18 @@ class SQLiteRepository:
             if project.script:
                 scenes_json = json.dumps([s.model_dump() for s in project.script.scenes])
                 sections_json = project.script.sections.model_dump_json() if project.script.sections else None
+                fmt_val = getattr(project.script, "content_format", ContentFormat.EXPLAINER)
+                fmt_str = fmt_val.value if hasattr(fmt_val, "value") else str(fmt_val)
                 conn.execute(
                     """
-                    INSERT INTO scripts (id, project_id, title, hook, scenes_json, sections_json, total_word_count, estimated_duration_seconds, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO scripts (id, project_id, title, hook, scenes_json, sections_json, content_format, total_word_count, estimated_duration_seconds, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(project_id) DO UPDATE SET
                         title=excluded.title,
                         hook=excluded.hook,
                         scenes_json=excluded.scenes_json,
                         sections_json=excluded.sections_json,
+                        content_format=excluded.content_format,
                         total_word_count=excluded.total_word_count,
                         estimated_duration_seconds=excluded.estimated_duration_seconds;
                     """,
@@ -208,6 +212,7 @@ class SQLiteRepository:
                         project.script.hook,
                         scenes_json,
                         sections_json,
+                        fmt_str,
                         project.script.total_word_count,
                         project.script.estimated_duration_seconds,
                         project.script.created_at.isoformat(),
@@ -460,12 +465,20 @@ class SQLiteRepository:
                 sections = None
                 if "sections_json" in s_row.keys() and s_row["sections_json"]:
                     sections = ScriptSections.model_validate(json.loads(s_row["sections_json"]))
+
+                fmt_str = s_row["content_format"] if "content_format" in s_row.keys() and s_row["content_format"] else "EXPLAINER"
+                try:
+                    c_format = ContentFormat(fmt_str)
+                except ValueError:
+                    c_format = ContentFormat.EXPLAINER
+
                 script = Script(
                     id=s_row["id"],
                     title=s_row["title"],
                     hook=s_row["hook"],
                     scenes=scenes,
                     sections=sections,
+                    content_format=c_format,
                     total_word_count=s_row["total_word_count"],
                     estimated_duration_seconds=s_row["estimated_duration_seconds"],
                     created_at=datetime.fromisoformat(s_row["created_at"]),

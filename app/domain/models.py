@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, model_validator
 from app.domain.enums import (
     AssetType,
     ClaimVerificationVerdict,
+    ContentFormat,
     EditorialSlotStatus,
     ExperimentStatus,
     PlatformFormat,
@@ -210,6 +211,7 @@ class Script(BaseModel):
     total_word_count: int = Field(ge=1, description="Total word count")
     estimated_duration_seconds: float = Field(ge=1.0, description="Estimated total runtime")
     sections: Optional[ScriptSections] = Field(default=None, description="Typed narrative sections breakdown")
+    content_format: ContentFormat = Field(default=ContentFormat.EXPLAINER, description="Content format archetype")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def get_canonical_narration(self) -> str:
@@ -223,6 +225,12 @@ class Script(BaseModel):
             parts.extend(s.narration.strip() for s in self.scenes if s.narration and s.narration.strip())
             return " ".join(parts)
         return ""
+
+    def compute_canonical_narration_hash(self) -> str:
+        """Compute the deterministic SHA-256 hash of canonical narration."""
+        import hashlib
+        return hashlib.sha256(self.get_canonical_narration().strip().encode("utf-8")).hexdigest()
+
 
 
 class FactCheckReport(BaseModel):
@@ -326,6 +334,7 @@ class VideoProject(BaseModel):
     title: str = Field(description="Video project title")
     format: PlatformFormat = Field(default=PlatformFormat.SHORTS_9_16)
     state: VideoLifecycleState = Field(default=VideoLifecycleState.CREATED)
+    content_format: ContentFormat = Field(default=ContentFormat.EXPLAINER, description="Content format archetype")
     script: Optional[Script] = Field(default=None)
     assets: List[Asset] = Field(default_factory=list)
     quality: Optional[QualityResult] = Field(default=None)

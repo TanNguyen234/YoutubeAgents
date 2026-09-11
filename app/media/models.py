@@ -126,6 +126,9 @@ class RenderResult(BaseModel):
     rendered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+CREATIVE_PIPELINE_VERSION: str = "director-v2"
+
+
 class RenderManifest(BaseModel):
     """Auditable machine-readable manifest of a video render execution."""
 
@@ -134,6 +137,12 @@ class RenderManifest(BaseModel):
     script_id: str = Field(description="Script ID used for render")
     canonical_narration_sha256: str = Field(description="SHA-256 of immutable canonical narration")
     production_fingerprint: str = Field(description="Deterministic SHA-256 of all production inputs")
+    request_fingerprint: Optional[str] = Field(default=None, description="Deterministic fingerprint of production request parameters")
+    artifact_fingerprint: Optional[str] = Field(default=None, description="Deterministic fingerprint of rendered artifacts")
+    creative_pipeline_version: str = Field(default=CREATIVE_PIPELINE_VERSION, description="Creative director pipeline version")
+    creative_profile: Optional[str] = Field(default=None, description="Active creative profile name")
+    content_format: Optional[str] = Field(default=None, description="Content format used for generation")
+    storyboard_hash: Optional[str] = Field(default=None, description="Deterministic hash of planned storyboard")
     tts_input_sha256: Optional[str] = Field(default=None, description="SHA-256 of text passed to TTS")
     subtitle_source_sha256: Optional[str] = Field(default=None, description="SHA-256 of text passed to subtitle generator")
     render_input_narration_sha256: Optional[str] = Field(default=None, description="SHA-256 of narration used in render")
@@ -180,11 +189,33 @@ def compute_production_fingerprint(
     subtitle_format: str = "srt",
     ordered_scene_asset_hashes: Optional[List[str]] = None,
     audio_mode: str = "both",
+    creative_pipeline_version: str = CREATIVE_PIPELINE_VERSION,
+    content_format: str = "explainer",
+    creative_profile_name: str = "default",
+    storyboard_hash: Optional[str] = None,
+    visual_plan_hash: Optional[str] = None,
+    provider_config_id: str = "default",
+    renderer_config_hash: Optional[str] = None,
 ) -> str:
     """Compute a deterministic SHA-256 fingerprint uniquely identifying a production combination."""
     import hashlib
     raw = (
         f"{canonical_narration_sha256}|{render_profile_name}|{tts_backend}|{voice}|"
-        f"{tts_rate}|{tts_pitch}|{subtitle_format}|{','.join(ordered_scene_asset_hashes or [])}|{audio_mode}"
+        f"{tts_rate}|{tts_pitch}|{subtitle_format}|{','.join(ordered_scene_asset_hashes or [])}|"
+        f"{audio_mode}|{creative_pipeline_version}|{content_format}|{creative_profile_name}|"
+        f"{storyboard_hash or ''}|{visual_plan_hash or ''}|{provider_config_id}|{renderer_config_hash or ''}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def compute_artifact_fingerprint(
+    request_fingerprint: str,
+    ordered_asset_hashes: List[str],
+    audio_sha256: Optional[str] = None,
+    subtitle_sha256: Optional[str] = None,
+) -> str:
+    """Compute a deterministic SHA-256 fingerprint uniquely identifying the rendered production artifacts."""
+    import hashlib
+    raw = f"{request_fingerprint}|{','.join(ordered_asset_hashes)}|{audio_sha256 or ''}|{subtitle_sha256 or ''}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+

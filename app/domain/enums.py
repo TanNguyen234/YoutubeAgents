@@ -117,3 +117,23 @@ class TitleVariantType(str, Enum):
     CURIOSITY_GAP = "CURIOSITY_GAP"
     DIRECT_VALUE = "DIRECT_VALUE"
     PROVOCATIVE_QUESTION = "PROVOCATIVE_QUESTION"
+
+
+class ContentFormat(str, Enum):
+    """Editorial video format archetype informing visual pacing and shot distribution."""
+
+    EXPLAINER = "EXPLAINER"
+    DEMO = "DEMO"
+    COMPARISON = "COMPARISON"
+    EXPERIMENT = "EXPERIMENT"
+    CASE_STUDY = "CASE_STUDY"
+    BREAKDOWN = "BREAKDOWN"
+    MYTH_BUSTING = "MYTH_BUSTING"
+    STORY = "STORY"
+    CHALLENGE = "CHALLENGE"
+    NEWS = "NEWS"
+    RANKING = "RANKING"
+    BEFORE_AFTER = "BEFORE_AFTER"
+    PROBLEM_SOLUTION = "PROBLEM_SOLUTION"
+
+

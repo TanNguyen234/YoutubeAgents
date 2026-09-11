@@ -63,22 +63,7 @@ class VisualModality(str, Enum):
     STATIC_CARD = "STATIC_CARD"  # Explicitly low-priority fallback
 
 
-class ContentFormat(str, Enum):
-    """Editorial video format archetype informing visual pacing and shot distribution."""
-
-    EXPLAINER = "EXPLAINER"
-    DEMO = "DEMO"
-    COMPARISON = "COMPARISON"
-    EXPERIMENT = "EXPERIMENT"
-    CASE_STUDY = "CASE_STUDY"
-    BREAKDOWN = "BREAKDOWN"
-    MYTH_BUSTING = "MYTH_BUSTING"
-    STORY = "STORY"
-    CHALLENGE = "CHALLENGE"
-    NEWS = "NEWS"
-    RANKING = "RANKING"
-    BEFORE_AFTER = "BEFORE_AFTER"
-    PROBLEM_SOLUTION = "PROBLEM_SOLUTION"
+from app.domain.enums import ContentFormat
 
 
 class MissingGroundedVisualData(ValueError):
@@ -234,6 +219,16 @@ class Storyboard(BaseModel):
     shots: List[ShotSpec] = Field(default_factory=list, description="Ordered shot specs")
     modality_counts: Dict[str, int] = Field(default_factory=dict, description="Count of shots per modality")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def compute_hash(self) -> str:
+        """Compute a deterministic hash of the storyboard shots, modalities, and timing."""
+        import hashlib
+        raw = f"{self.project_id}|{self.total_duration:.3f}|{self.content_format.value}|" + "|".join(
+            f"{s.shot_id}:{s.visual_modality.value}:{s.duration_seconds:.3f}:{(s.headline_text or '').strip()}:"
+            f"{(s.chart_instruction or '').strip()}:{(s.diagram_instruction or '').strip()}:{(s.code_instruction or '').strip()}"
+            for s in self.shots
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 class VisualEvaluation(BaseModel):

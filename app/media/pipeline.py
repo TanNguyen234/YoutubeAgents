@@ -18,10 +18,13 @@ from app.media.director import (
     VisualModality,
     VisualShotEvaluator,
 )
+from app.media.director.profiles import get_channel_profile_for_niche
 from app.media.ffmpeg_renderer import FFmpegRenderer
 from app.media.gflow_provider import GFlowMediaProvider
 from app.media.models import (
     AudioMode,
+    CREATIVE_PIPELINE_VERSION,
+    compute_artifact_fingerprint,
     compute_production_fingerprint,
     MediaQAResult,
     RenderManifest,
@@ -178,6 +181,31 @@ class MediaProductionPipeline:
                 )
             raise MediaProductionBlockerError(blocker_msg)
 
+        channel = self.repo.get_channel(project.channel_id)
+        channel_name = channel.title if channel else "YouTube Channel"
+        channel_niche = getattr(channel, "niche", None) or channel_name
+
+        # Resolve Creative Profile
+        resolved_profile = getattr(self.director, "profile", None)
+        if not resolved_profile or resolved_profile.name == "Tech Engineering Channel":
+            resolved_profile = get_channel_profile_for_niche(channel_niche)
+            if hasattr(self.director, "profile"):
+                self.director.profile = resolved_profile
+        creative_profile_name = resolved_profile.name if resolved_profile else "default"
+
+        # Resolve Content Format
+        raw_fmt = getattr(project.script, "content_format", ContentFormat.EXPLAINER)
+        if isinstance(raw_fmt, str):
+            try:
+                content_format_obj = ContentFormat(raw_fmt)
+            except ValueError:
+                content_format_obj = ContentFormat.EXPLAINER
+        elif isinstance(raw_fmt, ContentFormat):
+            content_format_obj = raw_fmt
+        else:
+            content_format_obj = ContentFormat.EXPLAINER
+        content_format_str = content_format_obj.value
+
         # 5. Compute Requested Fingerprint BEFORE any reuse decision
         scene_hashes = [
             hashlib.sha256(
@@ -185,6 +213,16 @@ class MediaProductionPipeline:
             ).hexdigest()
             for idx, s in enumerate(project.script.scenes)
         ]
+        visual_plan_raw = (
+            f"{expected_narration_hash}|{content_format_str}|{creative_profile_name}|"
+            f"{CREATIVE_PIPELINE_VERSION}|"
+            + "|".join(
+                f"{getattr(s, 'scene_index', getattr(s, 'index', idx))}:{s.narration.strip()}:{(getattr(s, 'hook', '') or '').strip()}"
+                for idx, s in enumerate(project.script.scenes)
+            )
+        )
+        visual_plan_hash = hashlib.sha256(visual_plan_raw.encode("utf-8")).hexdigest()
+
         requested_production_fingerprint = compute_production_fingerprint(
             canonical_narration_sha256=expected_narration_hash,
             render_profile_name=render_prof.name,
@@ -195,13 +233,25 @@ class MediaProductionPipeline:
             subtitle_format="srt",
             ordered_scene_asset_hashes=scene_hashes,
             audio_mode=render_prof.audio_mode.value,
+            creative_pipeline_version=CREATIVE_PIPELINE_VERSION,
+            content_format=content_format_str,
+            creative_profile_name=creative_profile_name,
+            visual_plan_hash=visual_plan_hash,
         )
 
         if not force_rebuild and manifest_path.exists():
             try:
                 cached_manifest = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+                cached_pipeline_ver = getattr(cached_manifest, "creative_pipeline_version", None)
+                cached_profile = getattr(cached_manifest, "creative_profile", None)
+                cached_format = getattr(cached_manifest, "content_format", None)
+                cached_fingerprint = getattr(cached_manifest, "request_fingerprint", None) or cached_manifest.production_fingerprint
+
                 if (
-                    cached_manifest.production_fingerprint == requested_production_fingerprint
+                    cached_pipeline_ver == CREATIVE_PIPELINE_VERSION
+                    and (cached_profile is None or cached_profile == creative_profile_name)
+                    and (cached_format is None or cached_format == content_format_str)
+                    and cached_fingerprint == requested_production_fingerprint
                     and cached_manifest.canonical_narration_sha256 == expected_narration_hash
                     and cached_manifest.render_profile == render_prof.name
                     and cached_manifest.voice == resolved_voice
@@ -426,6 +476,10 @@ class MediaProductionPipeline:
                 subtitle_format="srt",
                 ordered_scene_asset_hashes=scene_hashes,
                 audio_mode=render_prof.audio_mode.value,
+                creative_pipeline_version=CREATIVE_PIPELINE_VERSION,
+                content_format=content_format_str,
+                creative_profile_name=creative_profile_name,
+                visual_plan_hash=visual_plan_hash,
             )
 
             # 9b. AI Background Music Generation (Anime Lo-Fi / Synthwave BGM)
@@ -557,12 +611,26 @@ class MediaProductionPipeline:
             self.repo.save_video_project(project)
 
             # 13. Build and write RenderManifest
+            storyboard_hash = storyboard.compute_hash() if storyboard else None
+            artifact_fingerprint = compute_artifact_fingerprint(
+                request_fingerprint=production_fingerprint,
+                ordered_asset_hashes=ordered_scene_hashes,
+                audio_sha256=tts_res.audio_sha256,
+                subtitle_sha256=sub_track.content_sha256,
+            )
+
             manifest = RenderManifest(
                 project_id=project_id,
                 source_commit=self._get_git_commit(),
                 script_id=project.script.id,
                 canonical_narration_sha256=expected_narration_hash,
                 production_fingerprint=production_fingerprint,
+                request_fingerprint=production_fingerprint,
+                artifact_fingerprint=artifact_fingerprint,
+                creative_pipeline_version=CREATIVE_PIPELINE_VERSION,
+                creative_profile=creative_profile_name,
+                content_format=content_format_str,
+                storyboard_hash=storyboard_hash,
                 tts_input_sha256=tts_res.canonical_narration_sha256,
                 subtitle_source_sha256=expected_narration_hash,
                 render_input_narration_sha256=expected_narration_hash,

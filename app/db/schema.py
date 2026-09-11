@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS scripts (
     hook TEXT NOT NULL,
     scenes_json TEXT NOT NULL,
     sections_json TEXT,
+    content_format TEXT NOT NULL DEFAULT 'EXPLAINER',
     total_word_count INTEGER NOT NULL,
     estimated_duration_seconds REAL NOT NULL,
     created_at TEXT NOT NULL,
@@ -378,6 +379,8 @@ def migrate_database(db_path: Path) -> None:
             script_cols = {row[1] for row in cursor.fetchall()}
             if script_cols and "sections_json" not in script_cols:
                 conn.execute("ALTER TABLE scripts ADD COLUMN sections_json TEXT;")
+            if script_cols and "content_format" not in script_cols:
+                conn.execute("ALTER TABLE scripts ADD COLUMN content_format TEXT NOT NULL DEFAULT 'EXPLAINER';")
 
             # Ensure all v3 intelligence tables exist
             conn.executescript(SCHEMA_V3_SQL)
@@ -395,6 +398,8 @@ def migrate_database(db_path: Path) -> None:
             script_cols = {row[1] for row in cursor.fetchall()}
             if script_cols and "sections_json" not in script_cols:
                 conn.execute("ALTER TABLE scripts ADD COLUMN sections_json TEXT;")
+            if script_cols and "content_format" not in script_cols:
+                conn.execute("ALTER TABLE scripts ADD COLUMN content_format TEXT NOT NULL DEFAULT 'EXPLAINER';")
             conn.commit()
 
 
