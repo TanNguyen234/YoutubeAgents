@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 from typing import Iterable, Iterator, List, Optional, Tuple, Union
 import logging
 from PIL import Image, ImageDraw, ImageFont
@@ -216,78 +217,87 @@ class MotionGraphicsRenderer:
             "-preset", "ultrafast",
             str(output_path),
         ]
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-
-        last_frame = None
-        stderr_data = b""
-        pipe_broken = False
-        stdin_closed = False
-        try:
-            for frame in frame_images:
-                last_frame = frame
-                if not pipe_broken:
-                    try:
-                        proc.stdin.write(frame.tobytes())
-                    except (BrokenPipeError, OSError):
-                        pipe_broken = True
-            if proc.stdin and not stdin_closed:
-                try:
-                    proc.stdin.close()
-                finally:
-                    stdin_closed = True
-            try:
-                stderr_data = proc.stderr.read()
-                proc.wait(timeout=60)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
-                logger.warning("FFmpeg process timed out during motion graphics encoding.")
-        except Exception as exc:
-            if proc.stdin and not stdin_closed:
-                try:
-                    proc.stdin.close()
-                except Exception:
-                    pass
-                stdin_closed = True
-            proc.kill()
-            try:
-                proc.wait(timeout=5)
-            except Exception:
-                pass
-            logger.warning(f"Error while streaming frames to FFmpeg: {exc}")
-        finally:
-            if proc.stdin and not stdin_closed:
-                try:
-                    proc.stdin.close()
-                except Exception:
-                    pass
-                stdin_closed = True
-            if proc.stderr and not proc.stderr.closed:
-                try:
-                    proc.stderr.close()
-                except Exception:
-                    pass
-
-        if proc.returncode != 0:
-            logger.warning(
-                f"FFmpeg motion encoding returned {proc.returncode}: {stderr_data.decode(errors='replace')}"
+        with tempfile.TemporaryFile() as err_file:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=err_file,
             )
 
-        if not output_path.exists() or output_path.stat().st_size == 0:
-            fallback_png = output_path.with_suffix(".png")
-            if last_frame:
-                last_frame.save(str(fallback_png), format="PNG")
-                h = hashlib.sha256(fallback_png.read_bytes()).hexdigest()
-                return str(fallback_png), h
-            raise RuntimeError("Cannot encode video: FFmpeg failed and no frames available.")
+            last_frame = None
+            stderr_data = b""
+            pipe_broken = False
+            stdin_closed = False
+            try:
+                for frame in frame_images:
+                    last_frame = frame
+                    if not pipe_broken:
+                        try:
+                            proc.stdin.write(frame.tobytes())
+                        except (BrokenPipeError, OSError):
+                            pipe_broken = True
+                if proc.stdin and not stdin_closed:
+                    try:
+                        proc.stdin.close()
+                    finally:
+                        stdin_closed = True
+                try:
+                    proc.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                    logger.warning("FFmpeg process timed out during motion graphics encoding.")
+            except Exception as exc:
+                if proc.stdin and not stdin_closed:
+                    try:
+                        proc.stdin.close()
+                    except Exception:
+                        pass
+                    stdin_closed = True
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+                logger.warning(f"Error while streaming frames to FFmpeg: {exc}")
+            finally:
+                if proc.stdin and not stdin_closed:
+                    try:
+                        proc.stdin.close()
+                    except Exception:
+                        pass
+                    stdin_closed = True
 
-        sha256 = hashlib.sha256(output_path.read_bytes()).hexdigest()
-        return str(output_path), sha256
+            try:
+                err_file.seek(0)
+                stderr_data = err_file.read()
+            except Exception:
+                stderr_data = b""
+
+            if not stderr_data and getattr(proc, "stderr", None) and hasattr(proc.stderr, "read"):
+                try:
+                    stderr_data = proc.stderr.read()
+                except Exception:
+                    pass
+
+            if proc.returncode != 0:
+                logger.warning(
+                    f"FFmpeg motion encoding returned {proc.returncode}: {stderr_data.decode(errors='replace')}"
+                )
+                if output_path.exists():
+                    output_path.unlink(missing_ok=True)
+
+            if proc.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
+                fallback_png = output_path.with_suffix(".png")
+                if last_frame:
+                    last_frame.save(str(fallback_png), format="PNG")
+                    h = hashlib.sha256(fallback_png.read_bytes()).hexdigest()
+                    return str(fallback_png), h
+                raise RuntimeError("Cannot encode video: FFmpeg failed and no frames available.")
+
+            sha256 = hashlib.sha256(output_path.read_bytes()).hexdigest()
+            return str(output_path), sha256
 
     def render_animated_token_prediction(
         self,

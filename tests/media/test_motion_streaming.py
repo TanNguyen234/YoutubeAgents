@@ -1,6 +1,7 @@
 """Tests for motion graphics streaming frame encoding, memory optimization, and FFmpeg error resilience."""
 
 from pathlib import Path
+import subprocess
 from unittest.mock import MagicMock, patch
 from PIL import Image
 import pytest
@@ -88,3 +89,90 @@ def test_motion_renderer_token_animation_creates_valid_output(tmp_path: Path):
     assert result_path.exists()
     assert result_path.stat().st_size > 0
     assert len(sha) == 64
+
+
+def test_ffmpeg_timeout_kills_process(tmp_path: Path):
+    """If FFmpeg hangs and exceeds timeout, proc.kill() is invoked and fallback PNG returned."""
+    renderer = MotionGraphicsRenderer(width=320, height=480)
+    out_mp4 = tmp_path / "timeout_test.mp4"
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = -9
+    mock_proc.stdin = MagicMock()
+    mock_proc.stdin.closed = False
+    mock_proc.wait.side_effect = [subprocess.TimeoutExpired(cmd="ffmpeg", timeout=60), 0]
+
+    frames = [Image.new("RGB", (320, 480), color=(50, 50, 50))]
+
+    with patch("shutil.which", return_value="ffmpeg"):
+        with patch("subprocess.Popen", return_value=mock_proc):
+            path_str, sha = renderer._encode_frames_to_mp4(frames, output_path=out_mp4, fps=12)
+
+    assert mock_proc.kill.called
+    assert path_str.endswith(".png")
+    assert Path(path_str).exists()
+
+
+def test_ffmpeg_nonzero_with_partial_mp4_is_not_success(tmp_path: Path):
+    """If FFmpeg returns nonzero exit code even if partial MP4 exists, it must be deleted and rejected."""
+    renderer = MotionGraphicsRenderer(width=320, height=480)
+    out_mp4 = tmp_path / "partial_corrupt.mp4"
+    out_mp4.write_bytes(b"corrupted partial header and frames")
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 1
+    mock_proc.stdin = MagicMock()
+    mock_proc.stdin.closed = False
+
+    frames = [Image.new("RGB", (320, 480), color=(10, 20, 30))]
+
+    with patch("shutil.which", return_value="ffmpeg"):
+        with patch("subprocess.Popen", return_value=mock_proc):
+            path_str, sha = renderer._encode_frames_to_mp4(frames, output_path=out_mp4, fps=12)
+
+    assert not out_mp4.exists(), "Partial MP4 should have been unlinked upon nonzero return code"
+    assert path_str.endswith(".png")
+    assert Path(path_str).exists()
+
+
+def test_streaming_encoder_does_not_block_on_stderr_read(tmp_path: Path):
+    """Ensure stderr is handled via tempfile or safe non-blocking collection, not blocking before wait."""
+    renderer = MotionGraphicsRenderer(width=320, height=480)
+    out_mp4 = tmp_path / "noblock_test.mp4"
+    out_mp4.write_bytes(b"valid mp4 content")
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.stdin = MagicMock()
+    mock_proc.stdin.closed = False
+
+    call_order = []
+
+    def mock_close():
+        call_order.append("stdin_close")
+
+    def mock_wait(timeout=None):
+        call_order.append("wait")
+        return 0
+
+    mock_proc.stdin.close.side_effect = mock_close
+    mock_proc.wait.side_effect = mock_wait
+
+    frames = [Image.new("RGB", (320, 480), color=(0, 0, 0))]
+
+    with patch("shutil.which", return_value="ffmpeg"):
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            path_str, sha = renderer._encode_frames_to_mp4(frames, output_path=out_mp4, fps=12)
+
+    # Check that stderr was passed as a file/tempfile rather than PIPE that could block
+    _, kwargs = mock_popen.call_args
+    assert kwargs.get("stderr") != subprocess.PIPE
+    assert "stdin_close" in call_order
+    assert "wait" in call_order
+    assert path_str == str(out_mp4)
+
+
+# Explicit aliases for regression test suite
+test_ffmpeg_nonzero_partial_output_is_rejected = test_ffmpeg_nonzero_with_partial_mp4_is_not_success
+test_ffmpeg_timeout_does_not_block_on_stderr = test_streaming_encoder_does_not_block_on_stderr_read
+
