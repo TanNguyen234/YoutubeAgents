@@ -105,7 +105,11 @@ class EvidenceBinding(BaseModel):
     source_ref: str = Field(description="Internal source reference or ID")
     source_title: str = Field(description="Document title or publication source")
     source_url: str = Field(description="Verified URL of original source")
-    quote_or_excerpt: Optional[str] = Field(default=None, description="Exact quotation or benchmark excerpt")
+    claim_text: str = Field(default="", description="The specific claim statement or paraphrase")
+    source_excerpt: Optional[str] = Field(default=None, description="Exact quotation or excerpt from source text")
+    excerpt_is_verbatim: bool = Field(default=False, description="Whether excerpt is a verbatim extract from document")
+    claim_verified: bool = Field(default=False, description="Whether associated claim is verified by fact checker")
+    quote_or_excerpt: Optional[str] = Field(default=None, description="Legacy field for backward compatibility")
 
 
 class NarrativeBeat(BaseModel):

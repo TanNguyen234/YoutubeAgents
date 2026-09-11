@@ -5,7 +5,8 @@ from pathlib import Path
 import re
 from typing import Dict, List, Optional
 
-from app.domain.models import Script
+from app.domain.enums import ClaimVerificationVerdict
+from app.domain.models import Claim, FactCheckReport, ResearchDossier, ResearchSource, Script
 from app.media.director.modality_router import VisualModalityRouter
 from app.media.director.models import (
     ChannelCreativeProfile,
@@ -102,9 +103,10 @@ class StoryboardPlanner:
                 f"Action: {narration[:100]}. Real UI controls, input field, dropdown or response state."
             )
         elif modality == VisualModality.DOCUMENT_EVIDENCE:
+            claim_text = beat.key_claim or beat.narration
             instructions["evidence_instruction"] = (
                 f"Verified evidence callout: Benchmark paper or official docs snapshot for {topic_title}. "
-                f"Quoted assertion: '{beat.key_claim or narration}'. Highlighted verification box with source badge."
+                f"Assertion: {claim_text}. Highlighted verification box with source badge."
             )
         elif modality == VisualModality.COMPARISON:
             instructions["motion_graphic_instruction"] = (
@@ -126,6 +128,73 @@ class StoryboardPlanner:
 
         return instructions
 
+    def _resolve_evidence_binding(
+        self,
+        beat: NarrativeBeat,
+        dossier: Optional[ResearchDossier] = None,
+        fact_report: Optional[FactCheckReport] = None,
+    ) -> Optional[EvidenceBinding]:
+        """Resolve evidence binding from verified fact-check claims and research dossier sources."""
+        if beat.evidence_binding:
+            return beat.evidence_binding
+
+        claims: List[Claim] = []
+        if fact_report and fact_report.claims:
+            claims.extend(fact_report.claims)
+        if dossier and dossier.claims:
+            for c in dossier.claims:
+                if not any(ec.id == c.id for ec in claims):
+                    claims.append(c)
+
+        if not claims:
+            return None
+
+        target_text = (beat.key_claim or beat.narration or "").lower()
+        target_tokens = set(re.findall(r"\w+", target_text))
+
+        best_claim: Optional[Claim] = None
+        best_overlap = 0.0
+
+        for claim in claims:
+            stmt = claim.statement.lower()
+            stmt_tokens = set(re.findall(r"\w+", stmt))
+            if not stmt_tokens:
+                continue
+            overlap = len(target_tokens & stmt_tokens) / len(stmt_tokens)
+            if (stmt in target_text or overlap >= 0.35) and overlap > best_overlap:
+                best_claim = claim
+                best_overlap = overlap
+
+        if not best_claim:
+            return None
+
+        sources = dossier.sources if dossier else []
+        matched_source: Optional[ResearchSource] = None
+        if best_claim.source_id and sources:
+            matched_source = next((s for s in sources if s.id == best_claim.source_id), None)
+        if not matched_source and best_claim.cited_url and sources:
+            matched_source = next((s for s in sources if s.url == best_claim.cited_url), None)
+        if not matched_source and sources and best_claim.source_id:
+            matched_source = next((s for s in sources if best_claim.source_id in s.id or s.id in best_claim.source_id), None)
+
+        source_title = matched_source.title if matched_source else (best_claim.cited_url or "Official Documentation")
+        source_url = (matched_source.url if matched_source else best_claim.cited_url) or "https://verified-source.internal"
+        source_ref = (matched_source.id if matched_source else best_claim.source_id) or "src_verified"
+
+        is_verified = bool(best_claim.verified or getattr(best_claim, "verdict", None) == ClaimVerificationVerdict.VERIFIED)
+
+        return EvidenceBinding(
+            claim_id=best_claim.id,
+            source_ref=source_ref,
+            source_title=source_title,
+            source_url=source_url,
+            claim_text=best_claim.statement,
+            source_excerpt=best_claim.cited_excerpt,
+            excerpt_is_verbatim=bool(best_claim.cited_excerpt),
+            claim_verified=is_verified,
+            quote_or_excerpt=best_claim.cited_excerpt or best_claim.statement,
+        )
+
     def plan_storyboard(
         self,
         project_id: str,
@@ -134,6 +203,8 @@ class StoryboardPlanner:
         total_audio_duration: float,
         content_format: ContentFormat = ContentFormat.EXPLAINER,
         available_modalities: Optional[List[VisualModality]] = None,
+        dossier: Optional[ResearchDossier] = None,
+        fact_report: Optional[FactCheckReport] = None,
     ) -> Storyboard:
         """Construct an authoritative Storyboard mapping all beats to granular ShotSpecs."""
         shots: List[ShotSpec] = []
@@ -165,7 +236,10 @@ class StoryboardPlanner:
 
             # 2. DOCUMENT_EVIDENCE requires valid source binding or verifiable source_refs
             if selected_mod == VisualModality.DOCUMENT_EVIDENCE:
-                if not beat.evidence_binding and not beat.source_refs:
+                resolved_binding = self._resolve_evidence_binding(beat, dossier, fact_report)
+                if resolved_binding:
+                    beat.evidence_binding = resolved_binding
+                elif not beat.evidence_binding:
                     selected_mod = VisualModality.DIAGRAM
 
             # 3. COMPARISON requires structured comparison points or extractable entities
@@ -199,12 +273,23 @@ class StoryboardPlanner:
 
             # Build grounded chart data if available
             shot_chart_data = beat.chart_data
-            if not shot_chart_data and has_numbers:
-                raw_nums = re.findall(r"\b\d+(?:\.\d+)?%?\b", beat.narration)
-                shot_chart_data = [
-                    ChartDatum(label=f"Metric {i+1}", value=float(n.replace("%", "")))
-                    for i, n in enumerate(raw_nums[:4])
-                ]
+            if not shot_chart_data and has_numbers and not is_token_concept:
+                metric_pattern = r"\b(\d+(?:\.\d+)?)\s*(%|percent|ms|s|seconds|gb|mb|tb|k|m|b|\$|x faster|times faster)\b"
+                metric_matches = re.findall(metric_pattern, beat.narration, flags=re.IGNORECASE)
+                if metric_matches:
+                    shot_chart_data = []
+                    for i, (num_val, unit_val) in enumerate(metric_matches[:4]):
+                        cleaned_unit = unit_val.strip()
+                        shot_chart_data.append(
+                            ChartDatum(
+                                label=f"Metric {i+1} ({cleaned_unit})",
+                                value=float(num_val),
+                                unit=cleaned_unit,
+                                source_ref=beat.source_refs[0] if beat.source_refs else None,
+                            )
+                        )
+                elif selected_mod == VisualModality.DATA_VISUALIZATION:
+                    selected_mod = VisualModality.DIAGRAM
 
             shot = ShotSpec(
                 shot_id=f"shot_{b_idx + 1:02d}",

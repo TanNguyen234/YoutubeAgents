@@ -7,7 +7,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.domain.models import ResearchDossier, Script
+from app.domain.models import FactCheckReport, ResearchDossier, Script
 from app.media.director.beat_decomposer import BeatDecomposer
 from app.media.director.modality_router import VisualModalityRouter
 from app.media.director.models import (
@@ -79,6 +79,7 @@ class AutoDirectorService:
         output_dir: Path,
         content_format: ContentFormat = ContentFormat.EXPLAINER,
         dossier: Optional[ResearchDossier] = None,
+        fact_report: Optional[FactCheckReport] = None,
     ) -> Tuple[ShotTimeline, Storyboard]:
         """Execute full director workflow: Decompose -> Plan Storyboard -> Dispatch Renderers -> QA Evaluate -> Selective Retry -> Assemble Timeline."""
         output_dir = Path(output_dir)
@@ -100,6 +101,8 @@ class AutoDirectorService:
             beats=beats,
             total_audio_duration=total_audio_duration,
             content_format=content_format,
+            dossier=dossier,
+            fact_report=fact_report,
         )
 
         # Persist Storyboard Artifact
@@ -124,6 +127,7 @@ class AutoDirectorService:
                 script_title=script.title,
                 channel_name=channel_name,
                 dossier=dossier,
+                fact_report=fact_report,
             )
 
             # 14. Execute evaluate_shot() before final render
@@ -206,6 +210,7 @@ class AutoDirectorService:
         script_title: str,
         channel_name: str,
         dossier: Optional[ResearchDossier] = None,
+        fact_report: Optional[FactCheckReport] = None,
     ) -> Tuple[Path, str]:
         """Dispatch asset generation to the best available renderer or provider for the shot modality."""
         t0 = time.time()
@@ -431,16 +436,23 @@ class AutoDirectorService:
 
             # Resolve grounded evidence binding
             binding = shot.evidence_binding
-            if not binding and dossier and dossier.sources and shot.source_refs:
-                matched_source = next((s for s in dossier.sources if s.id in shot.source_refs or s.url in shot.source_refs), None)
-                if matched_source:
-                    from app.media.director.models import EvidenceBinding
-                    binding = EvidenceBinding(
-                        source_ref=matched_source.id,
-                        source_title=matched_source.title,
-                        source_url=matched_source.url,
-                        quote_or_excerpt=shot.evidence_instruction or shot.narration_segment,
-                    )
+            if not binding and (dossier or fact_report):
+                from app.media.director.models import BeatPurpose, NarrativeBeat, VisualIntent
+                binding = self.planner._resolve_evidence_binding(
+                    beat=NarrativeBeat(
+                        beat_id=shot.beat_id,
+                        scene_index=shot.scene_index,
+                        narration=shot.narration_segment,
+                        duration_hint=shot.duration_seconds,
+                        purpose=BeatPurpose.PROVE,
+                        visual_intent=VisualIntent.SHOW_EVIDENCE,
+                        source_refs=shot.source_refs,
+                    ),
+                    dossier=dossier,
+                    fact_report=fact_report,
+                )
+                if binding:
+                    shot.evidence_binding = binding
 
             if not binding or not binding.source_url or "official-documentation.org" in binding.source_url:
                 # No grounded source binding: DOCUMENT_EVIDENCE must not be rendered. Route to Diagram.
@@ -453,12 +465,17 @@ class AutoDirectorService:
                 return Path(p), h
 
             try:
+                is_verbatim = bool(binding.source_excerpt and binding.excerpt_is_verbatim)
+                display_text = binding.source_excerpt if is_verbatim else (binding.claim_text or shot.narration_segment)
+
                 p, h = self.evidence_renderer.render_evidence_card(
                     source_title=binding.source_title,
                     source_url=binding.source_url,
-                    highlighted_claim=binding.quote_or_excerpt or shot.narration_segment,
+                    highlighted_claim=display_text,
                     output_path=target_path,
                     benchmark_name="SOURCE CITATION",
+                    is_verbatim=is_verbatim,
+                    claim_verified=binding.claim_verified,
                 )
                 self.asset_attempts.append(
                     AssetGenerationAttempt(
