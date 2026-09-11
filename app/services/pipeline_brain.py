@@ -249,8 +249,10 @@ class BrainPipeline:
                         script_id=f"scr-{project_id}-v{attempt+2}",
                         title=keyword,
                         sections=revised_sections,
+                        content_format=content_format,
                     )
                     project.script = revised_script
+                    project.content_format = content_format
                     self.repo.save_video_project(project)
                 else:
                     break

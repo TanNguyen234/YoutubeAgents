@@ -1,10 +1,21 @@
 """Tests for ContentFormat propagation, format-aware scripting, and channel creative profile wiring."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
 import pytest
 
-from app.domain.enums import ContentFormat
-from app.domain.models import Channel, ResearchDossier, ResearchSource, Scene, Script, ScriptSections
+from app.db.repository import SQLiteRepository
+from app.domain.enums import ClaimVerificationVerdict, ContentFormat, QualityStatus
+from app.domain.models import (
+    Channel,
+    Claim,
+    FactCheckReport,
+    ResearchDossier,
+    ResearchSource,
+    Scene,
+    Script,
+    ScriptSections,
+)
 from app.media.director.director_service import AutoDirectorService
 from app.media.director.models import VisualModality
 from app.media.director.profiles import (
@@ -14,6 +25,7 @@ from app.media.director.profiles import (
     TECH_DOCUMENTARY_PROFILE,
     get_channel_profile_for_niche,
 )
+from app.services.pipeline_brain import BrainPipeline
 from app.services.script_generator import ScriptGenerator
 from app.services.script_writer import ScriptWriter
 
@@ -129,3 +141,116 @@ def test_storyboard_records_selected_profile_and_format(tmp_path: Path):
     storyboard.profile_name = "Different Profile"
     h2 = storyboard.compute_hash()
     assert h1 != h2
+
+
+def test_profile_propagates_to_router_planner_evaluator():
+    """Applying a profile propagates to Director, router, planner, and evaluator."""
+    director = AutoDirectorService()
+    profile = get_channel_profile_for_niche("python programming")
+    director.apply_profile(profile)
+    assert director.profile.name == profile.name
+    assert director.router.profile.name == profile.name
+    assert director.planner.profile.name == profile.name
+    assert director.evaluator.profile.name == profile.name
+
+
+def test_content_format_survives_factcheck_rewrite(tmp_path: Path):
+    """Fact check rewrite loop must preserve the original ContentFormat rather than resetting to EXPLAINER."""
+    repo = SQLiteRepository(tmp_path / "test.db")
+
+    channel = Channel(
+        id="chan_rewrite",
+        handle="@code",
+        title="Code Channel",
+        niche="programming",
+        target_audience="Devs",
+    )
+    repo.save_channel(channel)
+
+    mock_extractor = MagicMock()
+    mock_extractor.extract_from_script.return_value = [
+        Claim(id="clm_1", statement="WAL writes asynchronously without fsync", source_id="src_1", verdict=ClaimVerificationVerdict.REWRITE_REQUIRED)
+    ]
+
+    mock_checker = MagicMock()
+    report_fail = FactCheckReport(
+        id="fc_fail",
+        project_id="proj_fmt_rewrite",
+        claims=[
+            Claim(id="clm_1", statement="WAL writes asynchronously without fsync", source_id="src_1", verdict=ClaimVerificationVerdict.REWRITE_REQUIRED)
+        ],
+        audit_summary="Unverified claim requires revision.",
+        overall_verdict=QualityStatus.FAILED,
+        failed_count=1,
+    )
+    report_pass = FactCheckReport(
+        id="fc_pass",
+        project_id="proj_fmt_rewrite",
+        claims=[
+            Claim(id="clm_1", statement="WAL buffers sequentially before sync", source_id="src_1", verdict=ClaimVerificationVerdict.VERIFIED)
+        ],
+        audit_summary="All claims verified against source.",
+        overall_verdict=QualityStatus.PASSED,
+        verified_count=1,
+        failed_count=0,
+    )
+    mock_checker.verify_all_claims.side_effect = [report_fail, report_pass]
+
+    mock_generator = MagicMock()
+    mock_generator.generate_script_sections.return_value = ScriptSections(
+        hook="Demo Hook",
+        intro="Demo Intro",
+        segments=[Scene(scene_index=0, narration="WAL demo narration", target_duration_seconds=5.0)],
+        cta="Demo CTA",
+        voiceover_text="WAL demo narration",
+        estimated_duration=5.0,
+    )
+    mock_generator.rewrite_script_sections.return_value = ScriptSections(
+        hook="Revised Hook",
+        intro="Revised Intro",
+        segments=[Scene(scene_index=0, narration="Revised WAL demo narration", target_duration_seconds=5.0)],
+        cta="Revised CTA",
+        voiceover_text="Revised WAL demo narration",
+        estimated_duration=5.0,
+    )
+
+    mock_research = MagicMock()
+    mock_research.build_dossier_from_urls.return_value = ResearchDossier(
+        id="dos_1",
+        topic_id="top-proj_fmt_rewrite",
+        sources=[ResearchSource(id="src_1", title="Doc", url="https://example.com", content_sha256="abc123456789")],
+        claims=[],
+        summary="Dossier",
+    )
+
+    mock_evaluator = MagicMock()
+    raw_scores = {
+        "demand": 0.8,
+        "freshness": 0.8,
+        "competition": 0.5,
+        "channel_fit": 0.9,
+        "originality": 0.8,
+        "evidence_quality": 0.9,
+        "production_feasibility": 0.9,
+    }
+    mock_evaluator.evaluate_topic_with_reasoning.return_value = (raw_scores, "Rationale", {"demand": "good"})
+
+    pipeline = BrainPipeline(
+        repo=repo,
+        research_agent=mock_research,
+        evaluator=mock_evaluator,
+        generator=mock_generator,
+        extractor=mock_extractor,
+        checker=mock_checker,
+    )
+
+    project, report = pipeline.run_stage_1_to_5(
+        project_id="proj_fmt_rewrite",
+        channel=channel,
+        keyword="WAL Architecture Demo",
+        seed_urls=["https://example.com"],
+        content_format=ContentFormat.DEMO,
+    )
+
+    assert project.content_format == ContentFormat.DEMO
+    assert project.script.content_format == ContentFormat.DEMO

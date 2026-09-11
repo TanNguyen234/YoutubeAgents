@@ -530,6 +530,7 @@ class SQLiteRepository:
             ]
 
             tags = json.loads(p_row["metadata_tags"]) if p_row["metadata_tags"] else []
+            p_content_format = script.content_format if script and hasattr(script, "content_format") and script.content_format else ContentFormat.EXPLAINER
 
             return VideoProject(
                 id=p_row["id"],
@@ -537,6 +538,7 @@ class SQLiteRepository:
                 title=p_row["title"],
                 format=PlatformFormat(p_row["format"]),
                 state=VideoLifecycleState(p_row["state"]),
+                content_format=p_content_format,
                 script=script,
                 assets=assets,
                 quality=quality,

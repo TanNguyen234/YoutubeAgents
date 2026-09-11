@@ -193,7 +193,9 @@ class MediaProductionPipeline:
         resolved_profile = getattr(self.director, "profile", None)
         if not resolved_profile or resolved_profile.name == "Tech Engineering Channel":
             resolved_profile = get_channel_profile_for_niche(channel_niche)
-            if hasattr(self.director, "profile"):
+            if hasattr(self.director, "apply_profile"):
+                self.director.apply_profile(resolved_profile)
+            elif hasattr(self.director, "profile"):
                 self.director.profile = resolved_profile
         creative_profile_name = resolved_profile.name if resolved_profile else "default"
 
