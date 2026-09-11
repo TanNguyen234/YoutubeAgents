@@ -6,6 +6,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.core.backend import ReasoningBackend
+from app.domain.enums import ClaimVerificationVerdict
 from app.domain.models import Claim, ResearchSource, Scene, Script
 from app.media.director.models import (
     BeatPurpose,
@@ -249,4 +250,74 @@ Script Scenes:
                 b.duration_hint = dur
                 cur += dur
 
+            all_beats = enrich_beats_with_provenance(all_beats, claims=claims, sources=sources)
+
         return all_beats
+
+
+def enrich_beats_with_provenance(
+    beats: List[NarrativeBeat],
+    claims: Optional[List[Claim]] = None,
+    sources: Optional[List[ResearchSource]] = None,
+) -> List[NarrativeBeat]:
+    """Canonical post-processing pass attaching verified factual provenance to narrative beats.
+
+    Runs uniformly for both LLM-generated and deterministic decomposition.
+    """
+    if not beats:
+        return []
+
+    verified_claims = [
+        c for c in (claims or [])
+        if bool(c.verified or getattr(c, "verdict", None) == ClaimVerificationVerdict.VERIFIED)
+    ]
+
+    for beat in beats:
+        matched_source_refs: List[str] = []
+        matched_claim_stmt: Optional[str] = None
+
+        text_to_match = f"{beat.narration} {beat.key_claim or ''}".lower()
+        beat_tokens = set(re.findall(r"\w+", text_to_match))
+
+        best_claim = None
+        best_overlap = 0.0
+
+        for clm in verified_claims:
+            stmt = clm.statement.lower()
+            clm_tokens = set(re.findall(r"\w+", stmt))
+            if not clm_tokens:
+                continue
+            overlap = len(beat_tokens & clm_tokens) / len(clm_tokens)
+            if (stmt in text_to_match or overlap >= 0.35) and overlap > best_overlap:
+                best_claim = clm
+                best_overlap = overlap
+
+        if best_claim:
+            matched_claim_stmt = best_claim.statement
+            s_ref = None
+            if sources and best_claim.source_id:
+                real_s = next((s for s in sources if s.id == best_claim.source_id or best_claim.source_id in s.id), None)
+                if real_s:
+                    s_ref = real_s.id
+            if not s_ref and sources and best_claim.cited_url:
+                real_s = next((s for s in sources if s.url == best_claim.cited_url), None)
+                if real_s:
+                    s_ref = real_s.id
+            if not s_ref and best_claim.source_id:
+                s_ref = best_claim.source_id
+            elif not s_ref and best_claim.cited_url:
+                s_ref = best_claim.cited_url
+
+            if s_ref and not any(p in s_ref.lower() for p in ["verified-source.internal", "placeholder", "localhost"]):
+                matched_source_refs.append(s_ref)
+
+            beat.key_claim = matched_claim_stmt
+            beat.source_refs = list(dict.fromkeys(matched_source_refs))
+            beat.requires_evidence = True
+        else:
+            # Unmatched beat: do NOT let LLM or caller invent fake source refs!
+            beat.source_refs = []
+            if beat.visual_intent in (VisualIntent.SHOW_EVIDENCE, VisualIntent.SHOW_DATA) or "%" in beat.narration:
+                beat.requires_evidence = True
+
+    return beats

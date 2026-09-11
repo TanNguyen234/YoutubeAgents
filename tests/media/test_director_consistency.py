@@ -258,3 +258,140 @@ def test_director_run_state_is_reset_between_projects(tmp_path: Path):
     # Only attempts from Project B should be recorded
     for attempt in director.asset_attempts:
         assert "proj_a" not in attempt.shot_id
+
+
+def test_llm_generated_beats_receive_verified_source_refs():
+    """LLM-generated beats must be post-processed by canonical enrichment to receive real verified source_refs."""
+    from app.domain.enums import ClaimVerificationVerdict
+    from app.media.director.beat_decomposer import BeatDecomposer, DecomposedBeatsPayload
+
+    backend = MagicMock(spec=ReasoningBackend)
+    # Simulate LLM returning raw narrative beats without provenance
+    backend.generate_structured.return_value = DecomposedBeatsPayload(
+        beats=[
+            NarrativeBeat(
+                beat_id="b_llm_01",
+                scene_index=0,
+                narration="PostgreSQL write-ahead logging buffers sequential disk writes before memory page flush.",
+                duration_hint=3.0,
+                purpose=BeatPurpose.EXPLAIN,
+                visual_intent=VisualIntent.SHOW_PROCESS,
+                key_claim=None,
+                source_refs=[],  # LLM did not provide source_refs
+            )
+        ]
+    )
+
+    claim = Claim(
+        id="clm_pg_01",
+        source_id="src_pg_docs",
+        statement="PostgreSQL write-ahead logging buffers sequential disk writes before memory page flush.",
+        verified=True,
+        verdict=ClaimVerificationVerdict.VERIFIED,
+        cited_url="https://postgresql.org/docs/wal",
+    )
+    source = ResearchSource(
+        id="src_pg_docs",
+        title="PostgreSQL Documentation",
+        url="https://postgresql.org/docs/wal",
+        content_sha256="pg_hash",
+    )
+
+    script = Script(
+        id="scr_01",
+        title="WAL Topic",
+        hook="Hook",
+        scenes=[Scene(index=0, narration="PostgreSQL write-ahead logging buffers sequential disk writes before memory page flush.", target_duration_seconds=3.0)],
+        total_word_count=10,
+        estimated_duration_seconds=3.0,
+    )
+
+    decomposer = BeatDecomposer(backend=backend)
+    beats = decomposer.decompose_script(script, total_audio_duration=3.0, claims=[claim], sources=[source])
+
+    assert len(beats) == 1
+    # Canonical enrichment must have attached the real verified source ref
+    assert "src_pg_docs" in beats[0].source_refs
+    assert beats[0].key_claim == claim.statement
+
+
+def test_llm_generated_unmatched_beat_has_no_fake_source():
+    """Unmatched LLM narrative beats must never be assigned invented or placeholder sources."""
+    from app.media.director.beat_decomposer import BeatDecomposer, DecomposedBeatsPayload
+
+    backend = MagicMock(spec=ReasoningBackend)
+    backend.generate_structured.return_value = DecomposedBeatsPayload(
+        beats=[
+            NarrativeBeat(
+                beat_id="b_llm_intro",
+                scene_index=0,
+                narration="Welcome back to our programming channel, let's dive into code!",
+                duration_hint=2.5,
+                purpose=BeatPurpose.HOOK,
+                visual_intent=VisualIntent.ESTABLISH_CONTEXT,
+                key_claim=None,
+                source_refs=["invented_fake_source_by_llm"],  # LLM hallucinates a source
+            )
+        ]
+    )
+
+    source = ResearchSource(
+        id="src_real",
+        title="Real Source",
+        url="https://real.org",
+        content_sha256="sha",
+    )
+
+    script = Script(
+        id="scr_02",
+        title="Intro",
+        hook="Welcome",
+        scenes=[Scene(index=0, narration="Welcome back to our programming channel, let's dive into code!", target_duration_seconds=2.5)],
+        total_word_count=9,
+        estimated_duration_seconds=2.5,
+    )
+
+    decomposer = BeatDecomposer(backend=backend)
+    beats = decomposer.decompose_script(script, total_audio_duration=2.5, claims=[], sources=[source])
+
+    assert len(beats) == 1
+    # Enrichment must purge invented sources when no verified claim matches
+    assert beats[0].source_refs == []
+    assert not any("fake" in s or "invented" in s for s in beats[0].source_refs)
+
+
+def test_deterministic_and_llm_paths_share_same_provenance_rules():
+    """Both deterministic and LLM paths must use enrich_beats_with_provenance and produce identical provenance."""
+    from app.domain.enums import ClaimVerificationVerdict
+    from app.media.director.beat_decomposer import BeatDecomposer, enrich_beats_with_provenance
+
+    claim = Claim(
+        id="clm_shared",
+        source_id="src_shared",
+        statement="Database transactions guarantee ACID properties.",
+        verified=True,
+        verdict=ClaimVerificationVerdict.VERIFIED,
+        cited_url="https://cmu.db.edu/acid",
+    )
+    source = ResearchSource(
+        id="src_shared",
+        title="CMU DB Course",
+        url="https://cmu.db.edu/acid",
+        content_sha256="cmu_hash",
+    )
+
+    raw_beat = NarrativeBeat(
+        beat_id="b_test",
+        scene_index=0,
+        narration="Database transactions guarantee ACID properties across concurrent workloads.",
+        duration_hint=3.0,
+        purpose=BeatPurpose.EXPLAIN,
+        visual_intent=VisualIntent.SHOW_PROCESS,
+    )
+
+    enriched = enrich_beats_with_provenance([raw_beat], claims=[claim], sources=[source])
+    assert len(enriched) == 1
+    assert enriched[0].source_refs == ["src_shared"]
+    assert enriched[0].requires_evidence is True
+    assert enriched[0].key_claim == claim.statement
+
