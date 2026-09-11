@@ -10,25 +10,37 @@ from app.db.schema import init_database
 from app.domain.enums import (
     AssetType,
     ClaimVerificationVerdict,
+    EditorialSlotStatus,
     PlatformFormat,
     PrivacyStatus,
     PublicationStatus,
     QualityStatus,
+    ReviewAction,
+    TitleVariantType,
     VideoLifecycleState,
 )
 from app.domain.state_machine import InvalidStateTransitionError, LifecycleStateMachine
 from app.domain.models import (
+    AnalyticsSnapshot,
     Asset,
     Channel,
+    Chapter,
     Claim,
+    ContentSeries,
+    EditorialSlot,
     FactCheckReport,
     PublicationJob,
     QualityResult,
+    QuotaUsageRecord,
     ResearchDossier,
     ResearchSource,
+    ReviewRecord,
     Scene,
     Script,
     ScriptSections,
+    SEOPackage,
+    ThumbnailPackage,
+    TitleVariant,
     TopicCandidate,
     TopicScoreBreakdown,
     VideoProject,
@@ -48,7 +60,10 @@ class SQLiteRepository:
         init_database(self.db_path)
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.row_factory = sqlite3.Row
         return conn
@@ -714,3 +729,442 @@ class SQLiteRepository:
                 )
                 for r in rows
             ]
+
+    # --- Review Gate Operations (Stage 12) ---
+    def save_review_record(self, record: ReviewRecord) -> None:
+        overrides_json = json.dumps(record.media_overrides) if record.media_overrides else None
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO review_records (id, project_id, operator, action, notes, approved_privacy_status, media_overrides_json, reviewed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    operator=excluded.operator,
+                    action=excluded.action,
+                    notes=excluded.notes,
+                    approved_privacy_status=excluded.approved_privacy_status,
+                    media_overrides_json=excluded.media_overrides_json,
+                    reviewed_at=excluded.reviewed_at;
+                """,
+                (
+                    record.id,
+                    record.project_id,
+                    record.operator,
+                    record.action.value,
+                    record.notes,
+                    record.approved_privacy_status.value,
+                    overrides_json,
+                    record.reviewed_at.isoformat(),
+                ),
+            )
+
+    def get_review_history(self, project_id: str) -> List[ReviewRecord]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM review_records WHERE project_id = ? ORDER BY reviewed_at ASC;",
+                (project_id,),
+            ).fetchall()
+            return [
+                ReviewRecord(
+                    id=r["id"],
+                    project_id=r["project_id"],
+                    operator=r["operator"],
+                    action=ReviewAction(r["action"]),
+                    notes=r["notes"],
+                    approved_privacy_status=PrivacyStatus(r["approved_privacy_status"]),
+                    media_overrides=json.loads(r["media_overrides_json"]) if r["media_overrides_json"] else {},
+                    reviewed_at=datetime.fromisoformat(r["reviewed_at"]),
+                )
+                for r in rows
+            ]
+
+    def get_latest_review(self, project_id: str) -> Optional[ReviewRecord]:
+        history = self.get_review_history(project_id)
+        return history[-1] if history else None
+
+    # --- Analytics Snapshot Operations (Stage 14 & 15) ---
+    def save_analytics_snapshot(self, snapshot: AnalyticsSnapshot) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO analytics_snapshots (id, project_id, youtube_video_id, views, watch_time_hours, ctr_percent, average_view_duration_seconds, retention_at_3s_percent, captured_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    views=excluded.views,
+                    watch_time_hours=excluded.watch_time_hours,
+                    ctr_percent=excluded.ctr_percent,
+                    average_view_duration_seconds=excluded.average_view_duration_seconds,
+                    retention_at_3s_percent=excluded.retention_at_3s_percent,
+                    captured_at=excluded.captured_at;
+                """,
+                (
+                    snapshot.id,
+                    snapshot.project_id,
+                    snapshot.youtube_video_id,
+                    snapshot.views,
+                    snapshot.watch_time_hours,
+                    snapshot.ctr_percent,
+                    snapshot.average_view_duration_seconds,
+                    snapshot.retention_at_3s_percent,
+                    snapshot.captured_at.isoformat(),
+                ),
+            )
+
+    def get_analytics_snapshots(self, project_id: str) -> List[AnalyticsSnapshot]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM analytics_snapshots WHERE project_id = ? ORDER BY captured_at ASC;",
+                (project_id,),
+            ).fetchall()
+            return [
+                AnalyticsSnapshot(
+                    id=r["id"],
+                    project_id=r["project_id"],
+                    youtube_video_id=r["youtube_video_id"],
+                    views=r["views"],
+                    watch_time_hours=r["watch_time_hours"],
+                    ctr_percent=r["ctr_percent"],
+                    average_view_duration_seconds=r["average_view_duration_seconds"],
+                    retention_at_3s_percent=r["retention_at_3s_percent"],
+                    captured_at=datetime.fromisoformat(r["captured_at"]),
+                )
+                for r in rows
+            ]
+
+    def get_channel_analytics(self, channel_id: str) -> List[AnalyticsSnapshot]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.* FROM analytics_snapshots a
+                JOIN video_projects p ON a.project_id = p.id
+                WHERE p.channel_id = ?
+                ORDER BY a.captured_at ASC;
+                """,
+                (channel_id,),
+            ).fetchall()
+            return [
+                AnalyticsSnapshot(
+                    id=r["id"],
+                    project_id=r["project_id"],
+                    youtube_video_id=r["youtube_video_id"],
+                    views=r["views"],
+                    watch_time_hours=r["watch_time_hours"],
+                    ctr_percent=r["ctr_percent"],
+                    average_view_duration_seconds=r["average_view_duration_seconds"],
+                    retention_at_3s_percent=r["retention_at_3s_percent"],
+                    captured_at=datetime.fromisoformat(r["captured_at"]),
+                )
+                for r in rows
+            ]
+
+    # --- Content Series Operations ---
+    def save_content_series(self, series: ContentSeries) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO content_series (
+                    id, channel_id, title, description, target_niche, default_format,
+                    frequency_per_week, playlist_id, visual_style_preset,
+                    next_episode_number, is_active, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    series.id,
+                    series.channel_id,
+                    series.title,
+                    series.description,
+                    series.target_niche,
+                    series.default_format.value if hasattr(series.default_format, "value") else str(series.default_format),
+                    series.frequency_per_week,
+                    series.playlist_id,
+                    series.visual_style_preset,
+                    series.next_episode_number,
+                    1 if series.is_active else 0,
+                    series.created_at.isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def get_content_series(self, series_id: str) -> Optional[ContentSeries]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM content_series WHERE id = ?;", (series_id,)).fetchone()
+            if not row:
+                return None
+            return ContentSeries(
+                id=row["id"],
+                channel_id=row["channel_id"],
+                title=row["title"],
+                description=row["description"],
+                target_niche=row["target_niche"],
+                default_format=PlatformFormat(row["default_format"]),
+                frequency_per_week=row["frequency_per_week"],
+                playlist_id=row["playlist_id"],
+                visual_style_preset=row["visual_style_preset"],
+                next_episode_number=row["next_episode_number"],
+                is_active=bool(row["is_active"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+
+    def list_content_series(self, channel_id: str, active_only: bool = True) -> List[ContentSeries]:
+        with self._get_connection() as conn:
+            query = "SELECT * FROM content_series WHERE channel_id = ?"
+            params = [channel_id]
+            if active_only:
+                query += " AND is_active = 1"
+            query += " ORDER BY created_at ASC;"
+            rows = conn.execute(query, params).fetchall()
+            return [
+                ContentSeries(
+                    id=r["id"],
+                    channel_id=r["channel_id"],
+                    title=r["title"],
+                    description=r["description"],
+                    target_niche=r["target_niche"],
+                    default_format=PlatformFormat(r["default_format"]),
+                    frequency_per_week=r["frequency_per_week"],
+                    playlist_id=r["playlist_id"],
+                    visual_style_preset=r["visual_style_preset"],
+                    next_episode_number=r["next_episode_number"],
+                    is_active=bool(r["is_active"]),
+                    created_at=datetime.fromisoformat(r["created_at"]),
+                )
+                for r in rows
+            ]
+
+    def increment_series_episode(self, series_id: str) -> int:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE content_series SET next_episode_number = next_episode_number + 1 WHERE id = ?;", (series_id,))
+            cursor.execute("SELECT next_episode_number FROM content_series WHERE id = ?;", (series_id,))
+            row = cursor.fetchone()
+            conn.commit()
+            return row["next_episode_number"] if row else 1
+
+    # --- Editorial Calendar Operations ---
+    def save_editorial_slot(self, slot: EditorialSlot) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO editorial_calendar (
+                    id, channel_id, series_id, project_id, slot_time,
+                    status, target_topic, episode_number, notes, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    slot.id,
+                    slot.channel_id,
+                    slot.series_id,
+                    slot.project_id,
+                    slot.slot_time.isoformat(),
+                    slot.status.value if hasattr(slot.status, "value") else str(slot.status),
+                    slot.target_topic,
+                    slot.episode_number,
+                    slot.notes,
+                    slot.created_at.isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def get_editorial_slot(self, slot_id: str) -> Optional[EditorialSlot]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM editorial_calendar WHERE id = ?;", (slot_id,)).fetchone()
+            if not row:
+                return None
+            return EditorialSlot(
+                id=row["id"],
+                channel_id=row["channel_id"],
+                series_id=row["series_id"],
+                project_id=row["project_id"],
+                slot_time=datetime.fromisoformat(row["slot_time"]),
+                status=EditorialSlotStatus(row["status"]),
+                target_topic=row["target_topic"],
+                episode_number=row["episode_number"],
+                notes=row["notes"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+
+    def list_editorial_slots(
+        self,
+        channel_id: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[EditorialSlot]:
+        with self._get_connection() as conn:
+            query = "SELECT * FROM editorial_calendar WHERE channel_id = ?"
+            params: List[Any] = [channel_id]
+            if start_time:
+                query += " AND slot_time >= ?"
+                params.append(start_time.isoformat())
+            if end_time:
+                query += " AND slot_time <= ?"
+                params.append(end_time.isoformat())
+            query += " ORDER BY slot_time ASC;"
+            rows = conn.execute(query, params).fetchall()
+            return [
+                EditorialSlot(
+                    id=r["id"],
+                    channel_id=r["channel_id"],
+                    series_id=r["series_id"],
+                    project_id=r["project_id"],
+                    slot_time=datetime.fromisoformat(r["slot_time"]),
+                    status=EditorialSlotStatus(r["status"]),
+                    target_topic=r["target_topic"],
+                    episode_number=r["episode_number"],
+                    notes=r["notes"],
+                    created_at=datetime.fromisoformat(r["created_at"]),
+                )
+                for r in rows
+            ]
+
+    def update_editorial_slot_status(
+        self, slot_id: str, status: EditorialSlotStatus, project_id: Optional[str] = None
+    ) -> None:
+        with self._get_connection() as conn:
+            if project_id:
+                conn.execute(
+                    "UPDATE editorial_calendar SET status = ?, project_id = ? WHERE id = ?;",
+                    (status.value, project_id, slot_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE editorial_calendar SET status = ? WHERE id = ?;",
+                    (status.value, slot_id),
+                )
+            conn.commit()
+
+    # --- SEO Package Operations ---
+    def save_seo_package(self, pkg: SEOPackage) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO seo_packages (
+                    id, project_id, primary_keyword, title_variants_json, selected_title,
+                    description, chapters_json, tags_json, pinned_comment, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    pkg.id,
+                    pkg.project_id,
+                    pkg.primary_keyword,
+                    json.dumps([v.model_dump() for v in pkg.title_variants]),
+                    pkg.selected_title,
+                    pkg.description,
+                    json.dumps([c.model_dump() for c in pkg.chapters]),
+                    json.dumps(pkg.tags),
+                    pkg.pinned_comment,
+                    pkg.created_at.isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def get_seo_package(self, project_id: str) -> Optional[SEOPackage]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM seo_packages WHERE project_id = ?;", (project_id,)).fetchone()
+            if not row:
+                return None
+            return SEOPackage(
+                id=row["id"],
+                project_id=row["project_id"],
+                primary_keyword=row["primary_keyword"],
+                title_variants=[TitleVariant(**v) for v in json.loads(row["title_variants_json"])],
+                selected_title=row["selected_title"],
+                description=row["description"],
+                chapters=[Chapter(**c) for c in json.loads(row["chapters_json"])],
+                tags=json.loads(row["tags_json"]),
+                pinned_comment=row["pinned_comment"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+
+    # --- Thumbnail Operations ---
+    def save_thumbnail_package(self, pkg: ThumbnailPackage) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO thumbnails (
+                    id, project_id, file_path_16_9, file_path_9_16, headline_text,
+                    content_sha256, provenance_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    pkg.id,
+                    pkg.project_id,
+                    pkg.file_path_16_9,
+                    pkg.file_path_9_16,
+                    pkg.headline_text,
+                    pkg.content_sha256,
+                    json.dumps(pkg.provenance),
+                    pkg.created_at.isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def get_thumbnail_package(self, project_id: str) -> Optional[ThumbnailPackage]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM thumbnails WHERE project_id = ?;", (project_id,)).fetchone()
+            if not row:
+                return None
+            return ThumbnailPackage(
+                id=row["id"],
+                project_id=row["project_id"],
+                file_path_16_9=row["file_path_16_9"],
+                file_path_9_16=row["file_path_9_16"],
+                headline_text=row["headline_text"],
+                content_sha256=row["content_sha256"],
+                provenance=json.loads(row["provenance_json"]) if row["provenance_json"] else {},
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+
+    # --- YouTube API Quota Tracking Operations ---
+    def save_quota_usage_record(self, record: QuotaUsageRecord) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO quota_usage_records (
+                    id, operation, units_consumed, daily_budget,
+                    consumed_date, project_id, timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    record.id,
+                    record.operation,
+                    record.units_consumed,
+                    record.daily_budget,
+                    record.consumed_date,
+                    record.project_id,
+                    record.timestamp.isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def get_daily_quota_spent(self, consumed_date: str) -> int:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT SUM(units_consumed) as total_spent FROM quota_usage_records WHERE consumed_date = ?;",
+                (consumed_date,),
+            ).fetchone()
+            return int(row["total_spent"]) if row and row["total_spent"] is not None else 0
+
+    def get_quota_history(self, consumed_date: Optional[str] = None) -> List[QuotaUsageRecord]:
+        with self._get_connection() as conn:
+            if consumed_date:
+                rows = conn.execute(
+                    "SELECT * FROM quota_usage_records WHERE consumed_date = ? ORDER BY timestamp ASC;",
+                    (consumed_date,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM quota_usage_records ORDER BY timestamp ASC;"
+                ).fetchall()
+            return [
+                QuotaUsageRecord(
+                    id=r["id"],
+                    operation=r["operation"],
+                    units_consumed=r["units_consumed"],
+                    daily_budget=r["daily_budget"],
+                    consumed_date=r["consumed_date"],
+                    project_id=r["project_id"],
+                    timestamp=datetime.fromisoformat(r["timestamp"]),
+                )
+                for r in rows
+            ]
+

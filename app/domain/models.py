@@ -7,11 +7,14 @@ from pydantic import BaseModel, Field, model_validator
 from app.domain.enums import (
     AssetType,
     ClaimVerificationVerdict,
+    EditorialSlotStatus,
     ExperimentStatus,
     PlatformFormat,
     PrivacyStatus,
     PublicationStatus,
     QualityStatus,
+    ReviewAction,
+    TitleVariantType,
     VideoLifecycleState,
 )
 
@@ -259,6 +262,19 @@ class QualityResult(BaseModel):
     checked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class ReviewRecord(BaseModel):
+    """Human review decision and audit trail for a video project (Stage 12)."""
+
+    id: str = Field(description="Unique review record ID (e.g. rev-001)")
+    project_id: str = Field(description="Associated video project ID")
+    operator: str = Field(description="Identifier or name of human reviewer")
+    action: ReviewAction = Field(description="Review action taken (APPROVE, REJECT, RERENDER, BLOCK)")
+    notes: Optional[str] = Field(default=None, description="Reviewer comments or revision guidance")
+    approved_privacy_status: PrivacyStatus = Field(default=PrivacyStatus.PRIVATE, description="Approved publication privacy status")
+    media_overrides: Dict[str, Any] = Field(default_factory=dict, description="Requested media/parameter overrides")
+    reviewed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Timestamp of review")
+
+
 class PublicationJob(BaseModel):
     """YouTube publication and scheduling task."""
 
@@ -314,3 +330,91 @@ class VideoProject(BaseModel):
     metadata_tags: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ContentSeries(BaseModel):
+    """Represents a recurring thematic episodic series on a channel."""
+
+    id: str = Field(description="Unique series identifier (e.g. ser-001)")
+    channel_id: str = Field(description="Associated channel ID")
+    title: str = Field(description="Series title (e.g. '60-Second Deep Tech')")
+    description: Optional[str] = Field(default=None, description="Series editorial mandate")
+    target_niche: str = Field(description="Primary niche covered by this series")
+    default_format: PlatformFormat = Field(default=PlatformFormat.SHORTS_9_16)
+    frequency_per_week: int = Field(default=3, ge=1, le=14, description="Target releases per week")
+    playlist_id: Optional[str] = Field(default=None, description="Associated YouTube playlist ID")
+    visual_style_preset: str = Field(default="modern_tech", description="Preset visual style")
+    next_episode_number: int = Field(default=1, ge=1, description="Next episode counter")
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class EditorialSlot(BaseModel):
+    """A scheduled publication slot on the channel's calendar."""
+
+    id: str = Field(description="Unique slot ID (e.g. slot-20260908-1800)")
+    channel_id: str = Field(description="Associated channel ID")
+    series_id: Optional[str] = Field(default=None, description="Associated series ID if episodic")
+    project_id: Optional[str] = Field(default=None, description="Assigned video project ID")
+    slot_time: datetime = Field(description="Scheduled target release timestamp (UTC)")
+    status: EditorialSlotStatus = Field(default=EditorialSlotStatus.PLANNED)
+    target_topic: str = Field(description="Topic/keyword assigned for this release")
+    episode_number: Optional[int] = Field(default=None, description="Episodic number in series")
+    notes: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class TitleVariant(BaseModel):
+    """An individual CTR-optimized title variant targeting a specific psychological angle."""
+
+    angle: TitleVariantType = Field(description="Psychological angle (CURIOSITY_GAP, DIRECT_VALUE, PROVOCATIVE_QUESTION)")
+    title: str = Field(description="Title string (must adhere to <= 100 characters)")
+    predicted_ctr_rationale: str = Field(description="Explanation of why this title drives click-through")
+
+
+class Chapter(BaseModel):
+    """A timestamped chapter marker in a video."""
+
+    timestamp_seconds: float = Field(ge=0.0, description="Start timestamp in seconds")
+    timestamp_formatted: str = Field(description="Formatted timestamp (e.g. '00:00' or '01:23')")
+    title: str = Field(description="Chapter title")
+
+
+class SEOPackage(BaseModel):
+    """Complete metadata and algorithmic optimization package for a video."""
+
+    id: str = Field(description="Unique SEO package ID (e.g. seo-001)")
+    project_id: str = Field(description="Associated video project ID")
+    primary_keyword: str = Field(description="Core search keyword")
+    title_variants: List[TitleVariant] = Field(description="3 psychology-driven title angles")
+    selected_title: str = Field(description="Primary chosen title for publication")
+    description: str = Field(description="Fully packaged video description (hook, chapters, citations)")
+    chapters: List[Chapter] = Field(default_factory=list, description="Extracted video chapters")
+    tags: List[str] = Field(default_factory=list, description="Clustered tags (strictly <= 500 chars total)")
+    pinned_comment: str = Field(description="Engagement-trigger question for the first pinned comment")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ThumbnailPackage(BaseModel):
+    """Generated thumbnail package with multi-aspect renders and safe-zone adherence."""
+
+    id: str = Field(description="Unique thumbnail package ID (e.g. thm-001)")
+    project_id: str = Field(description="Associated video project ID")
+    file_path_16_9: Optional[str] = Field(default=None, description="Path to 1280x720 thumbnail image")
+    file_path_9_16: Optional[str] = Field(default=None, description="Path to 1080x1920 short cover image")
+    headline_text: str = Field(description="High-contrast overlay text (2-4 punchy words)")
+    content_sha256: str = Field(description="SHA-256 hash of thumbnail image")
+    provenance: Dict[str, Any] = Field(default_factory=dict, description="Generation metadata and background source")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class QuotaUsageRecord(BaseModel):
+    """Daily YouTube Data API v3 quota consumption record."""
+
+    id: str = Field(description="Unique quota record ID (e.g. qta-001)")
+    operation: str = Field(description="YouTube API operation (videos.insert, thumbnails.set, etc.)")
+    units_consumed: int = Field(ge=1, description="Quota units spent on this call")
+    daily_budget: int = Field(default=10000, description="Total daily quota allowance")
+    consumed_date: str = Field(description="Date string YYYY-MM-DD in America/Los_Angeles (PT) time")
+    project_id: Optional[str] = Field(default=None, description="Associated project if applicable")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

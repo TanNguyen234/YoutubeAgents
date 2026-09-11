@@ -104,7 +104,10 @@ ALLOWED_TRANSITIONS: Dict[VideoLifecycleState, Set[VideoLifecycleState]] = {
         VideoLifecycleState.RESEARCHING,
         VideoLifecycleState.PLANNED,
         VideoLifecycleState.SCRIPTED,
+        VideoLifecycleState.VERIFIED,
         VideoLifecycleState.PRODUCING,
+        VideoLifecycleState.READY_FOR_REVIEW,
+        VideoLifecycleState.APPROVED,
         VideoLifecycleState.BLOCKED,
     },
     VideoLifecycleState.BLOCKED: {
@@ -112,6 +115,7 @@ ALLOWED_TRANSITIONS: Dict[VideoLifecycleState, Set[VideoLifecycleState]] = {
         VideoLifecycleState.RESEARCHING,
         VideoLifecycleState.PLANNED,
         VideoLifecycleState.SCRIPTED,
+        VideoLifecycleState.VERIFIED,
         VideoLifecycleState.PRODUCING,
         VideoLifecycleState.READY_FOR_REVIEW,
         VideoLifecycleState.APPROVED,

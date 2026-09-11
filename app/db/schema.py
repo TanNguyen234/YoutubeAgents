@@ -190,6 +190,87 @@ CREATE TABLE IF NOT EXISTS state_transitions (
     transitioned_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS review_records (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    action TEXT NOT NULL,
+    notes TEXT,
+    approved_privacy_status TEXT NOT NULL DEFAULT 'private',
+    media_overrides_json TEXT,
+    reviewed_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS content_series (
+    id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    target_niche TEXT NOT NULL,
+    default_format TEXT NOT NULL DEFAULT 'shorts_9_16',
+    frequency_per_week INTEGER NOT NULL DEFAULT 3,
+    playlist_id TEXT,
+    visual_style_preset TEXT NOT NULL DEFAULT 'modern_tech',
+    next_episode_number INTEGER NOT NULL DEFAULT 1,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS editorial_calendar (
+    id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    series_id TEXT,
+    project_id TEXT,
+    slot_time TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'PLANNED',
+    target_topic TEXT NOT NULL,
+    episode_number INTEGER,
+    notes TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
+    FOREIGN KEY (series_id) REFERENCES content_series(id) ON DELETE SET NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS seo_packages (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL UNIQUE,
+    primary_keyword TEXT NOT NULL,
+    title_variants_json TEXT NOT NULL,
+    selected_title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    chapters_json TEXT NOT NULL,
+    tags_json TEXT NOT NULL,
+    pinned_comment TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS thumbnails (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    file_path_16_9 TEXT,
+    file_path_9_16 TEXT,
+    headline_text TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    provenance_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS quota_usage_records (
+    id TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,
+    units_consumed INTEGER NOT NULL,
+    daily_budget INTEGER NOT NULL DEFAULT 10000,
+    consumed_date TEXT NOT NULL,
+    project_id TEXT,
+    timestamp TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE SET NULL
+);
 """
 
 # Backwards compatibility alias
@@ -207,7 +288,10 @@ def migrate_database(db_path: Path) -> None:
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, timeout=30.0) as conn:
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA foreign_keys = ON;")
         cursor = conn.cursor()
         cursor.execute("PRAGMA user_version;")

@@ -89,3 +89,31 @@ class ClaimVerificationVerdict(str, Enum):
     REWRITE_REQUIRED = "REWRITE_REQUIRED"
     REMOVE = "REMOVE"
     UNVERIFIABLE = "UNVERIFIABLE"
+
+
+class ReviewAction(str, Enum):
+    """Action taken by a human operator during Stage 12 Human Review Gate."""
+
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+    RERENDER = "RERENDER"
+    BLOCK = "BLOCK"
+
+
+class EditorialSlotStatus(str, Enum):
+    """Lifecycle status of a scheduled editorial calendar slot."""
+
+    PLANNED = "PLANNED"
+    IN_PRODUCTION = "IN_PRODUCTION"
+    READY_FOR_REVIEW = "READY_FOR_REVIEW"
+    SCHEDULED = "SCHEDULED"
+    PUBLISHED = "PUBLISHED"
+    MISSED = "MISSED"
+
+
+class TitleVariantType(str, Enum):
+    """Psychological angle used for CTR title generation."""
+
+    CURIOSITY_GAP = "CURIOSITY_GAP"
+    DIRECT_VALUE = "DIRECT_VALUE"
+    PROVOCATIVE_QUESTION = "PROVOCATIVE_QUESTION"
