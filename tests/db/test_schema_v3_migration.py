@@ -176,10 +176,10 @@ def test_phase37_v2_to_v3(tmp_path: Path):
     # Run migration
     migrate_database(db_path)
 
-    # Verify user_version is 3
+    # Verify user_version is SCHEMA_VERSION
     conn = sqlite3.connect(db_path)
     v = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert v == 3
+    assert v == SCHEMA_VERSION
 
     # Verify new columns exist in existing tables
     t_cols = [r[1] for r in conn.execute("PRAGMA table_info(topic_candidates);").fetchall()]
@@ -216,7 +216,7 @@ def test_phase41_pseudo_v2_to_v3(tmp_path: Path):
 
     conn = sqlite3.connect(db_path)
     v = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert v == 3
+    assert v == SCHEMA_VERSION
 
     t_cols = [r[1] for r in conn.execute("PRAGMA table_info(topic_candidates);").fetchall()]
     assert "score_breakdown_json" in t_cols
@@ -224,13 +224,13 @@ def test_phase41_pseudo_v2_to_v3(tmp_path: Path):
 
 
 def test_empty_database_migration_direct_to_v3(tmp_path: Path):
-    """An empty database initialized directly must have schema version 3 and all intelligence tables."""
+    """An empty database initialized directly must have schema version 4 and all intelligence tables."""
     db_path = tmp_path / "empty_v3.db"
     repo = SQLiteRepository(db_path)
 
     conn = sqlite3.connect(db_path)
     v = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert v == 3
+    assert v == SCHEMA_VERSION
 
     tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()]
     assert "research_dossiers" in tables
@@ -241,7 +241,7 @@ def test_empty_database_migration_direct_to_v3(tmp_path: Path):
 
 
 def test_migration_v3_is_idempotent(tmp_path: Path):
-    """Running migrate_database multiple times on a v3 DB must be a safe no-op."""
+    """Running migrate_database multiple times on a DB must be a safe no-op."""
     db_path = tmp_path / "idempotent_v3.db"
     init_database(db_path)
 
@@ -251,5 +251,5 @@ def test_migration_v3_is_idempotent(tmp_path: Path):
 
     conn = sqlite3.connect(db_path)
     v = conn.execute("PRAGMA user_version;").fetchone()[0]
-    assert v == 3
+    assert v == SCHEMA_VERSION
     conn.close()

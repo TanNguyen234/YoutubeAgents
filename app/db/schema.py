@@ -3,9 +3,9 @@
 from pathlib import Path
 import sqlite3
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
-SCHEMA_V3_SQL = """
+SCHEMA_V4_SQL = """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS channels (
@@ -281,17 +281,19 @@ CREATE TABLE IF NOT EXISTS quota_usage_records (
 );
 """
 
-# Backwards compatibility alias
-SCHEMA_V2_SQL = SCHEMA_V3_SQL
+# Backwards compatibility aliases
+SCHEMA_V3_SQL = SCHEMA_V4_SQL
+SCHEMA_V2_SQL = SCHEMA_V4_SQL
 
 
 def migrate_database(db_path: Path) -> None:
-    """Migrate SQLite database to the current schema version (v3).
+    """Migrate SQLite database to the current schema version (v4).
 
     Handles:
-    - Truly empty database -> direct v3 initialization.
-    - Legacy Phase-3 database (user_version == 0 with tables or user_version == 1) -> migrate to v2 structure then v3.
-    - Pure Phase-3.7 v2 or Phase-4.1 pseudo-v2 database (user_version == 2) -> shape-aware migration to v3.
+    - Truly empty database -> direct v4 initialization.
+    - Legacy Phase-3 database (user_version == 0 with tables or user_version == 1) -> migrate to v2 structure then v3 then v4.
+    - Pure Phase-3.7 v2 or Phase-4.1 pseudo-v2 database (user_version == 2) -> shape-aware migration to v3 then v4.
+    - Phase-4 v3 database (user_version == 3) -> v4 migration (contains_synthetic_media).
     """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -310,8 +312,8 @@ def migrate_database(db_path: Path) -> None:
         user_table_count = cursor.fetchone()[0]
 
         if current_version == 0 and user_table_count == 0:
-            # Truly empty/new database: apply full v3 schema directly
-            conn.executescript(SCHEMA_V3_SQL)
+            # Truly empty/new database: apply full v4 schema directly
+            conn.executescript(SCHEMA_V4_SQL)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()
             return
@@ -373,6 +375,7 @@ def migrate_database(db_path: Path) -> None:
                 )
 
             conn.execute("PRAGMA foreign_keys = ON;")
+            current_version = 2
 
         # 2. Migrate v2 (or legacy upgraded to v2) to v3
         if current_version < 3:
@@ -410,13 +413,28 @@ def migrate_database(db_path: Path) -> None:
             if snap_cols and "is_simulated" not in snap_cols:
                 conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 0;")
 
-            # Ensure all v3 intelligence tables exist
-            conn.executescript(SCHEMA_V3_SQL)
+            # Ensure all intelligence tables exist
+            conn.executescript(SCHEMA_V4_SQL)
+            conn.execute("PRAGMA user_version = 3;")
+            conn.commit()
+            current_version = 3
+
+        # 3. Migrate v3 to v4: publication_jobs.contains_synthetic_media
+        if current_version < 4:
+            cursor.execute("PRAGMA table_info(publication_jobs);")
+            pub_cols = {row[1] for row in cursor.fetchall()}
+            if pub_cols and "contains_synthetic_media" not in pub_cols:
+                conn.execute(
+                    "ALTER TABLE publication_jobs "
+                    "ADD COLUMN contains_synthetic_media INTEGER NOT NULL DEFAULT 0;"
+                )
+            conn.executescript(SCHEMA_V4_SQL)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()
+            current_version = 4
         else:
-            # Current v3 idempotent check
-            conn.executescript(SCHEMA_V3_SQL)
+            # Current v4 idempotent check
+            conn.executescript(SCHEMA_V4_SQL)
             cursor.execute("PRAGMA table_info(topic_candidates);")
             tc_cols = {row[1] for row in cursor.fetchall()}
             if tc_cols and "score_breakdown_json" not in tc_cols:
@@ -449,9 +467,20 @@ def migrate_database(db_path: Path) -> None:
                 conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN snapshot_type TEXT NOT NULL DEFAULT 'REAL';")
             if snap_cols and "is_simulated" not in snap_cols:
                 conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 0;")
+
+            cursor.execute("PRAGMA table_info(publication_jobs);")
+            pub_cols = {row[1] for row in cursor.fetchall()}
+            if pub_cols and "contains_synthetic_media" not in pub_cols:
+                conn.execute(
+                    "ALTER TABLE publication_jobs "
+                    "ADD COLUMN contains_synthetic_media INTEGER NOT NULL DEFAULT 0;"
+                )
+
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()
 
 
 def init_database(db_path: Path) -> None:
     """Initialize or migrate database to the current schema version."""
     migrate_database(db_path)
+
