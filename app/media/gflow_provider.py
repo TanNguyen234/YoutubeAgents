@@ -28,6 +28,9 @@ class AssetGenerationAttempt(BaseModel):
     error_type: Optional[str] = Field(default=None, description="Error classification category")
     error_message: Optional[str] = Field(default=None, description="Detailed error diagnostic")
     latency_ms: Optional[int] = Field(default=None, ge=0, description="Execution duration in milliseconds")
+    requested_modality: Optional[str] = Field(default=None, description="Modality initially requested")
+    actual_modality: Optional[str] = Field(default=None, description="Modality actually rendered")
+    fallback_reason: Optional[str] = Field(default=None, description="Explanation for fallback if rerouted")
 
 
 class GFlowError(RuntimeError):

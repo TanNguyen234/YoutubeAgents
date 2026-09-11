@@ -1,7 +1,9 @@
 """Auto Director Service coordinating multi-shot decomposition, modality dispatch, and timeline composition."""
 
 import hashlib
+import inspect
 from pathlib import Path
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -152,6 +154,25 @@ class AutoDirectorService:
         t0 = time.time()
         modality = shot.visual_modality
         shot_id = shot.shot_id
+
+        # Stock video check: if requested but no stock provider is installed, explicitly record fallback attempt and route
+        if modality == VisualModality.STOCK_VIDEO:
+            fallback_modality = VisualModality.GENERATED_VIDEO if (self.gflow_provider and hasattr(self.gflow_provider, "generate_video")) else VisualModality.MOTION_GRAPHICS
+            self.asset_attempts.append(
+                AssetGenerationAttempt(
+                    shot_id=shot_id,
+                    provider="stock_video_provider",
+                    modality=VisualModality.STOCK_VIDEO.value,
+                    requested_modality=VisualModality.STOCK_VIDEO.value,
+                    actual_modality=fallback_modality.value,
+                    fallback_reason="STOCK_VIDEO is unsupported: no stock media provider configured",
+                    success=False,
+                    error_type="UnsupportedModalityError",
+                    error_message="No stock video provider configured or available",
+                    latency_ms=0,
+                )
+            )
+            modality = fallback_modality
 
         # Modality A: DIAGRAM
         if modality == VisualModality.DIAGRAM:
@@ -381,7 +402,7 @@ class AutoDirectorService:
                 )
 
         # Modality G: GENERATED_VIDEO / GENERATED_IMAGE via GFlow
-        elif modality in (VisualModality.GENERATED_VIDEO, VisualModality.GENERATED_IMAGE, VisualModality.STOCK_VIDEO):
+        elif modality in (VisualModality.GENERATED_VIDEO, VisualModality.GENERATED_IMAGE):
             if self.gflow_provider:
                 prompt = shot.generation_prompt or shot.narration_segment
                 if modality == VisualModality.GENERATED_VIDEO and hasattr(self.gflow_provider, "generate_video"):
