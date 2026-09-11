@@ -173,3 +173,23 @@ def test_regenerate_single_shot_updates_only_target(tmp_path: Path):
 
     assert new_timeline.shots[0].shot_id == target_shot.shot_id
     assert Path(new_timeline.shots[0].asset_path).exists()
+
+
+def test_final_creative_report_uses_resolved_channel_profile(repo_with_verified_project, tmp_path):
+    """Ensure MediaProductionPipeline's visual_evaluator uses the channel's resolved creative profile, not default."""
+    from app.media.director.profiles import get_channel_profile_for_niche
+
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_profile_qa",
+    )
+
+    proj, qa_res, manifest = pipeline.run_production(project_id=project_id)
+
+    expected_profile = get_channel_profile_for_niche("Distributed Systems & Database Engineering")
+    assert pipeline.visual_evaluator.profile.name == expected_profile.name
+    assert pipeline.visual_evaluator.profile.name == manifest.creative_profile
+    assert pipeline.director.evaluator.profile.name == pipeline.visual_evaluator.profile.name

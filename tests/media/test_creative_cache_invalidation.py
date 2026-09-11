@@ -196,3 +196,7 @@ def test_artifact_fingerprint_changes_when_assets_change():
         audio_sha256="audio_sha_abc",
         subtitle_sha256="sub_sha_xyz",
     )
+
+
+# Alias for explicit regression test naming
+test_artifact_fingerprint_changes_when_visual_assets_change = test_artifact_fingerprint_changes_when_assets_change
