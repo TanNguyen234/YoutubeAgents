@@ -280,9 +280,21 @@ class StoryboardPlanner:
                     shot_chart_data = []
                     for i, (num_val, unit_val) in enumerate(metric_matches[:4]):
                         cleaned_unit = unit_val.strip()
+                        # Detect semantic label context from surrounding text or key entities
+                        context_label = f"Metric ({cleaned_unit})"
+                        if beat.key_entities and i < len(beat.key_entities):
+                            context_label = f"{beat.key_entities[i]} ({cleaned_unit})"
+                        else:
+                            escaped_num = re.escape(num_val)
+                            ctx_m = re.search(r"(\b[A-Za-z0-9_-]+\b)\s+(?:was|is|at|reached|achieved|by)?\s*" + escaped_num, beat.narration, flags=re.IGNORECASE)
+                            if ctx_m:
+                                context_label = f"{ctx_m.group(1).title()} ({cleaned_unit})"
+                            else:
+                                context_label = f"Measurement {i+1} ({cleaned_unit})"
+
                         shot_chart_data.append(
                             ChartDatum(
-                                label=f"Metric {i+1} ({cleaned_unit})",
+                                label=context_label,
                                 value=float(num_val),
                                 unit=cleaned_unit,
                                 source_ref=beat.source_refs[0] if beat.source_refs else None,

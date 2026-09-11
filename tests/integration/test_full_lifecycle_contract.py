@@ -26,8 +26,9 @@ from app.services.topic_evaluator import TopicEvaluationOutput
 
 
 @pytest.fixture
-def mock_lifecycle_setup():
+def mock_lifecycle_setup(monkeypatch):
     """Setup safe non-live backend, database, and repository for contract testing."""
+    monkeypatch.setattr("app.services.youtube_oauth.YouTubeOAuthManager.has_valid_token", lambda self: False)
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
         db_path = Path(tmp_dir) / "contract_test.db"
         init_database(db_path)
@@ -206,3 +207,96 @@ def test_full_lifecycle_constructs_thumbnail_designer_with_output_dir(mock_lifec
     assert "proj-thumb-01" in str(init_calls[0]["output_dir"])
     assert Path(receipt["thumbnail_package"]["file_path_16_9"]).exists()
     assert Path(receipt["thumbnail_package"]["file_path_9_16"]).exists()
+
+
+def test_full_autonomous_lifecycle_non_live_smoke(mock_lifecycle_setup, monkeypatch):
+    """Level 3 integration test: executes full 15-stage lifecycle end-to-end without mocking internal orchestration."""
+    pipeline, repo, channel, tmp_dir = mock_lifecycle_setup
+
+    # Explicitly ensure OAuth manager is treated as non-credentialed for deterministic dry-run isolation
+    monkeypatch.setattr("app.services.youtube_oauth.YouTubeOAuthManager.has_valid_token", lambda self: False)
+
+    receipt = pipeline.run_full_autonomous_lifecycle(
+        project_id="proj-smoke-01",
+        channel=channel,
+        keyword="Mastering SQLite WAL Concurrency",
+        seed_urls=["https://sqlite.org/wal.html"],
+        series_title="Storage Mastery",
+        enable_gflow=False,
+        auto_approve=True,
+        approved_privacy=PrivacyStatus.PRIVATE,
+        operator_name="SmokeTester",
+    )
+
+    # 1. Receipt completeness
+    assert "project" in receipt
+    assert "fact_report" in receipt
+    assert "qa_result" in receipt
+    assert "render_manifest" in receipt
+    assert "seo_package" in receipt
+    assert "thumbnail_package" in receipt
+    assert "review_record" in receipt
+    assert "publication_job" in receipt
+    assert "analytics_snapshot" in receipt
+    assert "strategy_analysis" in receipt
+
+    # 2. Assert safe non-live execution reached BLOCKED (due to absence of live OAuth token)
+    project = repo.get_video_project("proj-smoke-01")
+    assert project.state == VideoLifecycleState.BLOCKED
+    assert receipt["project"].state == VideoLifecycleState.BLOCKED
+
+    # 3. QA and Render Manifest Integrity
+    qa_res = receipt["qa_result"]
+    assert qa_res["passed"] is True
+    manifest = receipt["render_manifest"]
+    assert manifest["qa_verdict"] == "PASSED"
+    assert manifest["creative_profile"] == "Editorial Tech Shorts"
+    assert manifest["contains_synthetic_media"] is False
+
+    # 4. SEO and Thumbnail Generation Integrity
+    seo_pkg = receipt["seo_package"]
+    assert seo_pkg["selected_title"] is not None
+    assert "Mastering SQLite WAL Concurrency" in seo_pkg["primary_keyword"]
+    thumb_pkg = receipt["thumbnail_package"]
+    assert Path(thumb_pkg["file_path_16_9"]).exists()
+    assert Path(thumb_pkg["file_path_9_16"]).exists()
+
+    # 5. Review Gate Integrity
+    review_rec = receipt["review_record"]
+    assert review_rec["action"] == "APPROVE"
+    assert review_rec["approved_privacy_status"] in (PrivacyStatus.PRIVATE, PrivacyStatus.PRIVATE.value)
+
+    # 6. Publication and Safe Isolation Invariants
+    pub_job = receipt["publication_job"]
+    assert pub_job["status"] == "PENDING"
+    assert pub_job["contains_synthetic_media"] is False
+    assert "Awaiting live OAuth credentials" in (pub_job["error_message"] or "")
+
+    # Analytics must be None for BLOCKED projects (no simulation requested)
+    assert receipt["analytics_snapshot"] is None
+
+    # Strategy analysis ran on channel
+    assert receipt["strategy_analysis"] is not None
+
+
+def test_lifecycle_error_handling_not_stranded(mock_lifecycle_setup, monkeypatch):
+    """Verify that if media production fails, project does not remain stranded in PRODUCING or UPLOADING."""
+    pipeline, repo, channel, tmp_dir = mock_lifecycle_setup
+
+    def mock_failing_synthesize(*args, **kwargs):
+        raise RuntimeError("TTS synthesized voice engine failure")
+
+    monkeypatch.setattr("app.media.tts.edge_tts_backend.EdgeTTSBackend.synthesize", mock_failing_synthesize)
+
+    with pytest.raises(Exception, match="TTS synthesized voice engine failure"):
+        pipeline.run_full_autonomous_lifecycle(
+            project_id="proj-fail-01",
+            channel=channel,
+            keyword="Mastering SQLite WAL Concurrency",
+            seed_urls=["https://sqlite.org/wal.html"],
+            auto_approve=True,
+        )
+
+    # State must transition to FAILED or BLOCKED, not remain stranded in PRODUCING
+    project = repo.get_video_project("proj-fail-01")
+    assert project.state in (VideoLifecycleState.FAILED, VideoLifecycleState.BLOCKED)

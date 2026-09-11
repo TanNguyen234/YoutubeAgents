@@ -91,12 +91,17 @@ class ThumbnailDesignerService:
         width, height = target_size
 
         # 1. Base Image
-        if bg_path and Path(bg_path).exists():
-            with Image.open(bg_path) as src_img:
-                src_rgb = src_img.convert("RGB")
-                # Resize and crop to fill
-                base = self._crop_to_fill(src_rgb, width, height)
-        else:
+        base = None
+        if bg_path and Path(bg_path).exists() and Path(bg_path).suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+            try:
+                with Image.open(bg_path) as src_img:
+                    src_rgb = src_img.convert("RGB")
+                    # Resize and crop to fill
+                    base = self._crop_to_fill(src_rgb, width, height)
+            except Exception:
+                base = None
+
+        if base is None:
             # Fallback high-contrast dark gradient canvas
             base = Image.new("RGB", (width, height), color=(15, 23, 42))
 

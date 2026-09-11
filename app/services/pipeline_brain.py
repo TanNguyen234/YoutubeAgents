@@ -369,7 +369,11 @@ class BrainPipeline:
         thumb_service = ThumbnailDesignerService(self.repo, thumb_output_dir)
         bg_asset = None
         for a in project.assets:
-            if a.asset_type in (AssetType.IMAGE, AssetType.SCENE_CARD) and Path(a.file_path).exists():
+            if (
+                a.asset_type in (AssetType.IMAGE, AssetType.SCENE_CARD)
+                and Path(a.file_path).exists()
+                and Path(a.file_path).suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
+            ):
                 bg_asset = Path(a.file_path)
                 break
 
@@ -479,6 +483,7 @@ class BrainPipeline:
 
         return {
             "project_id": project.id,
+            "project": project,
             "final_state": project.state.value,
             "channel_title": channel.title,
             "keyword": keyword,
@@ -490,6 +495,7 @@ class BrainPipeline:
             },
             "qa_result": {
                 "status": "PASSED" if qa_result.passed else "FAILED",
+                "passed": qa_result.passed,
                 "loudness_lufs": qa_result.loudness_lufs,
                 "duration_seconds": qa_result.video_duration,
                 "issues": qa_result.issues,
@@ -499,9 +505,13 @@ class BrainPipeline:
                 "final_video_sha256": render_manifest.final_video_sha256,
                 "production_fingerprint": render_manifest.production_fingerprint,
                 "scene_count": render_manifest.scene_count,
+                "qa_verdict": render_manifest.qa_verdict,
+                "creative_profile": render_manifest.creative_profile,
+                "contains_synthetic_media": render_manifest.contains_synthetic_media,
             },
             "seo_package": {
                 "selected_title": seo_pkg.selected_title,
+                "primary_keyword": seo_pkg.primary_keyword,
                 "title_variants_count": len(seo_pkg.title_variants),
                 "chapters_count": len(seo_pkg.chapters),
                 "tags_count": len(seo_pkg.tags),
@@ -517,6 +527,7 @@ class BrainPipeline:
                 "operator": review_record.operator if review_record else None,
                 "action": review_record.action.value if review_record else None,
                 "privacy": review_record.approved_privacy_status.value if review_record else None,
+                "approved_privacy_status": review_record.approved_privacy_status.value if review_record else None,
             } if review_record else None,
             "quota_status": {
                 "daily_limit": quota_mgr.daily_limit,
@@ -527,6 +538,8 @@ class BrainPipeline:
                 "job_id": pub_job.id if pub_job else None,
                 "status": pub_job.status.value if pub_job else None,
                 "youtube_video_id": pub_job.youtube_video_id if pub_job else None,
+                "contains_synthetic_media": pub_job.contains_synthetic_media if pub_job else False,
+                "error_message": pub_job.error_message if pub_job else None,
                 "mode": pub_mode,
             } if pub_job else None,
             "analytics_snapshot": {
@@ -539,5 +552,6 @@ class BrainPipeline:
                 "mean_views": strategy_analysis.get("mean_views", 0.0),
                 "recommendations": strategy_analysis.get("recommendations", []),
             },
+            "strategy_analysis": strategy_analysis,
         }
 
