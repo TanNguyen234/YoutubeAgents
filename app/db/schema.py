@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS channels (
     niche TEXT NOT NULL,
     target_audience TEXT NOT NULL,
     default_language TEXT NOT NULL DEFAULT 'en',
+    youtube_category_id TEXT NOT NULL DEFAULT '28',
+    made_for_kids INTEGER NOT NULL DEFAULT 0,
+    default_tags_json TEXT,
     is_active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
@@ -150,7 +153,9 @@ CREATE TABLE IF NOT EXISTS publication_jobs (
 CREATE TABLE IF NOT EXISTS analytics_snapshots (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
-    youtube_video_id TEXT NOT NULL,
+    youtube_video_id TEXT,
+    snapshot_type TEXT NOT NULL DEFAULT 'REAL',
+    is_simulated INTEGER NOT NULL DEFAULT 0,
     views INTEGER NOT NULL DEFAULT 0,
     watch_time_hours REAL NOT NULL DEFAULT 0.0,
     ctr_percent REAL NOT NULL DEFAULT 0.0,
@@ -199,6 +204,7 @@ CREATE TABLE IF NOT EXISTS review_records (
     action TEXT NOT NULL,
     notes TEXT,
     approved_privacy_status TEXT NOT NULL DEFAULT 'private',
+    approval_origin TEXT NOT NULL DEFAULT 'AUTOMATION',
     media_overrides_json TEXT,
     reviewed_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
@@ -382,6 +388,27 @@ def migrate_database(db_path: Path) -> None:
             if script_cols and "content_format" not in script_cols:
                 conn.execute("ALTER TABLE scripts ADD COLUMN content_format TEXT NOT NULL DEFAULT 'EXPLAINER';")
 
+            cursor.execute("PRAGMA table_info(channels);")
+            chan_cols = {row[1] for row in cursor.fetchall()}
+            if chan_cols and "youtube_category_id" not in chan_cols:
+                conn.execute("ALTER TABLE channels ADD COLUMN youtube_category_id TEXT NOT NULL DEFAULT '28';")
+            if chan_cols and "made_for_kids" not in chan_cols:
+                conn.execute("ALTER TABLE channels ADD COLUMN made_for_kids INTEGER NOT NULL DEFAULT 0;")
+            if chan_cols and "default_tags_json" not in chan_cols:
+                conn.execute("ALTER TABLE channels ADD COLUMN default_tags_json TEXT;")
+
+            cursor.execute("PRAGMA table_info(review_records);")
+            rev_cols = {row[1] for row in cursor.fetchall()}
+            if rev_cols and "approval_origin" not in rev_cols:
+                conn.execute("ALTER TABLE review_records ADD COLUMN approval_origin TEXT NOT NULL DEFAULT 'AUTOMATION';")
+
+            cursor.execute("PRAGMA table_info(analytics_snapshots);")
+            snap_cols = {row[1] for row in cursor.fetchall()}
+            if snap_cols and "snapshot_type" not in snap_cols:
+                conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN snapshot_type TEXT NOT NULL DEFAULT 'REAL';")
+            if snap_cols and "is_simulated" not in snap_cols:
+                conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 0;")
+
             # Ensure all v3 intelligence tables exist
             conn.executescript(SCHEMA_V3_SQL)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
@@ -400,6 +427,27 @@ def migrate_database(db_path: Path) -> None:
                 conn.execute("ALTER TABLE scripts ADD COLUMN sections_json TEXT;")
             if script_cols and "content_format" not in script_cols:
                 conn.execute("ALTER TABLE scripts ADD COLUMN content_format TEXT NOT NULL DEFAULT 'EXPLAINER';")
+
+            cursor.execute("PRAGMA table_info(channels);")
+            chan_cols = {row[1] for row in cursor.fetchall()}
+            if chan_cols and "youtube_category_id" not in chan_cols:
+                conn.execute("ALTER TABLE channels ADD COLUMN youtube_category_id TEXT NOT NULL DEFAULT '28';")
+            if chan_cols and "made_for_kids" not in chan_cols:
+                conn.execute("ALTER TABLE channels ADD COLUMN made_for_kids INTEGER NOT NULL DEFAULT 0;")
+            if chan_cols and "default_tags_json" not in chan_cols:
+                conn.execute("ALTER TABLE channels ADD COLUMN default_tags_json TEXT;")
+
+            cursor.execute("PRAGMA table_info(review_records);")
+            rev_cols = {row[1] for row in cursor.fetchall()}
+            if rev_cols and "approval_origin" not in rev_cols:
+                conn.execute("ALTER TABLE review_records ADD COLUMN approval_origin TEXT NOT NULL DEFAULT 'AUTOMATION';")
+
+            cursor.execute("PRAGMA table_info(analytics_snapshots);")
+            snap_cols = {row[1] for row in cursor.fetchall()}
+            if snap_cols and "snapshot_type" not in snap_cols:
+                conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN snapshot_type TEXT NOT NULL DEFAULT 'REAL';")
+            if snap_cols and "is_simulated" not in snap_cols:
+                conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 0;")
             conn.commit()
 
 

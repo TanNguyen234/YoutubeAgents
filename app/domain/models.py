@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, model_validator
 
 from app.domain.enums import (
+    ApprovalOrigin,
     AssetType,
     ClaimVerificationVerdict,
     ContentFormat,
@@ -29,6 +30,9 @@ class Channel(BaseModel):
     niche: str = Field(description="Primary content niche")
     target_audience: str = Field(description="Audience persona definition")
     default_language: str = Field(default="en", description="Default content language code")
+    youtube_category_id: str = Field(default="28", description="YouTube category ID")
+    made_for_kids: bool = Field(default=False, description="Whether channel content is made for kids")
+    default_tags: List[str] = Field(default_factory=list, description="Default channel tags")
     is_active: bool = Field(default=True, description="Channel active status")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -281,6 +285,7 @@ class ReviewRecord(BaseModel):
     action: ReviewAction = Field(description="Review action taken (APPROVE, REJECT, RERENDER, BLOCK)")
     notes: Optional[str] = Field(default=None, description="Reviewer comments or revision guidance")
     approved_privacy_status: PrivacyStatus = Field(default=PrivacyStatus.PRIVATE, description="Approved publication privacy status")
+    approval_origin: ApprovalOrigin = Field(default=ApprovalOrigin.AUTOMATION, description="Provenance of approval: HUMAN, AUTOMATION, or TEST")
     media_overrides: Dict[str, Any] = Field(default_factory=dict, description="Requested media/parameter overrides")
     reviewed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Timestamp of review")
 
@@ -305,7 +310,9 @@ class AnalyticsSnapshot(BaseModel):
 
     id: str = Field(description="Unique snapshot ID")
     project_id: str = Field(description="Associated project ID")
-    youtube_video_id: str = Field(description="YouTube video ID")
+    youtube_video_id: Optional[str] = Field(default=None, description="YouTube video ID")
+    snapshot_type: str = Field(default="REAL", description="REAL or SIMULATED")
+    is_simulated: bool = Field(default=False, description="Whether this snapshot is simulated")
     views: int = Field(default=0, ge=0)
     watch_time_hours: float = Field(default=0.0, ge=0.0)
     ctr_percent: float = Field(default=0.0, ge=0.0, le=100.0)

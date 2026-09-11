@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.core.backend import AntigravityCLIBackend, ReasoningBackend
 from app.db.repository import SQLiteRepository
 from app.domain.enums import (
+    ApprovalOrigin,
     ContentFormat,
     EditorialSlotStatus,
     PrivacyStatus,
@@ -289,6 +290,8 @@ class BrainPipeline:
         auto_approve: bool = True,
         approved_privacy: PrivacyStatus = PrivacyStatus.PRIVATE,
         operator_name: str = "AutonomousOperator",
+        approval_origin: ApprovalOrigin = ApprovalOrigin.AUTOMATION,
+        allow_autonomous_public: bool = False,
         voice: Optional[str] = None,
         rate: str = "+0%",
         pitch: str = "+0Hz",
@@ -320,13 +323,15 @@ class BrainPipeline:
             keyword=keyword,
             seed_urls=seed_urls,
             recent_topics=recent_topics,
+            series_continuity=continuity,
             content_format=content_format,
         )
 
         if slot_id:
             cal_service.book_slot(slot_id, project_id)
 
-        # 2. Stages 6-11: Visual Planning, GFlow Media, TTS, Subtitles, FFmpeg Rendering, Automated QA
+        # 2. Stages 6-10: Multimodal Production (MediaProductionPipeline with AutoDirector)
+        # Canonical GFlow provider passed cleanly
         gflow_prov = GFlowMediaProvider() if enable_gflow else None
         scene_planner = ScenePlanner(gflow_provider=gflow_prov)
         media_pipeline = MediaProductionPipeline(
@@ -335,28 +340,32 @@ class BrainPipeline:
             gflow_provider=gflow_prov,
         )
 
-        project, qa_result, render_manifest = media_pipeline.run_production(
+        media_pipeline.produce_video(
             project_id=project_id,
             voice=voice,
             rate=rate,
             pitch=pitch,
         )
+        project = self.repo.get_video_project(project_id) or project
 
-        # 3. Stage 11.5: SEO & Multi-Variant Packaging Engine
+        # 3. Stage 11: Final Media QA Evaluation
+        qa_evaluator = MediaQAEvaluator(self.repo)
+        qa_result = qa_evaluator.evaluate_project(project_id)
+        project = self.repo.get_video_project(project_id) or project
+        render_manifest = getattr(project, "render_manifest", None)
+
+        # 4. Stage 11.5: High-Impact Thumbnail Generation & SEO Packaging
         seo_service = SEOOptimizerService(self.repo)
-        seo_pkg = seo_service.generate_and_save_seo_package(
-            project_id=project_id,
-            primary_keyword=keyword,
-            series_context=continuity,
-            sources_summary=fact_report.audit_summary,
-        )
+        seo_pkg = seo_service.generate_seo_package(project_id=project_id)
 
-        # 4. Stage 11.6: High-CTR Thumbnail Designer & Compositor
-        work_dir = Path(render_manifest.final_video_path).parent
-        thumb_dir = work_dir / "thumbnails"
-        thumb_service = ThumbnailDesignerService(self.repo, output_dir=thumb_dir)
-        headline_words = " ".join(keyword.split()[:3])
-        bg_asset = render_manifest.visual_assets[0]["path"] if render_manifest.visual_assets else None
+        thumb_service = ThumbnailDesignerService(self.repo)
+        bg_asset = None
+        for a in project.assets:
+            if a.asset_type in (AssetType.IMAGE, AssetType.SCENE_CARD) and Path(a.file_path).exists():
+                bg_asset = Path(a.file_path)
+                break
+
+        headline_words = " ".join(keyword.split()[:4]).upper()
         thumb_pkg = thumb_service.create_thumbnail_package(
             project_id=project_id,
             headline_text=headline_words,
@@ -374,6 +383,8 @@ class BrainPipeline:
                 action=ReviewAction.APPROVE,
                 notes="Automated lifecycle verification approval.",
                 approved_privacy_status=approved_privacy,
+                approval_origin=approval_origin,
+                allow_autonomous_public=allow_autonomous_public,
             )
             project = self.repo.get_video_project(project_id) or project
 
@@ -413,19 +424,46 @@ class BrainPipeline:
         # 8. Stage 14: YouTube Analytics Tracking
         analytics_tracker = YouTubeAnalyticsTracker(self.repo)
         analytics_snapshot = None
-        if project.state in (VideoLifecycleState.PUBLISHED, VideoLifecycleState.SCHEDULED) or (
-            project.state == VideoLifecycleState.BLOCKED and simulate_analytics_views is not None
-        ):
-            views_to_record = simulate_analytics_views if simulate_analytics_views is not None else 0
-            analytics_snapshot = analytics_tracker.record_snapshot(
-                project_id=project_id,
-                views=views_to_record,
-                watch_time_hours=round(views_to_record * 0.035, 2),
-                ctr_percent=7.8 if views_to_record > 0 else 0.0,
-                average_view_duration_seconds=round(project.quality.duration_seconds * 0.65, 1) if project.quality else 20.0,
-                retention_at_3s_percent=68.5 if views_to_record > 0 else 0.0,
-                youtube_video_id=pub_job.youtube_video_id if pub_job else None,
-            )
+        # Never record analytics for BLOCKED projects. Only track for PUBLISHED or SCHEDULED.
+        if project.state in (VideoLifecycleState.PUBLISHED, VideoLifecycleState.SCHEDULED):
+            yt_id = pub_job.youtube_video_id if pub_job else None
+            if not yt_id:
+                jobs = self.repo.get_publication_queue()
+                for j in jobs:
+                    if j.project_id == project_id and j.youtube_video_id:
+                        yt_id = j.youtube_video_id
+                        break
+
+            if simulate_analytics_views is not None:
+                # Explicitly requested simulation
+                analytics_snapshot = analytics_tracker.record_snapshot(
+                    project_id=project_id,
+                    views=simulate_analytics_views,
+                    watch_time_hours=round(simulate_analytics_views * 0.035, 2),
+                    ctr_percent=7.8 if simulate_analytics_views > 0 else 0.0,
+                    average_view_duration_seconds=round(project.quality.duration_seconds * 0.65, 1) if project.quality else 20.0,
+                    retention_at_3s_percent=68.5 if simulate_analytics_views > 0 else 0.0,
+                    youtube_video_id=yt_id,
+                    is_simulated=True,
+                )
+            elif yt_id and not yt_id.startswith("yt-dryrun-"):
+                # Initial production baseline capture with real YouTube video ID
+                analytics_snapshot = analytics_tracker.record_snapshot(
+                    project_id=project_id,
+                    views=0,
+                    watch_time_hours=0.0,
+                    ctr_percent=0.0,
+                    average_view_duration_seconds=0.0,
+                    retention_at_3s_percent=None,
+                    youtube_video_id=yt_id,
+                    is_simulated=False,
+                )
+            else:
+                # No verified YouTube video ID yet; do not invent fake analytics
+                analytics_snapshot = None
+        elif project.state == VideoLifecycleState.BLOCKED:
+            # Cleanly skip analytics on BLOCKED projects
+            analytics_snapshot = None
 
         # 9. Stage 15: Strategy Feedback Loop
         strategy_feedback = StrategyFeedbackLoop(self.repo)

@@ -30,6 +30,7 @@ class YouTubeAnalyticsTracker:
         average_view_duration_seconds: float,
         retention_at_3s_percent: Optional[float] = None,
         youtube_video_id: Optional[str] = None,
+        is_simulated: bool = False,
     ) -> AnalyticsSnapshot:
         """Create and persist a performance snapshot for a project."""
         project = self.repo.get_video_project(project_id)
@@ -50,14 +51,22 @@ class YouTubeAnalyticsTracker:
                 if j.project_id == project_id and j.youtube_video_id:
                     video_id = j.youtube_video_id
                     break
+
+        if is_simulated:
+            snapshot_type = "SIMULATED"
             if not video_id:
-                video_id = f"yt-auto-{project_id[:8]}"
+                video_id = f"sim-{project_id[:8]}"
+        else:
+            snapshot_type = "REAL"
+            # Do NOT invent fake youtube video ID like yt-auto-...
 
         snapshot_id = f"snap-{uuid4().hex[:8]}"
         snapshot = AnalyticsSnapshot(
             id=snapshot_id,
             project_id=project_id,
             youtube_video_id=video_id,
+            snapshot_type=snapshot_type,
+            is_simulated=is_simulated,
             views=max(0, views),
             watch_time_hours=max(0.0, float(watch_time_hours)),
             ctr_percent=max(0.0, min(100.0, float(ctr_percent))),

@@ -13,7 +13,12 @@ class StrategyFeedbackLoop:
 
     def analyze_channel_performance(self, channel_id: str) -> Dict[str, Any]:
         """Compute performance baselines and identify top-performing content themes for a channel."""
-        snapshots = self.repo.get_channel_analytics(channel_id)
+        raw_snapshots = self.repo.get_channel_analytics(channel_id)
+        # Exclude simulated metrics so simulated data never feeds production strategy learning
+        snapshots = [
+            s for s in raw_snapshots
+            if not getattr(s, "is_simulated", False) and getattr(s, "snapshot_type", "REAL") != "SIMULATED"
+        ]
         if not snapshots:
             return {
                 "channel_id": channel_id,

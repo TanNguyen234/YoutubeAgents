@@ -8,6 +8,7 @@ from typing import List, Optional
 
 from app.db.schema import init_database
 from app.domain.enums import (
+    ApprovalOrigin,
     AssetType,
     ClaimVerificationVerdict,
     ContentFormat,
@@ -71,17 +72,21 @@ class SQLiteRepository:
 
     # --- Channel Operations ---
     def save_channel(self, channel: Channel) -> None:
+        tags_json = json.dumps(channel.default_tags) if channel.default_tags else None
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO channels (id, title, handle, niche, target_audience, default_language, is_active, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO channels (id, title, handle, niche, target_audience, default_language, youtube_category_id, made_for_kids, default_tags_json, is_active, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title,
                     handle=excluded.handle,
                     niche=excluded.niche,
                     target_audience=excluded.target_audience,
                     default_language=excluded.default_language,
+                    youtube_category_id=excluded.youtube_category_id,
+                    made_for_kids=excluded.made_for_kids,
+                    default_tags_json=excluded.default_tags_json,
                     is_active=excluded.is_active;
                 """,
                 (
@@ -91,6 +96,9 @@ class SQLiteRepository:
                     channel.niche,
                     channel.target_audience,
                     channel.default_language,
+                    channel.youtube_category_id,
+                    1 if channel.made_for_kids else 0,
+                    tags_json,
                     1 if channel.is_active else 0,
                     channel.created_at.isoformat(),
                 ),
@@ -101,6 +109,10 @@ class SQLiteRepository:
             row = conn.execute("SELECT * FROM channels WHERE id = ?", (channel_id,)).fetchone()
             if not row:
                 return None
+            keys = row.keys()
+            cat_id = row["youtube_category_id"] if "youtube_category_id" in keys and row["youtube_category_id"] else "28"
+            kids = bool(row["made_for_kids"]) if "made_for_kids" in keys and row["made_for_kids"] is not None else False
+            tags = json.loads(row["default_tags_json"]) if "default_tags_json" in keys and row["default_tags_json"] else []
             return Channel(
                 id=row["id"],
                 title=row["title"],
@@ -108,6 +120,9 @@ class SQLiteRepository:
                 niche=row["niche"],
                 target_audience=row["target_audience"],
                 default_language=row["default_language"],
+                youtube_category_id=cat_id,
+                made_for_kids=kids,
+                default_tags=tags,
                 is_active=bool(row["is_active"]),
                 created_at=datetime.fromisoformat(row["created_at"]),
             )
@@ -746,16 +761,18 @@ class SQLiteRepository:
     # --- Review Gate Operations (Stage 12) ---
     def save_review_record(self, record: ReviewRecord) -> None:
         overrides_json = json.dumps(record.media_overrides) if record.media_overrides else None
+        origin_val = record.approval_origin.value if hasattr(record.approval_origin, "value") else str(record.approval_origin)
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO review_records (id, project_id, operator, action, notes, approved_privacy_status, media_overrides_json, reviewed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO review_records (id, project_id, operator, action, notes, approved_privacy_status, approval_origin, media_overrides_json, reviewed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     operator=excluded.operator,
                     action=excluded.action,
                     notes=excluded.notes,
                     approved_privacy_status=excluded.approved_privacy_status,
+                    approval_origin=excluded.approval_origin,
                     media_overrides_json=excluded.media_overrides_json,
                     reviewed_at=excluded.reviewed_at;
                 """,
@@ -766,6 +783,7 @@ class SQLiteRepository:
                     record.action.value,
                     record.notes,
                     record.approved_privacy_status.value,
+                    origin_val,
                     overrides_json,
                     record.reviewed_at.isoformat(),
                 ),
@@ -777,19 +795,28 @@ class SQLiteRepository:
                 "SELECT * FROM review_records WHERE project_id = ? ORDER BY reviewed_at ASC;",
                 (project_id,),
             ).fetchall()
-            return [
-                ReviewRecord(
-                    id=r["id"],
-                    project_id=r["project_id"],
-                    operator=r["operator"],
-                    action=ReviewAction(r["action"]),
-                    notes=r["notes"],
-                    approved_privacy_status=PrivacyStatus(r["approved_privacy_status"]),
-                    media_overrides=json.loads(r["media_overrides_json"]) if r["media_overrides_json"] else {},
-                    reviewed_at=datetime.fromisoformat(r["reviewed_at"]),
+            results = []
+            for r in rows:
+                keys = r.keys()
+                app_origin = (
+                    ApprovalOrigin(r["approval_origin"])
+                    if "approval_origin" in keys and r["approval_origin"]
+                    else ApprovalOrigin.AUTOMATION
                 )
-                for r in rows
-            ]
+                results.append(
+                    ReviewRecord(
+                        id=r["id"],
+                        project_id=r["project_id"],
+                        operator=r["operator"],
+                        action=ReviewAction(r["action"]),
+                        notes=r["notes"],
+                        approved_privacy_status=PrivacyStatus(r["approved_privacy_status"]),
+                        approval_origin=app_origin,
+                        media_overrides=json.loads(r["media_overrides_json"]) if r["media_overrides_json"] else {},
+                        reviewed_at=datetime.fromisoformat(r["reviewed_at"]),
+                    )
+                )
+            return results
 
     def get_latest_review(self, project_id: str) -> Optional[ReviewRecord]:
         history = self.get_review_history(project_id)
@@ -800,9 +827,11 @@ class SQLiteRepository:
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO analytics_snapshots (id, project_id, youtube_video_id, views, watch_time_hours, ctr_percent, average_view_duration_seconds, retention_at_3s_percent, captured_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO analytics_snapshots (id, project_id, youtube_video_id, snapshot_type, is_simulated, views, watch_time_hours, ctr_percent, average_view_duration_seconds, retention_at_3s_percent, captured_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                    snapshot_type=excluded.snapshot_type,
+                    is_simulated=excluded.is_simulated,
                     views=excluded.views,
                     watch_time_hours=excluded.watch_time_hours,
                     ctr_percent=excluded.ctr_percent,
@@ -814,6 +843,8 @@ class SQLiteRepository:
                     snapshot.id,
                     snapshot.project_id,
                     snapshot.youtube_video_id,
+                    snapshot.snapshot_type,
+                    1 if snapshot.is_simulated else 0,
                     snapshot.views,
                     snapshot.watch_time_hours,
                     snapshot.ctr_percent,
@@ -829,20 +860,27 @@ class SQLiteRepository:
                 "SELECT * FROM analytics_snapshots WHERE project_id = ? ORDER BY captured_at ASC;",
                 (project_id,),
             ).fetchall()
-            return [
-                AnalyticsSnapshot(
-                    id=r["id"],
-                    project_id=r["project_id"],
-                    youtube_video_id=r["youtube_video_id"],
-                    views=r["views"],
-                    watch_time_hours=r["watch_time_hours"],
-                    ctr_percent=r["ctr_percent"],
-                    average_view_duration_seconds=r["average_view_duration_seconds"],
-                    retention_at_3s_percent=r["retention_at_3s_percent"],
-                    captured_at=datetime.fromisoformat(r["captured_at"]),
+            results = []
+            for r in rows:
+                keys = r.keys()
+                snap_type = r["snapshot_type"] if "snapshot_type" in keys and r["snapshot_type"] else "REAL"
+                sim = bool(r["is_simulated"]) if "is_simulated" in keys and r["is_simulated"] is not None else False
+                results.append(
+                    AnalyticsSnapshot(
+                        id=r["id"],
+                        project_id=r["project_id"],
+                        youtube_video_id=r["youtube_video_id"],
+                        snapshot_type=snap_type,
+                        is_simulated=sim,
+                        views=r["views"],
+                        watch_time_hours=r["watch_time_hours"],
+                        ctr_percent=r["ctr_percent"],
+                        average_view_duration_seconds=r["average_view_duration_seconds"],
+                        retention_at_3s_percent=r["retention_at_3s_percent"],
+                        captured_at=datetime.fromisoformat(r["captured_at"]),
+                    )
                 )
-                for r in rows
-            ]
+            return results
 
     def get_channel_analytics(self, channel_id: str) -> List[AnalyticsSnapshot]:
         with self._get_connection() as conn:
@@ -855,20 +893,27 @@ class SQLiteRepository:
                 """,
                 (channel_id,),
             ).fetchall()
-            return [
-                AnalyticsSnapshot(
-                    id=r["id"],
-                    project_id=r["project_id"],
-                    youtube_video_id=r["youtube_video_id"],
-                    views=r["views"],
-                    watch_time_hours=r["watch_time_hours"],
-                    ctr_percent=r["ctr_percent"],
-                    average_view_duration_seconds=r["average_view_duration_seconds"],
-                    retention_at_3s_percent=r["retention_at_3s_percent"],
-                    captured_at=datetime.fromisoformat(r["captured_at"]),
+            results = []
+            for r in rows:
+                keys = r.keys()
+                snap_type = r["snapshot_type"] if "snapshot_type" in keys and r["snapshot_type"] else "REAL"
+                sim = bool(r["is_simulated"]) if "is_simulated" in keys and r["is_simulated"] is not None else False
+                results.append(
+                    AnalyticsSnapshot(
+                        id=r["id"],
+                        project_id=r["project_id"],
+                        youtube_video_id=r["youtube_video_id"],
+                        snapshot_type=snap_type,
+                        is_simulated=sim,
+                        views=r["views"],
+                        watch_time_hours=r["watch_time_hours"],
+                        ctr_percent=r["ctr_percent"],
+                        average_view_duration_seconds=r["average_view_duration_seconds"],
+                        retention_at_3s_percent=r["retention_at_3s_percent"],
+                        captured_at=datetime.fromisoformat(r["captured_at"]),
+                    )
                 )
-                for r in rows
-            ]
+            return results
 
     # --- Content Series Operations ---
     def save_content_series(self, series: ContentSeries) -> None:

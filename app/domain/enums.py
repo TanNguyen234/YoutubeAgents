@@ -137,3 +137,9 @@ class ContentFormat(str, Enum):
     PROBLEM_SOLUTION = "PROBLEM_SOLUTION"
 
 
+class ApprovalOrigin(str, Enum):
+    """Provenance of human or automated review approval."""
+
+    HUMAN = "HUMAN"
+    AUTOMATION = "AUTOMATION"
+    TEST = "TEST"

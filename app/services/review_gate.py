@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from app.db.repository import SQLiteRepository
-from app.domain.enums import PrivacyStatus, ReviewAction, VideoLifecycleState
+from app.domain.enums import ApprovalOrigin, PrivacyStatus, ReviewAction, VideoLifecycleState
 from app.domain.models import ReviewRecord, VideoProject
 
 
@@ -51,7 +51,9 @@ class HumanReviewGateService:
         action: ReviewAction,
         notes: Optional[str] = None,
         approved_privacy_status: PrivacyStatus = PrivacyStatus.PRIVATE,
+        approval_origin: ApprovalOrigin = ApprovalOrigin.AUTOMATION,
         media_overrides: Optional[Dict[str, Any]] = None,
+        allow_autonomous_public: bool = False,
     ) -> ReviewRecord:
         """Execute a review decision, advance the project lifecycle, and record an immutable review audit record."""
         project = self.repo.get_video_project(project_id)
@@ -63,6 +65,18 @@ class HumanReviewGateService:
                 f"Review gate requires project in READY_FOR_REVIEW or QA_FAILED, but '{project_id}' is in {project.state.value}."
             )
 
+        # Enforce approval provenance policy
+        if action == ReviewAction.APPROVE:
+            if operator == "AutonomousOperator" and approval_origin == ApprovalOrigin.HUMAN:
+                raise ReviewGateError("AutonomousOperator cannot masquerade as ApprovalOrigin.HUMAN.")
+            if approved_privacy_status in (PrivacyStatus.PUBLIC, PrivacyStatus.UNLISTED):
+                if approval_origin != ApprovalOrigin.HUMAN and not allow_autonomous_public:
+                    raise ReviewGateError(
+                        f"Approval for {approved_privacy_status.value} publication requires ApprovalOrigin.HUMAN "
+                        f"(got {approval_origin.value}). Autonomous operator '{operator}' cannot approve "
+                        f"public/unlisted releases without explicit allow_autonomous_public=True override."
+                    )
+
         overrides = media_overrides or {}
         record_id = f"rev-{uuid4().hex[:8]}"
         record = ReviewRecord(
@@ -72,6 +86,7 @@ class HumanReviewGateService:
             action=action,
             notes=notes,
             approved_privacy_status=approved_privacy_status,
+            approval_origin=approval_origin,
             media_overrides=overrides,
             reviewed_at=datetime.now(timezone.utc),
         )
@@ -85,7 +100,7 @@ class HumanReviewGateService:
             self.repo.update_project_state(
                 project_id=project.id,
                 to_state=VideoLifecycleState.APPROVED,
-                reason=f"Approved by operator {operator}: {notes or 'No notes provided'}",
+                reason=f"Approved by operator {operator} ({approval_origin.value}): {notes or 'No notes provided'}",
                 expected_current_state=current_state,
             )
         elif action == ReviewAction.REJECT:

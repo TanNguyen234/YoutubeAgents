@@ -1,6 +1,7 @@
 """Domain package exporting models, enumerations, and state machine."""
 
 from app.domain.enums import (
+    ApprovalOrigin,
     AssetType,
     ClaimVerificationVerdict,
     EditorialSlotStatus,
@@ -45,6 +46,7 @@ from app.domain.state_machine import (
 __all__ = [
     "ALLOWED_TRANSITIONS",
     "AnalyticsSnapshot",
+    "ApprovalOrigin",
     "Asset",
     "AssetType",
     "Channel",
