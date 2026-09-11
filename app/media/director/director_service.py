@@ -18,9 +18,11 @@ from app.media.director.models import (
     ShotTimeline,
     Storyboard,
     TimelineShot,
+    VisualEvaluation,
     VisualIntent,
     VisualModality,
 )
+from app.media.director.quality_evaluator import VisualShotEvaluator
 from app.media.director.storyboard_planner import StoryboardPlanner
 from app.media.gflow_provider import AssetGenerationAttempt
 from app.media.renderers.chart_renderer import ChartRenderer
@@ -46,6 +48,7 @@ class AutoDirectorService:
         planner: Optional[StoryboardPlanner] = None,
         visual_factory: Optional[VisualFactory] = None,
         gflow_provider: Optional[Any] = None,
+        evaluator: Optional[VisualShotEvaluator] = None,
     ):
         self.profile = profile or ChannelCreativeProfile()
         self.decomposer = decomposer or BeatDecomposer()
@@ -53,6 +56,7 @@ class AutoDirectorService:
         self.planner = planner or StoryboardPlanner(router=self.router, profile=self.profile)
         self.visual_factory = visual_factory or VisualFactory()
         self.gflow_provider = gflow_provider
+        self.evaluator = evaluator or VisualShotEvaluator(profile=self.profile)
 
         # Renderers
         self.diagram_renderer = DiagramRenderer()
@@ -60,8 +64,10 @@ class AutoDirectorService:
         self.motion_renderer = MotionGraphicsRenderer()
         self.evidence_renderer = EvidenceRenderer()
 
-        # Audit logs
+        # Audit logs & QA tracking
         self.asset_attempts: List[AssetGenerationAttempt] = []
+        self.shot_evaluations: Dict[str, VisualEvaluation] = {}
+        self.shot_attempt_counts: Dict[str, int] = {}
 
     def plan_and_render_timeline(
         self,
@@ -73,7 +79,7 @@ class AutoDirectorService:
         content_format: ContentFormat = ContentFormat.EXPLAINER,
         dossier: Optional[ResearchDossier] = None,
     ) -> Tuple[ShotTimeline, Storyboard]:
-        """Execute full director workflow: Decompose -> Plan Storyboard -> Dispatch Renderers -> Assemble Timeline."""
+        """Execute full director workflow: Decompose -> Plan Storyboard -> Dispatch Renderers -> QA Evaluate -> Selective Retry -> Assemble Timeline."""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         shots_dir = output_dir / "shots"
@@ -99,9 +105,10 @@ class AutoDirectorService:
         storyboard_path = output_dir / f"storyboard_{project_id}.json"
         self.planner.save_storyboard_artifact(storyboard, storyboard_path)
 
-        # 3. Render and assemble each shot on the timeline
+        # 3. Render, evaluate, and assemble each shot on the timeline
         timeline_shots: List[TimelineShot] = []
         cur_time = 0.0
+        max_creative_retries = 2
 
         for shot_idx, shot in enumerate(storyboard.shots):
             shot_start = cur_time
@@ -117,6 +124,53 @@ class AutoDirectorService:
                 channel_name=channel_name,
                 dossier=dossier,
             )
+
+            # 14. Execute evaluate_shot() before final render
+            asset_exists = Path(asset_path).exists() and Path(asset_path).stat().st_size > 0
+            evaluation = self.evaluator.evaluate_shot(shot=shot, asset_exists=asset_exists)
+            attempt_count = 1
+
+            # 15. Limited selective regeneration loop
+            while evaluation.recommendation == "REGENERATE" and attempt_count <= max_creative_retries:
+                attempt_count += 1
+                fallback_mod = None
+                if any("duplication" in issue.lower() for issue in evaluation.issues):
+                    shot.headline_text = None
+                if any("STATIC_CARD" in issue for issue in evaluation.issues) or shot.visual_modality == VisualModality.STATIC_CARD:
+                    fallback_mod = VisualModality.DIAGRAM
+                elif not asset_exists:
+                    fallback_mod = VisualModality.DIAGRAM
+
+                if fallback_mod:
+                    shot.visual_modality = fallback_mod
+
+                asset_path, asset_hash = self._generate_shot_asset(
+                    shot=shot,
+                    shot_index=shot_idx,
+                    output_dir=shots_dir,
+                    script_title=script.title,
+                    channel_name=channel_name,
+                    dossier=dossier,
+                )
+                asset_exists = Path(asset_path).exists() and Path(asset_path).stat().st_size > 0
+                evaluation = self.evaluator.evaluate_shot(shot=shot, asset_exists=asset_exists)
+
+            # Safe semantic fallback if still failing after retries
+            if evaluation.recommendation == "REGENERATE" and not asset_exists:
+                shot.visual_modality = VisualModality.DIAGRAM
+                asset_path, asset_hash = self._generate_shot_asset(
+                    shot=shot,
+                    shot_index=shot_idx,
+                    output_dir=shots_dir,
+                    script_title=script.title,
+                    channel_name=channel_name,
+                    dossier=dossier,
+                )
+                asset_exists = Path(asset_path).exists()
+                evaluation = self.evaluator.evaluate_shot(shot=shot, asset_exists=asset_exists)
+
+            self.shot_evaluations[shot.shot_id] = evaluation
+            self.shot_attempt_counts[shot.shot_id] = attempt_count
 
             t_shot = TimelineShot(
                 shot_id=shot.shot_id,

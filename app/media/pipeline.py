@@ -594,15 +594,26 @@ class MediaProductionPipeline:
             )
 
             # 12b. Creative Visual Quality Evaluation Report
+            visual_report = None
             if used_director and timeline and storyboard:
                 failed_attempts = len([a for a in getattr(self.director, "asset_attempts", []) if not a.success])
                 visual_report = self.visual_evaluator.generate_quality_report(
                     timeline=timeline,
                     storyboard=storyboard,
                     failed_attempts=failed_attempts,
+                    director_fallback_occurred=not used_director,
                 )
                 report_path = proj_dir / "manifests" / f"creative_qa_report_{project_id}.json"
                 report_path.write_text(visual_report.model_dump_json(indent=2), encoding="utf-8")
+
+            # Evaluate Creative QA release gate
+            creative_failed = False
+            creative_fail_reasons: List[str] = []
+            if visual_report and visual_report.creative_status == "FAIL":
+                creative_failed = True
+                creative_fail_reasons = visual_report.critical_failures
+                quality_domain.status = QualityStatus.FAILED
+                quality_domain.issues.extend(creative_fail_reasons)
 
             # Persist QualityResult directly and via project to DB
             self.repo.save_quality_result(quality_domain)
@@ -618,6 +629,9 @@ class MediaProductionPipeline:
                 audio_sha256=tts_res.audio_sha256,
                 subtitle_sha256=sub_track.content_sha256,
             )
+
+            all_qa_issues = list(qa_res.issues) + creative_fail_reasons
+            qa_passed = qa_res.passed and not creative_failed
 
             manifest = RenderManifest(
                 project_id=project_id,
@@ -665,26 +679,28 @@ class MediaProductionPipeline:
                 fps=qa_res.fps,
                 audio_mode=render_prof.audio_mode.value,
                 measured_loudness_lufs=qa_res.loudness_lufs,
-                qa_verdict="PASSED" if qa_res.passed else "FAILED",
-                qa_issues=qa_res.issues,
+                qa_verdict="PASSED" if qa_passed else "FAILED",
+                qa_issues=all_qa_issues,
             )
-
 
             manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
 
             # 14. Final State Gate: RENDERED -> READY_FOR_REVIEW or QA_FAILED
-            if qa_res.passed:
+            if qa_passed:
+                qa_note = f"Technical QA PASSED (Duration: {qa_res.video_duration}s, Loudness: {qa_res.loudness_lufs} LUFS)"
+                if visual_report:
+                    qa_note += f", Creative QA: {visual_report.creative_status}"
                 self.repo.update_project_state(
                     project_id=project_id,
                     to_state=VideoLifecycleState.READY_FOR_REVIEW,
-                    reason=f"Technical QA PASSED (Duration: {qa_res.video_duration}s, Loudness: {qa_res.loudness_lufs} LUFS)",
+                    reason=qa_note,
                     expected_current_state=VideoLifecycleState.RENDERED,
                 )
             else:
                 self.repo.update_project_state(
                     project_id=project_id,
                     to_state=VideoLifecycleState.QA_FAILED,
-                    reason=f"Technical QA FAILED: {', '.join(qa_res.issues)}",
+                    reason=f"QA FAILED: {', '.join(all_qa_issues)}",
                     expected_current_state=VideoLifecycleState.RENDERED,
                 )
 

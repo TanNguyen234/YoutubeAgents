@@ -1,5 +1,6 @@
 """Visual Quality Assurance Evaluator, Duplication Scoring, and Dead-Air Detection."""
 
+from pathlib import Path
 import re
 from typing import Dict, List, Optional, Set
 
@@ -120,14 +121,15 @@ class VisualShotEvaluator:
             recommendation = "REGENERATE"
 
         return VisualEvaluation(
-            visual_relevance=0.85,
+            evaluation_mode="METADATA_HEURISTIC",
+            visual_relevance=None,
             narration_duplication=duplication,
             information_value=info_value,
             motion_value=motion_value,
-            continuity=0.8,
-            evidence_strength=0.9 if modality == VisualModality.DOCUMENT_EVIDENCE else 0.5,
-            readability=0.9,
-            aesthetic_quality=0.85,
+            continuity=None,
+            evidence_strength=1.0 if (modality == VisualModality.DOCUMENT_EVIDENCE and getattr(shot, "evidence_binding", None)) else (0.0 if modality == VisualModality.DOCUMENT_EVIDENCE else None),
+            readability=None,
+            aesthetic_quality=None,
             overall_score=overall,
             issues=issues,
             recommendation=recommendation,
@@ -158,23 +160,37 @@ class VisualShotEvaluator:
         storyboard: Storyboard,
         failed_attempts: int = 0,
         max_static_card_ratio: float = 0.15,
+        director_fallback_occurred: bool = False,
     ) -> VideoQualityReport:
         """Build a comprehensive machine-readable quality report for the completed video production."""
         total_shots = len(timeline.shots)
         total_dur = timeline.total_duration if timeline.total_duration > 0 else sum(s.duration for s in timeline.shots)
         avg_duration = round(total_dur / total_shots, 2) if total_shots > 0 else 0.0
 
-        # Modality distribution
+        # Modality distribution and motion metrics
         modality_dist: Dict[str, int] = {}
         static_card_duration = 0.0
+        static_semantic_duration = 0.0
+        ken_burns_duration = 0.0
+        true_motion_duration = 0.0
 
         for shot in timeline.shots:
             mod_name = shot.modality.value if hasattr(shot.modality, "value") else str(shot.modality)
             modality_dist[mod_name] = modality_dist.get(mod_name, 0) + 1
             if shot.modality == VisualModality.STATIC_CARD:
                 static_card_duration += shot.duration
+                ken_burns_duration += shot.duration
+            elif shot.modality in (VisualModality.DIAGRAM, VisualModality.DATA_VISUALIZATION, VisualModality.COMPARISON, VisualModality.DOCUMENT_EVIDENCE):
+                static_semantic_duration += shot.duration
+            elif shot.modality == VisualModality.GENERATED_IMAGE:
+                ken_burns_duration += shot.duration
+            elif shot.modality in (VisualModality.MOTION_GRAPHICS, VisualModality.CODE_ANIMATION, VisualModality.UI_SIMULATION, VisualModality.GENERATED_VIDEO, VisualModality.STOCK_VIDEO):
+                true_motion_duration += shot.duration
 
         static_card_ratio = round(static_card_duration / total_dur, 3) if total_dur > 0 else 0.0
+        static_semantic_ratio = round(static_semantic_duration / total_dur, 3) if total_dur > 0 else 0.0
+        ken_burns_only_ratio = round(ken_burns_duration / total_dur, 3) if total_dur > 0 else 0.0
+        true_motion_ratio = round(true_motion_duration / total_dur, 3) if total_dur > 0 else 0.0
 
         # Dead air warnings
         dead_air_warnings = self.detect_visual_dead_air(timeline)
@@ -188,10 +204,57 @@ class VisualShotEvaluator:
                     f"NARRATION_DUPLICATION: shot '{spec.shot_id}' score {dup_score:.2f} repeats spoken words in headline '{spec.headline_text}'"
                 )
 
+        critical_failures: List[str] = []
+        warnings: List[str] = []
+
+        # 1. Timeline continuity
+        continuity_issues = timeline.validate_continuity()
+        if continuity_issues:
+            critical_failures.extend(continuity_issues)
+
+        # 2. Missing assets
+        for shot in timeline.shots:
+            p = Path(shot.asset_path)
+            if not p.exists() or p.stat().st_size == 0:
+                critical_failures.append(f"MISSING_ASSET: Shot '{shot.shot_id}' asset is missing or empty at {shot.asset_path}")
+
+        # 3. Grounding violations
+        for spec in storyboard.shots:
+            if spec.visual_modality == VisualModality.DOCUMENT_EVIDENCE and not getattr(spec, "evidence_binding", None):
+                critical_failures.append(f"UNGROUNDED_EVIDENCE: Shot '{spec.shot_id}' has DOCUMENT_EVIDENCE without verified EvidenceBinding.")
+            if spec.visual_modality == VisualModality.DATA_VISUALIZATION and not getattr(spec, "chart_data", None):
+                critical_failures.append(f"FABRICATED_DATA: Shot '{spec.shot_id}' has DATA_VISUALIZATION without grounded ChartDatum points.")
+
+        # 4. Severe duplication (> 0.85)
+        for spec in storyboard.shots:
+            dup_score = calculate_narration_duplication(spec.narration_segment, spec.headline_text)
+            if dup_score >= 0.85:
+                critical_failures.append(f"EXCESSIVE_DUPLICATION: Shot '{spec.shot_id}' duplication score {dup_score:.2f} strictly repeats spoken words.")
+
+        # 5. Static card threshold
         if static_card_ratio > max_static_card_ratio:
             dead_air_warnings.append(
                 f"WARNING: {static_card_ratio * 100:.1f}% of visual runtime is static-card based. Target for this format is <= {max_static_card_ratio * 100:.0f}%."
             )
+
+        if static_card_ratio > 0.50:
+            critical_failures.append(f"EXCESSIVE_STATIC_RATIO: {static_card_ratio * 100:.1f}% of runtime is static cards (max allowable 50%).")
+        elif static_card_ratio > max_static_card_ratio:
+            warnings.append(f"HIGH_STATIC_RATIO: {static_card_ratio * 100:.1f}% of runtime is static cards (target <= {max_static_card_ratio * 100:.0f}%).")
+
+        # 6. Unexpected total fallback
+        if director_fallback_occurred:
+            warnings.append("DIRECTOR_FALLBACK: AutoDirectorService encountered failure, legacy ScenePlanner was used.")
+
+        warnings.extend(dead_air_warnings)
+        warnings.extend(duplication_warnings)
+
+        if critical_failures:
+            creative_status = "FAIL"
+        elif warnings:
+            creative_status = "PASS_WITH_WARNINGS"
+        else:
+            creative_status = "PASS"
 
         # Compute overall visual score
         score = 1.0
@@ -199,15 +262,23 @@ class VisualShotEvaluator:
         score -= min(0.2, len(dead_air_warnings) * 0.05)
         score -= min(0.2, len(duplication_warnings) * 0.05)
         score -= min(0.15, failed_attempts * 0.03)
+        if critical_failures:
+            score -= 0.4
         overall_score = max(0.1, round(score, 2))
 
         return VideoQualityReport(
             total_shots=total_shots,
             average_shot_duration=avg_duration,
             static_card_ratio=static_card_ratio,
+            static_semantic_ratio=static_semantic_ratio,
+            ken_burns_only_ratio=ken_burns_only_ratio,
+            true_motion_ratio=true_motion_ratio,
             modality_distribution=modality_dist,
             visual_dead_air_warnings=dead_air_warnings,
             narration_duplication_warnings=duplication_warnings,
             failed_asset_attempts=failed_attempts,
             overall_visual_score=overall_score,
+            creative_status=creative_status,
+            critical_failures=critical_failures,
+            warnings=warnings,
         )

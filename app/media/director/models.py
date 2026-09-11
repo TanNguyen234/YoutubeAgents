@@ -234,19 +234,20 @@ class Storyboard(BaseModel):
 class VisualEvaluation(BaseModel):
     """Quality evaluation metrics for an individual visual shot."""
 
-    visual_relevance: float = Field(default=0.8, ge=0.0, le=1.0, description="Relevance to subject concept")
+    visual_relevance: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Estimated visual relevance (None if not VLM-evaluated)")
     narration_duplication: float = Field(
         default=0.1,
         ge=0.0,
         le=1.0,
         description="Penalty for repeating narration verbatim on screen (0 = distinct, 1 = duplicate slide)",
     )
-    information_value: float = Field(default=0.8, ge=0.0, le=1.0, description="How much new information visuals add")
-    motion_value: float = Field(default=0.7, ge=0.0, le=1.0, description="Dynamic visual motion score")
-    continuity: float = Field(default=0.8, ge=0.0, le=1.0, description="Continuity with previous shot")
-    evidence_strength: float = Field(default=0.5, ge=0.0, le=1.0, description="Grounding / empirical proof score")
-    readability: float = Field(default=0.9, ge=0.0, le=1.0, description="Clarity and legibility of graphics")
-    aesthetic_quality: float = Field(default=0.85, ge=0.0, le=1.0, description="Visual finish and style consistency")
+    information_value: float = Field(default=0.8, ge=0.0, le=1.0, description="Heuristic score of how much information visuals add")
+    motion_value: float = Field(default=0.7, ge=0.0, le=1.0, description="Heuristic motion potential score")
+    continuity: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Estimated continuity (None if not VLM-evaluated)")
+    evidence_strength: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Grounding / empirical proof score")
+    readability: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Estimated readability (None if not VLM-evaluated)")
+    aesthetic_quality: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Estimated aesthetic quality (None if not VLM-evaluated)")
+    evaluation_mode: str = Field(default="METADATA_HEURISTIC", description="Evaluation engine: METADATA_HEURISTIC or VLM_INSPECTED")
     overall_score: float = Field(default=0.8, ge=0.0, le=1.0, description="Weighted composite score")
     issues: List[str] = Field(default_factory=list, description="Detected visual defects or warnings")
     recommendation: str = Field(default="ACCEPT", description="ACCEPT, REGENERATE, or REPLAN")
@@ -258,11 +259,17 @@ class VideoQualityReport(BaseModel):
     total_shots: int = Field(ge=0, description="Total number of discrete visual shots")
     average_shot_duration: float = Field(ge=0.0, description="Mean shot length in seconds")
     static_card_ratio: float = Field(ge=0.0, le=1.0, description="Proportion of runtime spent on static cards")
+    static_semantic_ratio: float = Field(default=0.0, ge=0.0, le=1.0, description="Proportion of runtime on static diagrams/charts")
+    ken_burns_only_ratio: float = Field(default=0.0, ge=0.0, le=1.0, description="Proportion of runtime on stills with pan/zoom only")
+    true_motion_ratio: float = Field(default=0.0, ge=0.0, le=1.0, description="Proportion of runtime on true animated/video assets")
     modality_distribution: Dict[str, int] = Field(default_factory=dict, description="Count of shots by modality")
     visual_dead_air_warnings: List[str] = Field(default_factory=list, description="Warnings for excessively long static shots")
     narration_duplication_warnings: List[str] = Field(default_factory=list, description="Warnings for slides repeating spoken words")
     failed_asset_attempts: int = Field(default=0, ge=0, description="Number of failed generation attempts")
     overall_visual_score: float = Field(default=1.0, ge=0.0, le=1.0, description="Overall director quality score")
+    creative_status: str = Field(default="PASS", description="Creative QA release status: PASS, PASS_WITH_WARNINGS, or FAIL")
+    critical_failures: List[str] = Field(default_factory=list, description="Hard failures preventing release")
+    warnings: List[str] = Field(default_factory=list, description="Non-blocking warnings")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
