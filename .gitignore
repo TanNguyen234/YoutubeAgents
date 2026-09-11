@@ -51,6 +51,9 @@ config/oauth_token*.json
 credentials.json
 config/credentials.json
 oauth_credentials.json
+data/credentials/
+credentials/
+token.json
 
 # Databases & Local Storage
 *.sqlite
@@ -69,6 +72,8 @@ data/evidence/*
 !data/.gitkeep
 references/*
 !references/.gitkeep
+scratch/
+*.wav
 
 # Testing & Linting Caches
 .pytest_cache/
