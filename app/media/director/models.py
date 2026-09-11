@@ -66,6 +66,13 @@ class VisualModality(str, Enum):
     STATIC_CARD = "STATIC_CARD"  # Explicitly low-priority fallback
 
 
+class VisualizationDataMode(str, Enum):
+    """Semantic data grounding mode: GROUNDED requires verified evidence; CONCEPTUAL prohibits empirical claims."""
+
+    GROUNDED = "GROUNDED"
+    CONCEPTUAL = "CONCEPTUAL"
+
+
 from app.domain.enums import ContentFormat
 
 
@@ -122,6 +129,9 @@ class NarrativeBeat(BaseModel):
     source_refs: List[str] = Field(default_factory=list, description="Associated source citations")
     chart_data: List[ChartDatum] = Field(default_factory=list, description="Explicit grounded chart numbers")
     evidence_binding: Optional[EvidenceBinding] = Field(default=None, description="Verified source binding")
+    visual_data_mode: VisualizationDataMode = Field(
+        default=VisualizationDataMode.GROUNDED, description="Grounding data mode: GROUNDED vs CONCEPTUAL"
+    )
 
 
 class MotionCue(BaseModel):
@@ -167,6 +177,9 @@ class ShotSpec(BaseModel):
     evidence_binding: Optional[EvidenceBinding] = Field(default=None, description="Grounded source evidence binding")
     code_output_lines: List[str] = Field(default_factory=list, description="Verified output lines for terminal execution")
     terminal_mode: str = Field(default="ILLUSTRATIVE_TERMINAL", description="REAL_TERMINAL vs ILLUSTRATIVE_TERMINAL")
+    visual_data_mode: VisualizationDataMode = Field(
+        default=VisualizationDataMode.GROUNDED, description="Grounding data mode: GROUNDED vs CONCEPTUAL"
+    )
     motion_cues: List[MotionCue] = Field(default_factory=list, description="Explicit temporal animation cues for true motion graphics")
 
 

@@ -5,10 +5,13 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import List, Optional, Tuple, Union
+from typing import Iterable, Iterator, List, Optional, Tuple, Union
+import logging
 from PIL import Image, ImageDraw, ImageFont
 
-from app.media.director.models import MissingGroundedVisualData
+from app.media.director.models import MissingGroundedVisualData, VisualizationDataMode
+
+logger = logging.getLogger(__name__)
 
 
 class MotionGraphicsRenderer:
@@ -240,6 +243,7 @@ class MotionGraphicsRenderer:
         output_path: Path,
         duration: float = 3.5,
         fps: int = 24,
+        data_mode: VisualizationDataMode = VisualizationDataMode.CONCEPTUAL,
     ) -> Tuple[str, str]:
         """Render a true temporal animation demonstrating LLM next-token selection:
         prompt typing -> candidate tokens appear -> bars grow -> selected token highlighted -> appended.
@@ -286,7 +290,8 @@ class MotionGraphicsRenderer:
             if t >= 0.8:
                 box2_y1, box2_y2 = 520, 1250
                 draw.rounded_rectangle([80, box2_y1, self.width - 80, box2_y2], radius=24, fill=(24, 34, 53), outline=(71, 85, 105), width=2)
-                draw.text((110, box2_y1 + 50), "NEXT-TOKEN CANDIDATES & PROBABILITIES", font=f_badge, fill=(148, 163, 184), anchor="ls")
+                box2_header = "NEXT-TOKEN CANDIDATES (ILLUSTRATIVE)" if data_mode == VisualizationDataMode.CONCEPTUAL else "NEXT-TOKEN CANDIDATES & PROBABILITIES"
+                draw.text((110, box2_y1 + 50), box2_header, font=f_badge, fill=(148, 163, 184), anchor="ls")
 
                 # Progress of bar growth (0.8s to 2.2s)
                 growth_t = max(0.0, min(1.0, (t - 1.0) / 1.1))
@@ -318,9 +323,10 @@ class MotionGraphicsRenderer:
                     bar_color = (16, 185, 129) if is_selected else (56, 189, 248)
                     draw.rounded_rectangle([320, row_y + 22, 320 + max(6, current_bar_w), row_y + 55], radius=8, fill=bar_color)
 
-                    # Percentage counter
-                    current_p = prob * ease_growth * 100
-                    draw.text((340 + current_bar_w + 15, row_y + 43), f"{current_p:.1f}%", font=f_badge, fill=(203, 213, 225), anchor="ls")
+                    # Percentage counter - show ONLY when GROUNDED
+                    if data_mode == VisualizationDataMode.GROUNDED:
+                        current_p = prob * ease_growth * 100
+                        draw.text((340 + current_bar_w + 15, row_y + 43), f"{current_p:.1f}%", font=f_badge, fill=(203, 213, 225), anchor="ls")
 
                     row_y += 140
 

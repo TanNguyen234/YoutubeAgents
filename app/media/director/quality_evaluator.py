@@ -13,6 +13,7 @@ from app.media.director.models import (
     VideoQualityReport,
     VisualEvaluation,
     VisualModality,
+    VisualizationDataMode,
 )
 
 
@@ -233,8 +234,16 @@ class VisualShotEvaluator:
         for spec in storyboard.shots:
             if spec.visual_modality == VisualModality.DOCUMENT_EVIDENCE and not getattr(spec, "evidence_binding", None):
                 critical_failures.append(f"UNGROUNDED_EVIDENCE: Shot '{spec.shot_id}' has DOCUMENT_EVIDENCE without verified EvidenceBinding.")
-            if spec.visual_modality == VisualModality.DATA_VISUALIZATION and not getattr(spec, "chart_data", None):
-                critical_failures.append(f"FABRICATED_DATA: Shot '{spec.shot_id}' has DATA_VISUALIZATION without grounded ChartDatum points.")
+            if spec.visual_modality == VisualModality.DATA_VISUALIZATION:
+                data_mode = getattr(spec, "visual_data_mode", VisualizationDataMode.GROUNDED)
+                if data_mode == VisualizationDataMode.GROUNDED and not getattr(spec, "chart_data", None):
+                    critical_failures.append(f"FABRICATED_DATA: Shot '{spec.shot_id}' has grounded DATA_VISUALIZATION without verified ChartDatum points.")
+                elif data_mode == VisualizationDataMode.CONCEPTUAL:
+                    # Conceptual data visualizations must not display ungrounded empirical numeric data points
+                    if getattr(spec, "chart_data", None):
+                        for cd in spec.chart_data:
+                            if getattr(cd, "value", None) is not None and getattr(cd, "source_ref", None) is None:
+                                warnings.append(f"CONCEPTUAL_NUMERIC_LABEL: Shot '{spec.shot_id}' is marked conceptual but contains ungrounded numeric data points.")
 
         # 4. Severe duplication (> 0.85)
         for spec in storyboard.shots:

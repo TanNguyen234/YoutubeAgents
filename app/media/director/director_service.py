@@ -21,6 +21,7 @@ from app.media.director.models import (
     VisualEvaluation,
     VisualIntent,
     VisualModality,
+    VisualizationDataMode,
 )
 from app.media.director.quality_evaluator import VisualShotEvaluator
 from app.media.director.storyboard_planner import StoryboardPlanner
@@ -278,13 +279,16 @@ class AutoDirectorService:
 
             try:
                 if is_llm_token:
+                    shot.visual_data_mode = VisualizationDataMode.CONCEPTUAL
                     target_path = output_dir / f"{shot_id}_token_anim.mp4"
+                    # Conceptual next-token distribution: normalized illustrative bar weights, no empirical percentages
                     p, h = self.motion_renderer.render_animated_token_prediction(
                         prompt_text="The capital of France is",
                         candidates=[("Paris", 0.82), ("London", 0.08), ("Berlin", 0.06), ("Rome", 0.04)],
                         selected_token="Paris",
                         output_path=target_path,
                         duration=shot.duration_seconds,
+                        data_mode=VisualizationDataMode.CONCEPTUAL,
                     )
                 elif shot.chart_data:
                     target_path = output_dir / f"{shot_id}_chart_anim.mp4"

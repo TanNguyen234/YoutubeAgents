@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
 
-from app.media.director.models import MissingGroundedVisualData
+from app.media.director.models import MissingGroundedVisualData, VisualizationDataMode
 
 
 class ChartRenderer:
@@ -36,9 +36,15 @@ class ChartRenderer:
         highlight_index: int = 0,
         subtitle: Optional[str] = None,
         show_numeric_labels: bool = True,
+        data_mode: VisualizationDataMode = VisualizationDataMode.GROUNDED,
     ) -> Tuple[str, str]:
         """Render horizontal bar chart ideal for probability distributions, benchmarks, and rankings."""
-        if not values and show_numeric_labels:
+        if data_mode == VisualizationDataMode.CONCEPTUAL:
+            show_numeric_labels = False
+            if not subtitle:
+                subtitle = "Illustrative conceptual distribution"
+
+        if data_mode == VisualizationDataMode.GROUNDED and not values and show_numeric_labels:
             raise MissingGroundedVisualData("Cannot render empirical chart without grounded numerical values.")
 
         img = Image.new("RGB", (self.width, self.height), color=(15, 23, 42))  # Slate dark
@@ -151,8 +157,9 @@ class ChartRenderer:
                     output_path=output_path,
                     unit="",
                     highlight_index=0,
-                    subtitle=subtitle,
+                    subtitle="Illustrative next-token distribution",
                     show_numeric_labels=False,
+                    data_mode=VisualizationDataMode.CONCEPTUAL,
                 )
 
         if not numbers:
