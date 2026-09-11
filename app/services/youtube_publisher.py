@@ -16,6 +16,7 @@ from app.domain.enums import (
     VideoLifecycleState,
 )
 from app.domain.models import PublicationJob, VideoProject
+from app.media.models import get_render_manifest_path
 from app.services.youtube_oauth import YouTubeOAuthManager
 from app.services.youtube_uploader import YouTubeUploader
 
@@ -33,9 +34,11 @@ class YouTubePublisherService:
         self,
         repository: SQLiteRepository,
         oauth_manager: Optional[YouTubeOAuthManager] = None,
+        base_projects_dir: Optional[Path] = None,
     ):
         self.repo = repository
         self.oauth_mgr = oauth_manager
+        self.base_projects_dir = base_projects_dir or Path("output/projects")
 
 
     def build_metadata_payload(
@@ -53,24 +56,38 @@ class YouTubePublisherService:
         kids = getattr(channel, "made_for_kids", False) if channel else False
         base_tags = list(getattr(channel, "default_tags", [])) if channel else []
 
-        # 1b. Synthetic Media Disclosure (P1-7)
-        if contains_synthetic_media is None:
-            manifest_path = Path(f"output/projects/{project.id}/manifests/render_manifest_{project.id}.json")
-            if manifest_path.exists():
+        # 1b. Synthetic Media Disclosure (P0-3)
+        manifest_path = get_render_manifest_path(project.id, self.base_projects_dir)
+        manifest_synthetic = None
+        candidates = [
+            manifest_path,
+            Path(f"output/projects/{project.id}/manifests/render_manifest.json"),
+            Path(f"output/projects/{project.id}/manifests/render_manifest_{project.id}.json"),
+        ]
+        for p in candidates:
+            if p.exists():
                 try:
                     import json
-                    m_data = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    contains_synthetic_media = bool(m_data.get("contains_synthetic_media", False))
+                    m_data = json.loads(p.read_text(encoding="utf-8"))
+                    manifest_synthetic = bool(m_data.get("contains_synthetic_media", False))
+                    break
                 except Exception:
                     pass
 
-        if contains_synthetic_media is None:
-            contains_synthetic_media = False
-            for a in (project.assets or []):
-                url = (a.source_url or "").lower()
-                if "gflow" in url or "generated_image" in url or "generated_video" in url:
-                    contains_synthetic_media = True
-                    break
+        # If canonical render manifest confirms synthetic media, it CANNOT become False during publication
+        if manifest_synthetic is True:
+            contains_synthetic_media = True
+        elif contains_synthetic_media is None:
+            if manifest_synthetic is not None:
+                contains_synthetic_media = manifest_synthetic
+            else:
+                contains_synthetic_media = False
+                for a in (project.assets or []):
+                    url = (a.source_url or "").lower()
+                    fp = (str(a.file_path) or "").lower()
+                    if "gflow" in url or "generated_image" in url or "generated_video" in url or "synthetic" in url or "gflow" in fp:
+                        contains_synthetic_media = True
+                        break
 
         # 1c. YouTube Scheduling Privacy Semantics (P1-6):
         # Under YouTube Data API v3, scheduled videos must be uploaded with privacyStatus="private"

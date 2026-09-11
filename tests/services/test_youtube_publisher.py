@@ -294,3 +294,162 @@ def test_synthetic_media_flag_derived_from_generated_assets(repo_and_tmp):
     # Publish and verify publication job records disclosure
     job, _ = service.publish_project(project.id, force_dry_run=True)
     assert job.contains_synthetic_media is True
+
+
+def test_publisher_reads_actual_render_manifest_synthetic_media(repo_and_tmp):
+    """Publisher must read contains_synthetic_media from canonical render_manifest.json."""
+    import json
+    from app.media.models import get_render_manifest_path
+
+    repo, tmp_path = repo_and_tmp
+    project = _setup_approved_project(repo, tmp_path)
+
+    base_projects = tmp_path / "output" / "projects"
+    manifest_path = get_render_manifest_path(project.id, base_dir=base_projects)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    manifest_data = {
+        "project_id": project.id,
+        "contains_synthetic_media": True,
+        "qa_verdict": "PASSED",
+    }
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+    service = YouTubePublisherService(repo, base_projects_dir=base_projects)
+    payload = service.build_metadata_payload(project)
+
+    assert payload["status"]["containsSyntheticMedia"] is True
+
+
+def test_manifest_true_cannot_become_false_during_publication(repo_and_tmp):
+    """Manifest contains_synthetic_media=True must never become False during publication."""
+    import json
+    from app.media.models import get_render_manifest_path
+
+    repo, tmp_path = repo_and_tmp
+    project = _setup_approved_project(repo, tmp_path)
+
+    base_projects = tmp_path / "output" / "projects"
+    manifest_path = get_render_manifest_path(project.id, base_dir=base_projects)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    manifest_data = {
+        "project_id": project.id,
+        "contains_synthetic_media": True,
+        "qa_verdict": "PASSED",
+    }
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+    service = YouTubePublisherService(repo, base_projects_dir=base_projects)
+
+    # Even if explicitly passed False, manifest truth MUST be preserved
+    payload = service.build_metadata_payload(project, contains_synthetic_media=False)
+    assert payload["status"]["containsSyntheticMedia"] is True
+
+    job, _ = service.publish_project(project.id, force_dry_run=True)
+    assert job.contains_synthetic_media is True
+
+
+def test_diagram_only_project_remains_non_synthetic(repo_and_tmp):
+    """A diagram/motion-graphics project without photorealistic media must remain non-synthetic."""
+    import json
+    from app.media.models import get_render_manifest_path
+
+    repo, tmp_path = repo_and_tmp
+    project = _setup_approved_project(repo, tmp_path)
+
+    base_projects = tmp_path / "output" / "projects"
+    manifest_path = get_render_manifest_path(project.id, base_dir=base_projects)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    manifest_data = {
+        "project_id": project.id,
+        "contains_synthetic_media": False,
+        "qa_verdict": "PASSED",
+    }
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+    service = YouTubePublisherService(repo, base_projects_dir=base_projects)
+    payload = service.build_metadata_payload(project)
+
+    assert payload["status"]["containsSyntheticMedia"] is False
+
+    job, _ = service.publish_project(project.id, force_dry_run=True)
+    assert job.contains_synthetic_media is False
+
+
+def test_gflow_director_asset_sets_manifest_synthetic_media(repo_and_tmp):
+    """When Director uses a GFlow generated video/image, pipeline sets manifest contains_synthetic_media=True."""
+    from app.domain.enums import PlatformFormat
+    from app.domain.models import Scene, Script, VideoProject
+    from app.media.director.models import ShotTimeline, TimelineShot, VisualModality
+    from app.media.pipeline import MediaProductionPipeline
+    from tests.media.test_media_pipeline import MockTTSBackend
+
+    repo, tmp_path = repo_and_tmp
+
+    channel = Channel(
+        id="chan-syn-01",
+        title="Pub Channel",
+        handle="@PubChannel",
+        niche="Database",
+        target_audience="Engineers",
+    )
+    repo.save_channel(channel)
+
+    script = Script(
+        id="sc-syn-01",
+        title="GFlow Synthetic Test",
+        hook="Testing synthetic media detection.",
+        scenes=[Scene(scene_index=0, narration="Testing synthetic media detection.", hook="Hook", visual_prompt="P1")],
+        total_word_count=4,
+        estimated_duration_seconds=3.0,
+    )
+    project = VideoProject(
+        id="proj-syn-dir-01",
+        channel_id=channel.id,
+        title="GFlow Synthetic Test",
+        format=PlatformFormat.SHORTS_9_16,
+        state=VideoLifecycleState.CREATED,
+        script=script,
+    )
+    repo.save_video_project(project)
+    repo.update_project_state(project.id, to_state=VideoLifecycleState.RESEARCHING)
+    repo.update_project_state(project.id, to_state=VideoLifecycleState.PLANNED)
+    repo.update_project_state(project.id, to_state=VideoLifecycleState.SCRIPTED)
+    repo.update_project_state(project.id, to_state=VideoLifecycleState.VERIFIED)
+
+    base_out = tmp_path / "out_director_syn"
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=base_out,
+    )
+
+    # Mock director returning a GENERATED_IMAGE shot with gflow provider
+    from PIL import Image
+    dummy_img = tmp_path / "shot_gflow.png"
+    Image.new("RGB", (1080, 1920), (40, 40, 60)).save(dummy_img, "PNG")
+
+    shot = TimelineShot(
+        shot_id="shot-01",
+        beat_id="beat-01",
+        start=0.0,
+        end=3.0,
+        scene_index=0,
+        modality=VisualModality.GENERATED_IMAGE,
+        duration=3.0,
+        asset_path=str(dummy_img),
+        asset_sha256="gflow_img_hash",
+    )
+    timeline = ShotTimeline(
+        project_id=project.id,
+        shots=[shot],
+        total_duration=3.0,
+    )
+
+    pipeline.director.plan_and_render_timeline = lambda *args, **kwargs: (timeline, None)
+
+    proj, qa_res, manifest = pipeline.run_production(project.id)
+    assert manifest.contains_synthetic_media is True
