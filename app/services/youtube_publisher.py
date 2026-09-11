@@ -43,6 +43,7 @@ class YouTubePublisherService:
         project: VideoProject,
         privacy_status: PrivacyStatus = PrivacyStatus.PRIVATE,
         scheduled_time: Optional[datetime] = None,
+        contains_synthetic_media: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Construct a validated YouTube Data API v3 upload payload."""
         # 1. Channel publishing defaults
@@ -51,6 +52,35 @@ class YouTubePublisherService:
         lang = getattr(channel, "default_language", "en") if channel else "en"
         kids = getattr(channel, "made_for_kids", False) if channel else False
         base_tags = list(getattr(channel, "default_tags", [])) if channel else []
+
+        # 1b. Synthetic Media Disclosure (P1-7)
+        if contains_synthetic_media is None:
+            manifest_path = Path(f"output/projects/{project.id}/manifests/render_manifest_{project.id}.json")
+            if manifest_path.exists():
+                try:
+                    import json
+                    m_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    contains_synthetic_media = bool(m_data.get("contains_synthetic_media", False))
+                except Exception:
+                    pass
+
+        if contains_synthetic_media is None:
+            contains_synthetic_media = False
+            for a in (project.assets or []):
+                url = (a.source_url or "").lower()
+                if "gflow" in url or "generated_image" in url or "generated_video" in url:
+                    contains_synthetic_media = True
+                    break
+
+        # 1c. YouTube Scheduling Privacy Semantics (P1-6):
+        # Under YouTube Data API v3, scheduled videos must be uploaded with privacyStatus="private"
+        # and publishAt set to the scheduled UTC timestamp.
+        if scheduled_time:
+            api_privacy = PrivacyStatus.PRIVATE.value
+            publish_at = scheduled_time.isoformat()
+        else:
+            api_privacy = privacy_status.value
+            publish_at = None
 
         # 2. Consume SEOPackage if present
         seo_pkg = self.repo.get_seo_package(project.id)
@@ -113,6 +143,14 @@ class YouTubePublisherService:
                 seen.add(t.lower())
                 clean_tags.append(t)
 
+        status_dict: Dict[str, Any] = {
+            "privacyStatus": api_privacy,
+            "selfDeclaredMadeForKids": kids,
+            "containsSyntheticMedia": bool(contains_synthetic_media),
+        }
+        if publish_at:
+            status_dict["publishAt"] = publish_at
+
         return {
             "snippet": {
                 "title": title,
@@ -121,11 +159,7 @@ class YouTubePublisherService:
                 "categoryId": cat_id,
                 "defaultLanguage": lang,
             },
-            "status": {
-                "privacyStatus": privacy_status.value,
-                "selfDeclaredMadeForKids": kids,
-                "publishAt": scheduled_time.isoformat() if scheduled_time else None,
-            },
+            "status": status_dict,
         }
 
     def publish_project(
@@ -265,6 +299,7 @@ class YouTubePublisherService:
             scheduled_publish_time=scheduled_time,
             youtube_video_id=yt_video_id,
             published_at=now_published,
+            contains_synthetic_media=bool(payload["status"].get("containsSyntheticMedia", False)),
             error_message=None if execution_mode == "REAL" else "Dry-run validation complete. Awaiting live OAuth credentials for upload.",
             created_at=datetime.now(timezone.utc),
         )

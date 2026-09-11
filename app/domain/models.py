@@ -301,6 +301,7 @@ class PublicationJob(BaseModel):
     scheduled_publish_time: Optional[datetime] = Field(default=None)
     youtube_video_id: Optional[str] = Field(default=None)
     published_at: Optional[datetime] = Field(default=None)
+    contains_synthetic_media: bool = Field(default=False, description="Whether this video contains synthetic or AI-generated media")
     error_message: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

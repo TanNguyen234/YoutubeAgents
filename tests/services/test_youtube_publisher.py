@@ -237,3 +237,60 @@ def test_publish_fails_if_no_master_video(repo_and_tmp):
     service = YouTubePublisherService(repo)
     with pytest.raises(YouTubePublishError, match="No valid rendered master video file found"):
         service.publish_project(project.id)
+
+
+def test_scheduled_publication_uses_valid_youtube_privacy_semantics(repo_and_tmp):
+    repo, tmp_path = repo_and_tmp
+    # Setup project with approved PUBLIC release privacy
+    project = _setup_approved_project(repo, tmp_path, privacy=PrivacyStatus.PUBLIC)
+    service = YouTubePublisherService(repo)
+
+    sched_time = datetime.now(timezone.utc) + timedelta(days=3)
+
+    # 1. Inspect metadata payload
+    payload = service.build_metadata_payload(
+        project,
+        privacy_status=PrivacyStatus.PUBLIC,
+        scheduled_time=sched_time,
+    )
+    # YouTube API invariant: status.publishAt requires privacyStatus="private" during upload
+    assert payload["status"]["privacyStatus"] == "private"
+    assert payload["status"]["publishAt"] == sched_time.isoformat()
+
+    # 2. Inspect dry-run publication job
+    job, mode = service.publish_project(project.id, scheduled_time=sched_time, force_dry_run=True)
+    assert mode == "DRY_RUN"
+    # Preserves intended approved release policy in job model
+    assert job.privacy_status == PrivacyStatus.PUBLIC
+    assert job.scheduled_publish_time == sched_time
+
+
+def test_synthetic_media_flag_derived_from_generated_assets(repo_and_tmp):
+    repo, tmp_path = repo_and_tmp
+    project = _setup_approved_project(repo, tmp_path)
+    service = YouTubePublisherService(repo)
+
+    # By default, without AI-generated photo/video assets, containsSyntheticMedia is False
+    payload_normal = service.build_metadata_payload(project)
+    assert payload_normal["status"]["containsSyntheticMedia"] is False
+
+    # Add a photorealistic AI generated asset (e.g. GFlow video)
+    gflow_asset = Asset(
+        id="ast-gflow-01",
+        project_id=project.id,
+        asset_type=AssetType.SCENE_CARD,
+        file_path=str(tmp_path / "gflow_clip.mp4"),
+        source_url="gflow://generated/realistic_render.mp4",
+        license_type="ORIGINAL_GENERATED",
+        content_sha256="gflow_sha",
+        created_at=datetime.now(timezone.utc),
+    )
+    project.assets.append(gflow_asset)
+    repo.save_video_project(project)
+
+    payload_synthetic = service.build_metadata_payload(project)
+    assert payload_synthetic["status"]["containsSyntheticMedia"] is True
+
+    # Publish and verify publication job records disclosure
+    job, _ = service.publish_project(project.id, force_dry_run=True)
+    assert job.contains_synthetic_media is True

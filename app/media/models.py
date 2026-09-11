@@ -175,6 +175,7 @@ class RenderManifest(BaseModel):
     measured_loudness_lufs: float = Field(description="Real measured EBU R128 loudness in LUFS")
     qa_verdict: str = Field(description="PASSED or FAILED")
     qa_issues: List[str] = Field(default_factory=list)
+    contains_synthetic_media: bool = Field(default=False, description="Whether final video contains photorealistic synthetic/AI-generated media")
     lifecycle: List[str] = Field(default_factory=lambda: ["VERIFIED", "PRODUCING", "RENDERED", "READY_FOR_REVIEW"])
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

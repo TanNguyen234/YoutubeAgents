@@ -709,14 +709,15 @@ class SQLiteRepository:
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO publication_jobs (id, project_id, channel_id, status, privacy_status, scheduled_publish_time, youtube_video_id, published_at, error_message, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO publication_jobs (id, project_id, channel_id, status, privacy_status, scheduled_publish_time, youtube_video_id, published_at, contains_synthetic_media, error_message, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     status=excluded.status,
                     privacy_status=excluded.privacy_status,
                     scheduled_publish_time=excluded.scheduled_publish_time,
                     youtube_video_id=excluded.youtube_video_id,
                     published_at=excluded.published_at,
+                    contains_synthetic_media=excluded.contains_synthetic_media,
                     error_message=excluded.error_message;
                 """,
                 (
@@ -728,6 +729,7 @@ class SQLiteRepository:
                     job.scheduled_publish_time.isoformat() if job.scheduled_publish_time else None,
                     job.youtube_video_id,
                     job.published_at.isoformat() if job.published_at else None,
+                    1 if job.contains_synthetic_media else 0,
                     job.error_message,
                     job.created_at.isoformat(),
                 ),
@@ -754,6 +756,7 @@ class SQLiteRepository:
                     scheduled_publish_time=datetime.fromisoformat(r["scheduled_publish_time"]) if r["scheduled_publish_time"] else None,
                     youtube_video_id=r["youtube_video_id"],
                     published_at=datetime.fromisoformat(r["published_at"]) if r["published_at"] else None,
+                    contains_synthetic_media=bool(r["contains_synthetic_media"]) if "contains_synthetic_media" in r.keys() else False,
                     error_message=r["error_message"],
                     created_at=datetime.fromisoformat(r["created_at"]),
                 )

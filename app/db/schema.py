@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS publication_jobs (
     scheduled_publish_time TEXT,
     youtube_video_id TEXT,
     published_at TEXT,
+    contains_synthetic_media INTEGER NOT NULL DEFAULT 0,
     error_message TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE,

@@ -649,6 +649,21 @@ class MediaProductionPipeline:
             all_qa_issues = list(qa_res.issues) + creative_fail_reasons
             qa_passed = qa_res.passed and not creative_failed
 
+            # Derive contains_synthetic_media: True ONLY if photorealistic AI generated images/videos are used
+            contains_synthetic = False
+            if used_director and timeline:
+                for s in timeline.shots:
+                    modality_val = s.modality.value if hasattr(s.modality, "value") else str(s.modality)
+                    if modality_val in ("GENERATED_IMAGE", "GENERATED_VIDEO", "IMAGE_TO_VIDEO"):
+                        contains_synthetic = True
+                        break
+            else:
+                for a in created_assets:
+                    url = (a.source_url or "").lower()
+                    if "gflow" in url or "synthetic" in url:
+                        contains_synthetic = True
+                        break
+
             manifest = RenderManifest(
                 project_id=project_id,
                 source_commit=self._get_git_commit(),
@@ -697,6 +712,7 @@ class MediaProductionPipeline:
                 measured_loudness_lufs=qa_res.loudness_lufs,
                 qa_verdict="PASSED" if qa_passed else "FAILED",
                 qa_issues=all_qa_issues,
+                contains_synthetic_media=contains_synthetic,
             )
 
             manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
