@@ -45,38 +45,66 @@ class YouTubePublisherService:
         scheduled_time: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         """Construct a validated YouTube Data API v3 upload payload."""
-        raw_title = project.script.title if project.script else project.title
-        # YouTube title limit: 100 characters
-        title = raw_title[:100].strip()
+        # 1. Channel publishing defaults
+        channel = self.repo.get_channel(project.channel_id) if project.channel_id else None
+        cat_id = getattr(channel, "youtube_category_id", "28") if channel else "28"
+        lang = getattr(channel, "default_language", "en") if channel else "en"
+        kids = getattr(channel, "made_for_kids", False) if channel else False
+        base_tags = list(getattr(channel, "default_tags", [])) if channel else []
 
-        # Build description with citations and chapters
-        desc_lines = []
-        if project.script and project.script.hook:
-            desc_lines.append(project.script.hook)
-            desc_lines.append("")
+        # 2. Consume SEOPackage if present
+        seo_pkg = self.repo.get_seo_package(project.id)
+        if seo_pkg:
+            raw_title = seo_pkg.selected_title or project.title
+            title = raw_title[:100].strip()
 
-        desc_lines.append("=== OVERVIEW ===")
-        canonical_narration = project.script.get_canonical_narration() if project.script else ""
-        if canonical_narration:
-            desc_lines.append(canonical_narration[:400] + ("..." if len(canonical_narration) > 400 else ""))
-            desc_lines.append("")
+            desc = (seo_pkg.description or "").strip()
+            # If chapters exist and are not already formatted in description, append them
+            if seo_pkg.chapters and "00:00" not in desc:
+                chapter_lines = ["\n=== CHAPTERS ==="]
+                for ch in seo_pkg.chapters:
+                    chapter_lines.append(f"{ch.timestamp_formatted} {ch.title}")
+                desc = desc + "\n" + "\n".join(chapter_lines)
+            description = desc.strip()
+            tags = list(seo_pkg.tags) if seo_pkg.tags else list(project.metadata_tags or [])
+        else:
+            raw_title = project.script.title if project.script else project.title
+            title = raw_title[:100].strip()
 
-        dossier = self.repo.get_research_dossier(project.id)
-        if dossier and dossier.sources:
-            desc_lines.append("=== SOURCES & CITATIONS ===")
-            for s in dossier.sources[:5]:
-                desc_lines.append(f"- {s.title}: {s.url}")
-            desc_lines.append("")
+            # Build description with citations and overview
+            desc_lines = []
+            if project.script and project.script.hook:
+                desc_lines.append(project.script.hook)
+                desc_lines.append("")
 
-        desc_lines.append("Generated autonomously by YouTube Autopilot.")
-        desc_lines.append("#Tech #Engineering #Automation")
-        description = "\n".join(desc_lines)
+            desc_lines.append("=== OVERVIEW ===")
+            canonical_narration = project.script.get_canonical_narration() if project.script else ""
+            if canonical_narration:
+                desc_lines.append(canonical_narration[:400] + ("..." if len(canonical_narration) > 400 else ""))
+                desc_lines.append("")
 
-        # Build tags (max 500 chars total)
-        tags = list(project.metadata_tags or [])
-        if project.script and "Shorts" in project.script.title:
-            tags.append("Shorts")
-        tags.extend(["Tech", "Guide", "Tutorial"])
+            dossier = self.repo.get_research_dossier(project.id)
+            if dossier and dossier.sources:
+                desc_lines.append("=== SOURCES & CITATIONS ===")
+                for s in dossier.sources[:5]:
+                    desc_lines.append(f"- {s.title}: {s.url}")
+                desc_lines.append("")
+
+            desc_lines.append("Generated autonomously by YouTube Autopilot.")
+            desc_lines.append("#Tech #Engineering #Automation")
+            description = "\n".join(desc_lines)
+
+            # Build tags (max 500 chars total)
+            tags = list(project.metadata_tags or [])
+            if project.script and "Shorts" in project.script.title:
+                tags.append("Shorts")
+            tags.extend(["Tech", "Guide", "Tutorial"])
+
+        # Combine with channel default tags
+        for t in base_tags:
+            if t not in tags:
+                tags.append(t)
+
         # Deduplicate preserving order
         seen = set()
         clean_tags = []
@@ -90,12 +118,12 @@ class YouTubePublisherService:
                 "title": title,
                 "description": description,
                 "tags": clean_tags[:15],
-                "categoryId": "28",  # Science & Technology
-                "defaultLanguage": "en",
+                "categoryId": cat_id,
+                "defaultLanguage": lang,
             },
             "status": {
                 "privacyStatus": privacy_status.value,
-                "selfDeclaredMadeForKids": False,
+                "selfDeclaredMadeForKids": kids,
                 "publishAt": scheduled_time.isoformat() if scheduled_time else None,
             },
         }

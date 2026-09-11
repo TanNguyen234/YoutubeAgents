@@ -46,24 +46,36 @@ class GFlowBlockerError(RuntimeError):
 class GFlowMediaProvider:
     """Manages AI visual asset generation through Google Flow CLI/MCP."""
 
-    DEFAULT_GFLOW_PATH = Path("C:/Users/VI TINH THANH AN/.local/bin/gflow.exe")
+    def __init__(
+        self,
+        executable_path: Optional[Path] = None,
+        profile: Optional[str] = None,
+    ):
+        # 1. Profile resolution: explicit constructor arg -> environment/config -> "default"
+        env_profile = os.environ.get("GFLOW_PROFILE")
+        self.profile = profile if profile is not None else (env_profile or "default")
 
-    def __init__(self, executable_path: Optional[Path] = None, profile: str = "tanntd-2005"):
-        self.profile = profile
+        # 2. Executable resolution: explicit constructor arg -> environment/config -> shutil.which("gflow") -> None
         if executable_path is not None:
             self.executable = Path(executable_path)
-        elif self.DEFAULT_GFLOW_PATH.exists():
-            self.executable = self.DEFAULT_GFLOW_PATH
+        elif os.environ.get("GFLOW_EXECUTABLE"):
+            self.executable = Path(os.environ["GFLOW_EXECUTABLE"])
         else:
             found = shutil.which("gflow")
-            self.executable = Path(found) if found else self.DEFAULT_GFLOW_PATH
+            self.executable = Path(found) if found else None
+
+    def is_available(self) -> bool:
+        """Check if gflow binary is installed and executable."""
+        if self.executable is None:
+            return False
+        return self.executable.exists() and (os.access(self.executable, os.X_OK) or os.name == "nt")
 
     def check_capabilities(self) -> Dict[str, Any]:
         """Verify gflow executable, session authentication, and available credits."""
-        if not self.executable.exists():
+        if not self.is_available():
             return {
                 "available": False,
-                "error": f"GFlow executable not found at '{self.executable}'.",
+                "error": f"GFlow executable not found or not accessible (configured path: '{self.executable}').",
                 "credits": 0,
             }
 
@@ -123,8 +135,8 @@ class GFlowMediaProvider:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if not self.executable.exists():
-            raise GFlowBlockerError(f"GFlow CLI not found at '{self.executable}'.")
+        if not self.is_available():
+            raise GFlowBlockerError(f"GFlow CLI not found or unavailable (configured path: '{self.executable}').")
 
         cmd = [
             str(self.executable),
@@ -219,8 +231,8 @@ class GFlowMediaProvider:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if not self.executable.exists():
-            raise GFlowBlockerError(f"GFlow CLI not found at '{self.executable}'.")
+        if not self.is_available():
+            raise GFlowBlockerError(f"GFlow CLI not found or unavailable (configured path: '{self.executable}').")
 
         if initial_frame:
             initial_frame = Path(initial_frame)
