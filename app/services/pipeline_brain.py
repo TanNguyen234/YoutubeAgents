@@ -340,19 +340,13 @@ class BrainPipeline:
             gflow_provider=gflow_prov,
         )
 
-        media_pipeline.produce_video(
+        project, qa_result, render_manifest = media_pipeline.run_production(
             project_id=project_id,
             voice=voice,
             rate=rate,
             pitch=pitch,
         )
         project = self.repo.get_video_project(project_id) or project
-
-        # 3. Stage 11: Final Media QA Evaluation
-        qa_evaluator = MediaQAEvaluator(self.repo)
-        qa_result = qa_evaluator.evaluate_project(project_id)
-        project = self.repo.get_video_project(project_id) or project
-        render_manifest = getattr(project, "render_manifest", None)
 
         # 4. Stage 11.5: High-Impact Thumbnail Generation & SEO Packaging
         seo_service = SEOOptimizerService(self.repo)
