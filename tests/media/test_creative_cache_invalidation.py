@@ -200,3 +200,218 @@ def test_artifact_fingerprint_changes_when_assets_change():
 
 # Alias for explicit regression test naming
 test_artifact_fingerprint_changes_when_visual_assets_change = test_artifact_fingerprint_changes_when_assets_change
+
+
+def test_director_v2_manifest_is_not_reused_by_director_v3(repo_with_verified_project, tmp_path: Path):
+    """An old manifest tagged with director-v2 must strictly be rejected by director-v3."""
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_v2_rejection",
+    )
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+    assert manifest_1.creative_pipeline_version == "director-v3"
+
+    # Overwrite manifest on disk to simulate old director-v2 manifest
+    manifest_path = tmp_path / "out_v2_rejection" / project_id / "manifests" / "render_manifest.json"
+    manifest_obj = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    manifest_dict = manifest_obj.model_dump()
+    manifest_dict["creative_pipeline_version"] = "director-v2"
+    manifest_dict["director_pipeline_version"] = "director-v2"
+    manifest_path.write_text(RenderManifest(**manifest_dict).model_dump_json(indent=2), encoding="utf-8")
+
+    # Reset project state to VERIFIED
+    project = repo.get_video_project(project_id)
+    project.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(project)
+
+    # Second run: must detect version mismatch and rebuild
+    _, _, manifest_2 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 2
+    assert manifest_2.creative_pipeline_version == "director-v3"
+
+
+def test_old_passed_manifest_with_director_used_false_is_not_reused_in_fail_closed_mode(repo_with_verified_project, tmp_path: Path):
+    """Even if an old manifest had qa_verdict == 'PASSED', if director_used is False, FAIL_CLOSED rejects it."""
+    from app.media.director.models import CreativeFallbackPolicy
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_reject_director_false",
+        fallback_policy=CreativeFallbackPolicy.FAIL_CLOSED,
+    )
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+
+    # Overwrite manifest to simulate old legacy slideshow manifest that passed QA
+    manifest_path = tmp_path / "out_reject_director_false" / project_id / "manifests" / "render_manifest.json"
+    manifest_obj = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    manifest_dict = manifest_obj.model_dump()
+    manifest_dict["director_used"] = False
+    manifest_dict["qa_verdict"] = "PASSED"
+    manifest_path.write_text(RenderManifest(**manifest_dict).model_dump_json(indent=2), encoding="utf-8")
+
+    # Reset project state to VERIFIED
+    project = repo.get_video_project(project_id)
+    project.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(project)
+
+    # Must reject cache reuse and rebuild with director
+    _, _, manifest_2 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 2
+    assert manifest_2.director_used is True
+
+
+def test_old_passed_manifest_with_fallback_true_is_not_reused(repo_with_verified_project, tmp_path: Path):
+    """Old manifest with director_fallback_occurred=True must be rejected in FAIL_CLOSED mode."""
+    from app.media.director.models import CreativeFallbackPolicy
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_reject_fallback_true",
+        fallback_policy=CreativeFallbackPolicy.FAIL_CLOSED,
+    )
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+
+    # Overwrite manifest to simulate fallback=True but passed QA
+    manifest_path = tmp_path / "out_reject_fallback_true" / project_id / "manifests" / "render_manifest.json"
+    manifest_obj = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    manifest_dict = manifest_obj.model_dump()
+    manifest_dict["director_fallback_occurred"] = True
+    manifest_dict["qa_verdict"] = "PASSED"
+    manifest_path.write_text(RenderManifest(**manifest_dict).model_dump_json(indent=2), encoding="utf-8")
+
+    # Reset project state to VERIFIED
+    project = repo.get_video_project(project_id)
+    project.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(project)
+
+    # Must reject cache reuse and rebuild cleanly
+    _, _, manifest_2 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 2
+    assert manifest_2.director_fallback_occurred is False
+
+
+def test_fallback_policy_change_invalidates_request_fingerprint():
+    """Changing fallback_policy alters the request/production fingerprint."""
+    base_params = dict(
+        canonical_narration_sha256="narr_hash_123",
+        render_profile_name="SHORTS_9_16",
+        tts_backend="mock-tts",
+        voice="voice-1",
+        tts_rate="+0%",
+        tts_pitch="+0Hz",
+        subtitle_format="srt",
+        ordered_scene_asset_hashes=["hash1", "hash2"],
+        audio_mode="both",
+        creative_pipeline_version="director-v3",
+        content_format="EXPLAINER",
+        creative_profile_name="tech-explainer",
+        visual_plan_hash="plan_hash_123",
+    )
+
+    fp_fail_closed = compute_production_fingerprint(
+        **base_params,
+        fallback_policy="FAIL_CLOSED",
+        grounding_policy_version="grounding-v2",
+        creative_qa_policy_version="creative-qa-v2",
+    )
+    fp_preview = compute_production_fingerprint(
+        **base_params,
+        fallback_policy="ALLOW_LEGACY_PREVIEW",
+        grounding_policy_version="grounding-v2",
+        creative_qa_policy_version="creative-qa-v2",
+    )
+
+    assert fp_fail_closed != fp_preview
+
+
+def test_grounding_policy_version_change_invalidates_request_fingerprint():
+    """Bumping grounding_policy_version alters the request/production fingerprint."""
+    base_params = dict(
+        canonical_narration_sha256="narr_hash_123",
+        render_profile_name="SHORTS_9_16",
+        tts_backend="mock-tts",
+        voice="voice-1",
+        tts_rate="+0%",
+        tts_pitch="+0Hz",
+        subtitle_format="srt",
+        ordered_scene_asset_hashes=["hash1", "hash2"],
+        audio_mode="both",
+        creative_pipeline_version="director-v3",
+        content_format="EXPLAINER",
+        creative_profile_name="tech-explainer",
+        visual_plan_hash="plan_hash_123",
+        fallback_policy="FAIL_CLOSED",
+        creative_qa_policy_version="creative-qa-v2",
+    )
+
+    fp_v1 = compute_production_fingerprint(**base_params, grounding_policy_version="grounding-v1")
+    fp_v2 = compute_production_fingerprint(**base_params, grounding_policy_version="grounding-v2")
+
+    assert fp_v1 != fp_v2
+
+
+def test_creative_qa_policy_version_change_invalidates_request_fingerprint():
+    """Bumping creative_qa_policy_version alters the request/production fingerprint."""
+    base_params = dict(
+        canonical_narration_sha256="narr_hash_123",
+        render_profile_name="SHORTS_9_16",
+        tts_backend="mock-tts",
+        voice="voice-1",
+        tts_rate="+0%",
+        tts_pitch="+0Hz",
+        subtitle_format="srt",
+        ordered_scene_asset_hashes=["hash1", "hash2"],
+        audio_mode="both",
+        creative_pipeline_version="director-v3",
+        content_format="EXPLAINER",
+        creative_profile_name="tech-explainer",
+        visual_plan_hash="plan_hash_123",
+        fallback_policy="FAIL_CLOSED",
+        grounding_policy_version="grounding-v2",
+    )
+
+    fp_v1 = compute_production_fingerprint(**base_params, creative_qa_policy_version="creative-qa-v1")
+    fp_v2 = compute_production_fingerprint(**base_params, creative_qa_policy_version="creative-qa-v2")
+
+    assert fp_v1 != fp_v2
+
+
+def test_request_fingerprint_is_stable_for_same_request_and_policies():
+    """Identical parameters and policy versions yield an identical request fingerprint."""
+    params = dict(
+        canonical_narration_sha256="narr_hash_123",
+        render_profile_name="SHORTS_9_16",
+        tts_backend="mock-tts",
+        voice="voice-1",
+        tts_rate="+0%",
+        tts_pitch="+0Hz",
+        subtitle_format="srt",
+        ordered_scene_asset_hashes=["hash1", "hash2"],
+        audio_mode="both",
+        creative_pipeline_version="director-v3",
+        content_format="EXPLAINER",
+        creative_profile_name="tech-explainer",
+        visual_plan_hash="plan_hash_123",
+        fallback_policy="FAIL_CLOSED",
+        grounding_policy_version="grounding-v2",
+        creative_qa_policy_version="creative-qa-v2",
+    )
+
+    fp_1 = compute_production_fingerprint(**params)
+    fp_2 = compute_production_fingerprint(**params)
+
+    assert fp_1 == fp_2
+

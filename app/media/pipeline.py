@@ -28,6 +28,9 @@ from app.media.gflow_provider import GFlowMediaProvider
 from app.media.models import (
     AudioMode,
     CREATIVE_PIPELINE_VERSION,
+    CREATIVE_QA_POLICY_VERSION,
+    DIRECTOR_PIPELINE_VERSION,
+    GROUNDING_POLICY_VERSION,
     compute_artifact_fingerprint,
     compute_production_fingerprint,
     get_render_manifest_path,
@@ -234,7 +237,7 @@ class MediaProductionPipeline:
         ]
         visual_plan_raw = (
             f"{expected_narration_hash}|{content_format_str}|{creative_profile_name}|"
-            f"{CREATIVE_PIPELINE_VERSION}|"
+            f"{CREATIVE_PIPELINE_VERSION}|{active_fallback_policy.value}|"
             + "|".join(
                 f"{getattr(s, 'scene_index', getattr(s, 'index', idx))}:{s.narration.strip()}:{(getattr(s, 'hook', '') or '').strip()}"
                 for idx, s in enumerate(project.script.scenes)
@@ -256,18 +259,31 @@ class MediaProductionPipeline:
             content_format=content_format_str,
             creative_profile_name=creative_profile_name,
             visual_plan_hash=visual_plan_hash,
+            fallback_policy=active_fallback_policy.value,
+            grounding_policy_version=GROUNDING_POLICY_VERSION,
+            creative_qa_policy_version=CREATIVE_QA_POLICY_VERSION,
         )
 
         if not force_rebuild and manifest_path.exists():
             try:
                 cached_manifest = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
                 cached_pipeline_ver = getattr(cached_manifest, "creative_pipeline_version", None)
+                cached_director_ver = getattr(cached_manifest, "director_pipeline_version", None)
+                cached_grounding_ver = getattr(cached_manifest, "grounding_policy_version", None)
+                cached_creative_qa_ver = getattr(cached_manifest, "creative_qa_policy_version", None)
+                cached_fallback_pol = getattr(cached_manifest, "fallback_policy", None)
                 cached_profile = getattr(cached_manifest, "creative_profile", None)
                 cached_format = getattr(cached_manifest, "content_format", None)
                 cached_fingerprint = getattr(cached_manifest, "request_fingerprint", None) or cached_manifest.production_fingerprint
+                cached_director_used = getattr(cached_manifest, "director_used", True)
+                cached_fallback_occurred = getattr(cached_manifest, "director_fallback_occurred", False)
 
-                if (
+                can_reuse = (
                     cached_pipeline_ver == CREATIVE_PIPELINE_VERSION
+                    and (cached_director_ver is None or cached_director_ver == DIRECTOR_PIPELINE_VERSION)
+                    and (cached_grounding_ver is None or cached_grounding_ver == GROUNDING_POLICY_VERSION)
+                    and (cached_creative_qa_ver is None or cached_creative_qa_ver == CREATIVE_QA_POLICY_VERSION)
+                    and (cached_fallback_pol is None or cached_fallback_pol == active_fallback_policy.value)
                     and (cached_profile is None or cached_profile == creative_profile_name)
                     and (cached_format is None or cached_format == content_format_str)
                     and cached_fingerprint == requested_production_fingerprint
@@ -279,7 +295,21 @@ class MediaProductionPipeline:
                     and cached_manifest.tts_pitch == pitch
                     and cached_manifest.qa_verdict == "PASSED"
                     and Path(cached_manifest.final_video_path).exists()
-                ):
+                )
+
+                if active_fallback_policy == CreativeFallbackPolicy.FAIL_CLOSED:
+                    if not cached_director_used or cached_fallback_occurred:
+                        can_reuse = False
+                    if cached_director_ver != DIRECTOR_PIPELINE_VERSION:
+                        can_reuse = False
+                    if cached_grounding_ver != GROUNDING_POLICY_VERSION:
+                        can_reuse = False
+                    if cached_creative_qa_ver != CREATIVE_QA_POLICY_VERSION:
+                        can_reuse = False
+                    if cached_fallback_pol != active_fallback_policy.value:
+                        can_reuse = False
+
+                if can_reuse:
                     # Re-inspect to verify physical file hasn't been altered
                     quality_domain, qa_res = self.qa.inspect_video(
                         project_id=project_id,
@@ -412,6 +442,8 @@ class MediaProductionPipeline:
             storyboard = None
             scene_plans: List[SceneRenderPlan] = []
             director_output_dir = proj_dir / "director"
+            research_dossier = None
+            fact_report = None
 
             try:
                 content_fmt = getattr(project.script, "content_format", ContentFormat.EXPLAINER)
@@ -516,6 +548,9 @@ class MediaProductionPipeline:
                 content_format=content_format_str,
                 creative_profile_name=creative_profile_name,
                 visual_plan_hash=visual_plan_hash,
+                fallback_policy=active_fallback_policy.value,
+                grounding_policy_version=GROUNDING_POLICY_VERSION,
+                creative_qa_policy_version=CREATIVE_QA_POLICY_VERSION,
             )
 
             # 9b. AI Background Music Generation
@@ -722,6 +757,10 @@ class MediaProductionPipeline:
                 request_fingerprint=production_fingerprint,
                 artifact_fingerprint=artifact_fingerprint,
                 creative_pipeline_version=CREATIVE_PIPELINE_VERSION,
+                director_pipeline_version=DIRECTOR_PIPELINE_VERSION,
+                grounding_policy_version=GROUNDING_POLICY_VERSION,
+                creative_qa_policy_version=CREATIVE_QA_POLICY_VERSION,
+                fallback_policy=active_fallback_policy.value,
                 creative_profile=creative_profile_name,
                 content_format=content_format_str,
                 storyboard_hash=storyboard_hash,

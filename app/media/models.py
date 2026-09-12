@@ -126,7 +126,10 @@ class RenderResult(BaseModel):
     rendered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-CREATIVE_PIPELINE_VERSION: str = "director-v2"
+CREATIVE_PIPELINE_VERSION: str = "director-v3"
+DIRECTOR_PIPELINE_VERSION: str = "director-v3"
+GROUNDING_POLICY_VERSION: str = "grounding-v2"
+CREATIVE_QA_POLICY_VERSION: str = "creative-qa-v2"
 
 
 class RenderManifest(BaseModel):
@@ -140,6 +143,10 @@ class RenderManifest(BaseModel):
     request_fingerprint: Optional[str] = Field(default=None, description="Deterministic fingerprint of production request parameters")
     artifact_fingerprint: Optional[str] = Field(default=None, description="Deterministic fingerprint of rendered artifacts")
     creative_pipeline_version: str = Field(default=CREATIVE_PIPELINE_VERSION, description="Creative director pipeline version")
+    director_pipeline_version: str = Field(default=DIRECTOR_PIPELINE_VERSION, description="Director pipeline version")
+    grounding_policy_version: str = Field(default=GROUNDING_POLICY_VERSION, description="Grounding policy version")
+    creative_qa_policy_version: str = Field(default=CREATIVE_QA_POLICY_VERSION, description="Creative QA policy version")
+    fallback_policy: Optional[str] = Field(default=None, description="Active fallback policy used during production")
     creative_profile: Optional[str] = Field(default=None, description="Active creative profile name")
     content_format: Optional[str] = Field(default=None, description="Content format used for generation")
     storyboard_hash: Optional[str] = Field(default=None, description="Deterministic hash of planned storyboard")
@@ -205,6 +212,9 @@ def compute_production_fingerprint(
     visual_plan_hash: Optional[str] = None,
     provider_config_id: str = "default",
     renderer_config_hash: Optional[str] = None,
+    fallback_policy: str = "FAIL_CLOSED",
+    grounding_policy_version: str = GROUNDING_POLICY_VERSION,
+    creative_qa_policy_version: str = CREATIVE_QA_POLICY_VERSION,
 ) -> str:
     """Compute a deterministic SHA-256 fingerprint uniquely identifying a production combination."""
     import hashlib
@@ -212,9 +222,11 @@ def compute_production_fingerprint(
         f"{canonical_narration_sha256}|{render_profile_name}|{tts_backend}|{voice}|"
         f"{tts_rate}|{tts_pitch}|{subtitle_format}|{','.join(ordered_scene_asset_hashes or [])}|"
         f"{audio_mode}|{creative_pipeline_version}|{content_format}|{creative_profile_name}|"
-        f"{storyboard_hash or ''}|{visual_plan_hash or ''}|{provider_config_id}|{renderer_config_hash or ''}"
+        f"{storyboard_hash or ''}|{visual_plan_hash or ''}|{provider_config_id}|{renderer_config_hash or ''}|"
+        f"{fallback_policy}|{grounding_policy_version}|{creative_qa_policy_version}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
 
 
 def compute_artifact_fingerprint(
