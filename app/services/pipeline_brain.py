@@ -237,6 +237,7 @@ class BrainPipeline:
                 title=keyword,
                 sections=sections,
                 content_format=content_format,
+                retention_blueprint=blueprint,
             )
 
             # Initial Script Retention QA
@@ -257,6 +258,7 @@ class BrainPipeline:
                     title=keyword,
                     sections=revised_sections,
                     content_format=content_format,
+                    retention_blueprint=blueprint,
                 )
 
             project.script = script
@@ -309,6 +311,7 @@ class BrainPipeline:
                         title=keyword,
                         sections=revised_sections,
                         content_format=content_format,
+                        retention_blueprint=blueprint,
                     )
                     project.script = revised_script
                     project.content_format = content_format

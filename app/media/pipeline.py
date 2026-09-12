@@ -445,6 +445,7 @@ class MediaProductionPipeline:
             director_output_dir = proj_dir / "director"
             research_dossier = None
             fact_report = None
+            timed_retention_cues = []
 
             try:
                 content_fmt = getattr(project.script, "content_format", ContentFormat.EXPLAINER)
@@ -457,6 +458,17 @@ class MediaProductionPipeline:
                 research_dossier = self.repo.get_research_dossier(project_id)
                 fact_report = self.repo.get_fact_check_report(project_id)
 
+                timed_retention_cues = []
+                blueprint = getattr(project.script, "retention_blueprint", None)
+                if blueprint and getattr(blueprint, "cues", None):
+                    from app.services.retention_planner import map_retention_cues_to_timestamps
+                    timed_retention_cues = map_retention_cues_to_timestamps(
+                        cues=blueprint.cues,
+                        total_duration_seconds=tts_res.duration_seconds,
+                        timing_events=tts_res.timing_events,
+                        canonical_narration=canonical_narration,
+                    )
+
                 timeline, storyboard = self.director.plan_and_render_timeline(
                     project_id=project_id,
                     script=project.script,
@@ -466,6 +478,7 @@ class MediaProductionPipeline:
                     content_format=content_fmt,
                     dossier=research_dossier,
                     fact_report=fact_report,
+                    retention_cues=timed_retention_cues,
                 )
                 validate_director_output(timeline, storyboard)
                 used_director = True
@@ -679,6 +692,7 @@ class MediaProductionPipeline:
                     director_fallback_occurred=False,
                     fact_report=fact_report,
                     dossier=research_dossier,
+                    retention_cues=timed_retention_cues,
                 )
                 report_path = proj_dir / "manifests" / f"creative_qa_report_{project_id}.json"
                 report_path.write_text(visual_report.model_dump_json(indent=2), encoding="utf-8")

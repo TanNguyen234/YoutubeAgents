@@ -6,8 +6,8 @@ import re
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
-from app.domain.enums import ClaimVerificationVerdict
-from app.domain.models import Claim, FactCheckReport, ResearchDossier, ResearchSource, Script
+from app.domain.enums import ClaimVerificationVerdict, RetentionCueType
+from app.domain.models import Claim, FactCheckReport, ResearchDossier, ResearchSource, Script, TimedRetentionCue
 from app.media.director.modality_router import VisualModalityRouter
 from app.media.director.models import (
     ChannelCreativeProfile,
@@ -242,6 +242,7 @@ class StoryboardPlanner:
         available_modalities: Optional[List[VisualModality]] = None,
         dossier: Optional[ResearchDossier] = None,
         fact_report: Optional[FactCheckReport] = None,
+        retention_cues: Optional[List[TimedRetentionCue]] = None,
     ) -> Storyboard:
         """Construct an authoritative Storyboard mapping all beats to granular ShotSpecs."""
         shots: List[ShotSpec] = []
@@ -257,12 +258,82 @@ class StoryboardPlanner:
                 modality_counts={},
             )
 
+        cur_beat_time = 0.0
         for b_idx, beat in enumerate(beats):
+            beat_dur = beat.duration_hint or 2.5
+            beat_start = beat.start_hint if beat.start_hint is not None else cur_beat_time
+            beat_end = beat_start + beat_dur
+            cur_beat_time = beat_end
+
+            # Match retention cues for this beat window
+            matching_cues = []
+            if retention_cues:
+                for rc in retention_cues:
+                    if (beat_start <= rc.timestamp_seconds < beat_end) or (b_idx == len(beats) - 1 and rc.timestamp_seconds >= beat_start):
+                        matching_cues.append(rc)
+                    elif rc.narration_anchor and rc.narration_anchor.lower() in beat.narration.lower():
+                        if rc not in matching_cues:
+                            matching_cues.append(rc)
+
             selected_mod = self.router.route_modality(
                 beat=beat,
                 content_format=content_format,
                 available_modalities=available_modalities,
             )
+
+            # Apply Retention Cue influence before final grounding validation
+            composition_override: Optional[str] = None
+            camera_motion_override: Optional[str] = None
+
+            for cue in matching_cues:
+                if cue.cue_type == RetentionCueType.PATTERN_INTERRUPT:
+                    prev_mod = shots[-1].visual_modality if shots else None
+                    if prev_mod:
+                        # Semantic modality shift
+                        if prev_mod == VisualModality.DIAGRAM:
+                            selected_mod = VisualModality.CODE_ANIMATION
+                            beat.visual_intent = VisualIntent.SHOW_CODE
+                        elif prev_mod in (VisualModality.MOTION_GRAPHICS, VisualModality.KINETIC_TYPOGRAPHY):
+                            binding = self._resolve_evidence_binding(beat, dossier, fact_report)
+                            if binding:
+                                selected_mod = VisualModality.DOCUMENT_EVIDENCE
+                                beat.evidence_binding = binding
+                                beat.visual_intent = VisualIntent.SHOW_EVIDENCE
+                            else:
+                                selected_mod = VisualModality.UI_SIMULATION
+                                beat.visual_intent = VisualIntent.SHOW_INTERFACE
+                        elif prev_mod in (VisualModality.GENERATED_IMAGE, VisualModality.GENERATED_VIDEO):
+                            selected_mod = VisualModality.UI_SIMULATION
+                            beat.visual_intent = VisualIntent.SHOW_INTERFACE
+                        elif prev_mod == VisualModality.CODE_ANIMATION:
+                            selected_mod = VisualModality.DIAGRAM
+                            beat.visual_intent = VisualIntent.SHOW_MECHANISM
+                        elif prev_mod == selected_mod:
+                            for alt in (VisualModality.CODE_ANIMATION, VisualModality.UI_SIMULATION, VisualModality.DIAGRAM, VisualModality.MOTION_GRAPHICS):
+                                if alt != prev_mod:
+                                    selected_mod = alt
+                                    break
+                    beat.importance = max(beat.importance, 0.85)
+                    camera_motion_override = "PATTERN_INTERRUPT_SNAP"
+
+                elif cue.cue_type == RetentionCueType.REHOOK:
+                    composition_override = "DYNAMIC_CLOSE_UP"
+                    camera_motion_override = "RAPID_PUSH_IN"
+                    beat.importance = max(beat.importance, 0.85)
+                    if any(k in beat.narration.lower() for k in ("see", "look", "watch", "result", "bench")):
+                        beat.visual_intent = VisualIntent.SHOW_RESULT
+
+                elif cue.cue_type in (RetentionCueType.REVEAL, RetentionCueType.CLIMAX):
+                    beat.importance = 1.0
+                    camera_motion_override = "HERO_DOLLY_IN"
+                    composition_override = "HERO_CENTERED"
+                    if selected_mod == VisualModality.STATIC_CARD:
+                        selected_mod = VisualModality.DIAGRAM
+                    beat.visual_intent = VisualIntent.SHOW_RESULT
+
+                elif cue.cue_type == RetentionCueType.LOOP_CLOSE:
+                    composition_override = "RESOLVING_WIDE"
+                    beat.visual_intent = VisualIntent.SHOW_RESULT
 
             # Grounding enforcement & reroute checks:
             # 1. DATA_VISUALIZATION requires either explicit chart_data, extractable numbers, or conceptual token context
@@ -400,7 +471,8 @@ class StoryboardPlanner:
                 subject=", ".join(beat.key_entities) if beat.key_entities else script.title,
                 action=beat.visual_intent.value.lower().replace("_", " "),
                 visual_modality=selected_mod,
-                camera_motion="dynamic push-in" if beat.purpose.value == "HOOK" else "slow parallax push",
+                camera_motion=camera_motion_override or ("dynamic push-in" if beat.purpose.value == "HOOK" else "slow parallax push"),
+                composition=composition_override,
                 headline_text=punchline,
                 continuity_refs=[f"shot_{b_idx:02d}"] if b_idx > 0 else [],
                 source_refs=beat.source_refs,

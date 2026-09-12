@@ -20,6 +20,7 @@ from app.media.director.models import (
     ShotTimeline,
     Storyboard,
     TimelineShot,
+    TimedRetentionCue,
     VisualEvaluation,
     VisualIntent,
     VisualModality,
@@ -96,6 +97,7 @@ class AutoDirectorService:
         content_format: ContentFormat = ContentFormat.EXPLAINER,
         dossier: Optional[ResearchDossier] = None,
         fact_report: Optional[FactCheckReport] = None,
+        retention_cues: Optional[List[TimedRetentionCue]] = None,
     ) -> Tuple[ShotTimeline, Storyboard]:
         """Execute full director workflow: Decompose -> Plan Storyboard -> Dispatch Renderers -> QA Evaluate -> Selective Retry -> Assemble Timeline."""
         # Reset state between runs so project A state cannot leak into project B
@@ -136,6 +138,7 @@ class AutoDirectorService:
             content_format=content_format,
             dossier=dossier,
             fact_report=fact_report,
+            retention_cues=retention_cues,
         )
 
         # Persist Storyboard Artifact

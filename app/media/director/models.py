@@ -88,7 +88,8 @@ class ChartDatumOrigin(str, Enum):
     CONCEPTUAL = "CONCEPTUAL"
 
 
-from app.domain.enums import ContentFormat
+from app.domain.enums import ContentFormat, RetentionCueType
+from app.domain.models import TimedRetentionCue
 
 
 class MissingGroundedVisualData(ValueError):

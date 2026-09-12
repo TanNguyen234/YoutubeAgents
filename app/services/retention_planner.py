@@ -1,7 +1,7 @@
 """Retention planner orchestrating format-specific narrative grammars and duration-aware retention blueprints."""
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.domain.enums import ContentFormat, RetentionCueType
 from app.domain.models import (
@@ -9,6 +9,7 @@ from app.domain.models import (
     ResearchDossier,
     RetentionBlueprint,
     RetentionCue,
+    TimedRetentionCue,
     VideoCreativeBrief,
 )
 
@@ -522,3 +523,54 @@ class RetentionPlanner:
             content_format=content_format,
             target_duration_seconds=duration,
         )
+
+
+def map_retention_cues_to_timestamps(
+    cues: List[RetentionCue],
+    total_duration_seconds: float,
+    timing_events: Optional[List[Dict[str, Any]]] = None,
+    canonical_narration: Optional[str] = None,
+) -> List[TimedRetentionCue]:
+    """Map ratio-based retention cues to actual timestamps using real TTS audio duration and word boundaries."""
+    timed_cues: List[TimedRetentionCue] = []
+    if total_duration_seconds <= 0.0 or not cues:
+        return timed_cues
+
+    import re
+
+    for cue in cues:
+        matched_time = None
+
+        # 1. Word timing / narration matching to anchor cue to real spoken text
+        if cue.anchor_text and timing_events:
+            anchor_clean = cue.anchor_text.strip().lower()
+            anchor_words = [w for w in re.sub(r"[^\w\s]", " ", anchor_clean).split() if len(w) > 1]
+            if anchor_words:
+                first_word = anchor_words[0]
+                for evt in timing_events:
+                    w_text = (evt.get("word") or evt.get("text") or "").strip().lower()
+                    w_clean = re.sub(r"[^\w\s]", "", w_text)
+                    if w_clean == first_word:
+                        if "start" in evt:
+                            matched_time = float(evt["start"])
+                        elif "offset" in evt:
+                            # edge-tts offset is in 100ns (ticks)
+                            matched_time = round(float(evt["offset"]) / 10_000_000.0, 3)
+                        break
+
+        # 2. Ratio-based calculation fallback
+        if matched_time is None:
+            matched_time = round(cue.target_position_ratio * total_duration_seconds, 3)
+
+        clamped_time = max(0.0, min(total_duration_seconds, matched_time))
+        timed_cues.append(
+            TimedRetentionCue(
+                cue_id=cue.cue_id,
+                cue_type=cue.cue_type,
+                timestamp_seconds=clamped_time,
+                narration_anchor=cue.anchor_text,
+            )
+        )
+
+    return timed_cues
+

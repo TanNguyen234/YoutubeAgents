@@ -241,6 +241,15 @@ class RetentionCue(BaseModel):
     linked_hook_promise: Optional[str] = None
 
 
+class TimedRetentionCue(BaseModel):
+    """Retention cue mapped to concrete playback timestamp in seconds after real TTS synthesis."""
+
+    cue_id: str = Field(description="Unique cue identifier matching blueprint cue")
+    cue_type: RetentionCueType = Field(description="Pacing cue category")
+    timestamp_seconds: float = Field(ge=0.0, description="Resolved playback onset time in seconds")
+    narration_anchor: Optional[str] = Field(default=None, description="Spoken text anchor phrase if available")
+
+
 class RetentionBlueprint(BaseModel):
     """Structured narrative retention plan orchestrating pacing, open loops, and payoff."""
 
@@ -317,6 +326,9 @@ class Script(BaseModel):
     estimated_duration_seconds: float = Field(ge=1.0, description="Estimated total runtime")
     sections: Optional[ScriptSections] = Field(default=None, description="Typed narrative sections breakdown")
     content_format: ContentFormat = Field(default=ContentFormat.EXPLAINER, description="Content format archetype")
+    retention_blueprint: Optional[RetentionBlueprint] = Field(
+        default=None, description="Format-aware narrative retention blueprint"
+    )
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def get_canonical_narration(self) -> str:

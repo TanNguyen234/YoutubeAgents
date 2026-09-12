@@ -5,8 +5,8 @@ import re
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
-from app.domain.enums import ClaimVerificationVerdict
-from app.domain.models import FactCheckReport, ResearchDossier
+from app.domain.enums import ClaimVerificationVerdict, RetentionCueType
+from app.domain.models import FactCheckReport, ResearchDossier, TimedRetentionCue
 from app.media.director.models import (
     ChannelCreativeProfile,
     ChartDatumOrigin,
@@ -233,6 +233,7 @@ class VisualShotEvaluator:
         creative_fallback_reason: Optional[str] = None,
         fact_report: Optional[FactCheckReport] = None,
         dossier: Optional[ResearchDossier] = None,
+        retention_cues: Optional[List[TimedRetentionCue]] = None,
     ) -> VideoQualityReport:
         """Build a comprehensive machine-readable quality report for the completed video production."""
         critical_failures: List[str] = []
@@ -402,6 +403,53 @@ class VisualShotEvaluator:
             critical_failures.append(f"EXCESSIVE_STATIC_RATIO: {static_card_ratio * 100:.1f}% of runtime is static cards (max allowable 50%).")
         elif static_card_ratio > max_static_card_ratio:
             warnings.append(f"HIGH_STATIC_RATIO: {static_card_ratio * 100:.1f}% of runtime is static cards (target <= {max_static_card_ratio * 100:.0f}%).")
+
+        # 6. Retention-Aware Visual QA Checks (Phase 12)
+        if retention_cues and storyboard and storyboard.shots:
+            shot_windows = []
+            cur_s_time = 0.0
+            for idx, spec in enumerate(storyboard.shots):
+                s_dur = spec.duration_seconds
+                s_start = cur_s_time
+                s_end = s_start + s_dur
+                cur_s_time = s_end
+                shot_windows.append((idx, spec, s_start, s_end))
+
+            for cue in retention_cues:
+                matched_shot = None
+                matched_idx = -1
+                for idx, spec, s_start, s_end in shot_windows:
+                    if (s_start <= cue.timestamp_seconds < s_end) or (idx == len(shot_windows) - 1 and s_start <= cue.timestamp_seconds <= s_end):
+                        matched_shot = spec
+                        matched_idx = idx
+                        break
+
+                if not matched_shot:
+                    warnings.append(
+                        f"RETENTION_CUE_MISSED: Retention cue '{cue.cue_id}' ({cue.cue_type.value}) at {cue.timestamp_seconds:.2f}s falls outside storyboard duration."
+                    )
+                    continue
+
+                if cue.cue_type == RetentionCueType.PATTERN_INTERRUPT:
+                    if matched_idx > 0:
+                        prev_shot = storyboard.shots[matched_idx - 1]
+                        if matched_shot.visual_modality == prev_shot.visual_modality:
+                            warnings.append(
+                                f"PATTERN_INTERRUPT_NO_MODALITY_CHANGE: Pattern interrupt shot '{matched_shot.shot_id}' at {cue.timestamp_seconds:.2f}s failed to change modality from preceding '{prev_shot.visual_modality.value}'."
+                            )
+
+                elif cue.cue_type == RetentionCueType.REHOOK:
+                    has_novelty = bool(matched_shot.camera_motion or matched_shot.composition or matched_shot.importance >= 0.8)
+                    if not has_novelty:
+                        warnings.append(
+                            f"REHOOK_WITH_NO_VISUAL_NOVELTY: Rehook shot '{matched_shot.shot_id}' at {cue.timestamp_seconds:.2f}s lacks visual framing novelty or priority."
+                        )
+
+                elif cue.cue_type in (RetentionCueType.CLIMAX, RetentionCueType.REVEAL):
+                    if matched_shot.visual_modality == VisualModality.STATIC_CARD or (matched_idx > 0 and matched_shot.importance < storyboard.shots[0].importance and matched_shot.visual_modality in (VisualModality.STATIC_CARD, VisualModality.STATIC_DIAGRAM)):
+                        warnings.append(
+                            f"CLIMAX_VISUALLY_WEAKER_THAN_SETUP: Climax/reveal shot '{matched_shot.shot_id}' at {cue.timestamp_seconds:.2f}s has weak visual modality or priority."
+                        )
 
         warnings.extend(dead_air_warnings)
         warnings.extend(duplication_warnings)

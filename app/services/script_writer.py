@@ -1,7 +1,7 @@
 """Script writer generating structured video scripts with typed narrative sections."""
 
 import re
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from app.domain.enums import ContentFormat
 from app.domain.models import Scene, Script, ScriptSections
@@ -34,6 +34,7 @@ class ScriptWriter:
         title: str,
         sections: ScriptSections,
         content_format: ContentFormat = ContentFormat.EXPLAINER,
+        retention_blueprint: Optional[Any] = None,
     ) -> Script:
         """Build and validate a typed Script domain model from sections."""
         all_narrations = [s.narration for s in sections.segments if s.narration]
@@ -55,4 +56,5 @@ class ScriptWriter:
             estimated_duration_seconds=total_duration,
             content_format=content_format,
             sections=sections,
+            retention_blueprint=retention_blueprint,
         )
