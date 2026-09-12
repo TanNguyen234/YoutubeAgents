@@ -23,6 +23,7 @@ from app.domain.models import (
     PublicationJob,
     ResearchDossier,
     ReviewRecord,
+    ScriptSections,
     SEOPackage,
     ThumbnailPackage,
     TopicCandidate,
@@ -254,13 +255,14 @@ class BrainPipeline:
                     blueprint=blueprint,
                     dossier=dossier,
                 )
-                script = self.writer.build_script(
-                    script_id=f"scr-{project_id}-ret1",
-                    title=keyword,
-                    sections=revised_sections,
-                    content_format=content_format,
-                    retention_blueprint=blueprint,
-                )
+                if isinstance(revised_sections, ScriptSections):
+                    script = self.writer.build_script(
+                        script_id=f"scr-{project_id}-ret1",
+                        title=keyword,
+                        sections=revised_sections,
+                        content_format=content_format,
+                        retention_blueprint=blueprint,
+                    )
 
             project.script = script
             project.content_format = content_format
@@ -340,29 +342,30 @@ class BrainPipeline:
                     blueprint=blueprint,
                     dossier=dossier,
                 )
-                revised_script = self.writer.build_script(
-                    script_id=f"scr-{project_id}-ret-final",
-                    title=keyword,
-                    sections=revised_sections,
-                    content_format=content_format,
-                    retention_blueprint=blueprint,
-                )
-                project.script = revised_script
-                project.content_format = content_format
-                self.repo.save_video_project(project)
+                if isinstance(revised_sections, ScriptSections):
+                    revised_script = self.writer.build_script(
+                        script_id=f"scr-{project_id}-ret-final",
+                        title=keyword,
+                        sections=revised_sections,
+                        content_format=content_format,
+                        retention_blueprint=blueprint,
+                    )
+                    project.script = revised_script
+                    project.content_format = content_format
+                    self.repo.save_video_project(project)
 
-                # CRITICAL INVARIANT: NEVER modify script after fact check without re-running fact check!
-                extracted_claims = self.extractor.extract_from_script(project.script)
-                dossier.claims = extracted_claims
-                report = self.checker.verify_all_claims(
-                    claims=extracted_claims,
-                    dossier=dossier,
-                    project_id=project_id,
-                )
-                self.repo.save_fact_check_report(report)
+                    # CRITICAL INVARIANT: NEVER modify script after fact check without re-running fact check!
+                    extracted_claims = self.extractor.extract_from_script(project.script)
+                    dossier.claims = extracted_claims
+                    report = self.checker.verify_all_claims(
+                        claims=extracted_claims,
+                        dossier=dossier,
+                        project_id=project_id,
+                    )
+                    self.repo.save_fact_check_report(report)
 
-                # Re-evaluate final retention report after re-verification
-                final_ret_report = retention_evaluator.evaluate(project.script, blueprint=blueprint)
+                    # Re-evaluate final retention report after re-verification
+                    final_ret_report = retention_evaluator.evaluate(project.script, blueprint=blueprint)
 
             # Persist final retention report onto script and pipeline instance
             if project.script:
