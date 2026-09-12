@@ -43,6 +43,10 @@ from app.services.review_gate import HumanReviewGateService
 from app.services.script_generator import ScriptGenerator
 from app.services.script_writer import ScriptWriter
 from app.services.seo_optimizer import SEOOptimizerService
+from app.domain.models import resolve_default_creative_brief
+from app.services.hook_strategy import HookTournamentService
+from app.services.retention_planner import RetentionPlanner
+from app.services.script_retention import ScriptRetentionEvaluator
 from app.services.strategy_feedback import StrategyFeedbackLoop
 from app.services.thumbnail_designer import ThumbnailDesignerService
 from app.services.topic_evaluator import TopicEvaluator
@@ -188,14 +192,45 @@ class BrainPipeline:
             )
             raise
 
-        # 6. Stage 4: Script Generation -> transition to SCRIPTED
+        # 6. Stage 4: Creative Brief -> Hook Tournament -> Retention Blueprint -> Script -> Retention QA
         try:
+            brief = resolve_default_creative_brief(
+                content_format=content_format,
+            )
+
+            hook_service = HookTournamentService(backend=self.backend)
+            hook_candidates = hook_service.generate_hook_candidates(
+                topic=keyword,
+                dossier=dossier,
+                brief=brief,
+                content_format=content_format,
+                channel=channel,
+            )
+            winner_hook, _, _ = hook_service.run_tournament(
+                candidates=hook_candidates,
+                topic=keyword,
+                dossier=dossier,
+                brief=brief,
+            )
+
+            retention_planner = RetentionPlanner()
+            blueprint = retention_planner.build_blueprint(
+                hook=winner_hook,
+                brief=brief,
+                content_format=content_format,
+                topic=keyword,
+                dossier=dossier,
+            )
+
             sections = self.generator.generate_script_sections(
                 channel=channel,
                 keyword=keyword,
                 dossier=dossier,
                 content_format=content_format,
                 series_continuity=series_continuity,
+                brief=brief,
+                hook=winner_hook,
+                blueprint=blueprint,
             )
             script = self.writer.build_script(
                 script_id=f"scr-{project_id}",
@@ -203,6 +238,27 @@ class BrainPipeline:
                 sections=sections,
                 content_format=content_format,
             )
+
+            # Initial Script Retention QA
+            retention_evaluator = ScriptRetentionEvaluator()
+            ret_report = retention_evaluator.evaluate(script, blueprint=blueprint)
+
+            # Bounded retention rewrite if severe retention drop risk detected
+            if not ret_report.passed and len(ret_report.rewrite_instructions) > 0:
+                revised_sections = self.generator.rewrite_for_retention(
+                    channel=channel,
+                    original_sections=script.sections,
+                    retention_report=ret_report,
+                    blueprint=blueprint,
+                    dossier=dossier,
+                )
+                script = self.writer.build_script(
+                    script_id=f"scr-{project_id}-ret1",
+                    title=keyword,
+                    sections=revised_sections,
+                    content_format=content_format,
+                )
+
             project.script = script
             project.content_format = content_format
             # Durable Checkpoint: Save script & video project
@@ -211,7 +267,7 @@ class BrainPipeline:
             self.repo.update_project_state(
                 project_id=project_id,
                 to_state=VideoLifecycleState.SCRIPTED,
-                reason="Script generated with structured scene segments",
+                reason="Script generated with structured scene segments and retention blueprint",
             )
         except Exception as e:
             self.repo.update_project_state(
@@ -259,6 +315,9 @@ class BrainPipeline:
                     self.repo.save_video_project(project)
                 else:
                     break
+
+            # 7b. Post-Fact-Check Final Retention QA (fact-check rewrite can alter pacing)
+            final_ret_report = retention_evaluator.evaluate(project.script, blueprint=blueprint)
 
             # 8. Stage 6: Authoritative Verification Gate
             if report.overall_verdict == QualityStatus.PASSED and report.failed_count == 0 and len(report.claims) > 0:

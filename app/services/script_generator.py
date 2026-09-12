@@ -6,10 +6,15 @@ from app.domain.enums import ContentFormat
 from app.domain.models import (
     Channel,
     Claim,
+    HookCandidate,
     ResearchDossier,
+    RetentionBlueprint,
     Scene,
     ScriptSections,
+    VideoCreativeBrief,
 )
+from app.services.retention_planner import RetentionPlanner
+from app.services.script_retention import ScriptRetentionReport
 
 
 class ScriptGenerator:
@@ -25,8 +30,11 @@ class ScriptGenerator:
         dossier: ResearchDossier,
         content_format: ContentFormat = ContentFormat.EXPLAINER,
         series_continuity: Optional[dict] = None,
+        brief: Optional[VideoCreativeBrief] = None,
+        hook: Optional[HookCandidate] = None,
+        blueprint: Optional[RetentionBlueprint] = None,
     ) -> ScriptSections:
-        """Generate structured script sections strictly grounded in the provided research dossier using high-retention storytelling."""
+        """Generate structured script sections strictly grounded in research using narrative retention blueprints."""
         sources_summary = "\n".join(
             f"- {s.title} ({s.url}): {s.content_snapshot[:1500] if s.content_snapshot else 'No snapshot'}"
             for s in dossier.sources
@@ -53,77 +61,122 @@ class ScriptGenerator:
             if parts:
                 continuity_section = "SERIES CONTINUITY CONTEXT (Preserve narrative thread & CTA, do NOT treat previous episode lore as unverified empirical claims):\n" + "\n".join(parts) + "\n\n"
 
-        format_guidelines = {
-            ContentFormat.EXPLAINER: (
-                "FORMAT: EXPLAINER\n"
-                "- Focus on the core mechanism with intuitive analogy and visual proof.\n"
-                "- Pacing: Hook -> Stakes -> Inner Working -> Breakthrough Payoff."
-            ),
-            ContentFormat.DEMO: (
-                "FORMAT: DEMO / HANDS-ON TUTORIAL\n"
-                "- Focus on concrete action: show setup -> run command -> inspect result -> observe pass/fail.\n"
-                "- Pacing: Action-oriented, live syntax, no theoretical fluff."
-            ),
-            ContentFormat.COMPARISON: (
-                "FORMAT: HEAD-TO-HEAD COMPARISON (A vs B)\n"
-                "- Focus on comparison dimensions: define contrast -> A behavior -> B behavior -> empirical verdict.\n"
-                "- Pacing: Balanced, fact-grounded, clear side-by-side trade-offs."
-            ),
-            ContentFormat.CASE_STUDY: (
-                "FORMAT: PRODUCTION CASE STUDY / POST-MORTEM\n"
-                "- Focus on real events: context -> critical outage/problem -> forensic discovery -> permanent fix.\n"
-                "- Pacing: Narrative tension, forensic logs, hard lessons."
-            ),
-            ContentFormat.EXPERIMENT: (
-                "FORMAT: BENCHMARK EXPERIMENT\n"
-                "- Focus on empirical measurement: hypothesis -> methodology -> metrics -> verdict.\n"
-                "- Pacing: Scientific rigor, grounded numbers, transparent analysis."
-            ),
-            ContentFormat.NEWS: (
-                "FORMAT: INDUSTRY NEWS / BREAKTHROUGH\n"
-                "- Focus on urgent shift: what happened -> why it matters today -> downstream consequences.\n"
-                "- Pacing: Fast, high urgency, direct relevance."
-            ),
-        }.get(content_format, "FORMAT: EXPLAINER\n- Core mechanism with clear visual payoff.")
+        target_duration = (
+            brief.target_duration_seconds
+            if brief
+            else (blueprint.target_duration_seconds if blueprint else 40.0)
+        )
 
-        prompt = f"""You are an elite YouTube creator and scriptwriter renowned for high-retention viral tech videos (in the style of Fireship and Veritasium) for '{channel.title}'.
+        grammar = RetentionPlanner.get_grammar(content_format)
+        grammar_instructions = grammar.script_prompt_instructions
+
+        hook_instruction = ""
+        if hook:
+            hook_instruction = (
+                f"MANDATORY OPENING HOOK (Must use as exact hook line):\n"
+                f"Text: \"{hook.text}\"\n"
+                f"Viewer Promise: \"{hook.promise}\"\n\n"
+            )
+
+        blueprint_instruction = ""
+        if blueprint:
+            cues_summary = "\n".join(
+                f"- At {int(c.target_position_ratio * 100)}% timeline ({c.cue_type.value}): {c.purpose}"
+                for c in blueprint.cues
+            )
+            blueprint_instruction = (
+                f"RETENTION BLUEPRINT PROGRESSION:\n"
+                f"Core Question: {blueprint.core_question}\n"
+                f"Promised Payoff: {blueprint.promised_payoff}\n"
+                f"Pacing Cues:\n{cues_summary}\n\n"
+            )
+
+        tone_instruction = f"Tone: {brief.tone.value}" if brief else "Tone: CONVERSATIONAL"
+        goal_instruction = f"Primary Goal: {brief.primary_goal.value}" if brief else "Primary Goal: WATCH_TIME"
+
+        prompt = f"""You are an elite YouTube creator and scriptwriter renowned for high-retention viral tech videos for '{channel.title}'.
 Audience: {channel.target_audience}
 Niche: {channel.niche}
+{tone_instruction} | {goal_instruction}
 
 TOPIC SEED: {keyword}
+TARGET RUNTIME: ~{target_duration:.0f} seconds
 
-{format_guidelines}
+{grammar_instructions}
 
-{continuity_section}VERIFIED GROUND-TRUTH RESEARCH EVIDENCE:
+{hook_instruction}{blueprint_instruction}{continuity_section}VERIFIED GROUND-TRUTH RESEARCH EVIDENCE:
 {sources_summary}
 
-STRICT ANTI-AI-SLOP RETENTION RULES:
-1. NEVER start with boring textbook greetings ("In this video", "Welcome back", "Today we will explore", "SQLite is a database...").
-2. START IN MEDIAS RES (First 3 seconds): Use a high-stakes paradox, common misconception, or dramatic contrarian hook that stops the scroll immediately.
-3. STORYTELLING CADENCE (30-42 seconds total):
-   - Hook (0-4s): Shocking claim, paradox, or riddle.
-   - Stakes & Conflict (4-12s): What goes wrong without this? (e.g. server crashes, millions of dollars lost, locks freeze everything).
-   - Mechanism / Action (12-28s): Explain or demonstrate the core solution.
-   - Payoff (28-36s): The triumphant breakthrough / measurable win.
-   - Call to Action (36-40s): Short, punchy tease for the next episode.
-4. TONE & PACING:
-   - Punchy conversational rhythm, short sentences, active verbs.
-   - Natural spoken cadence (no robotic passive voice).
+STRICT RETENTION & FACTUAL GROUNDING RULES:
+1. OPENING HOOK: {"Use the exact hook text provided above." if hook else "Start immediately in medias res with a high-stakes paradox or contrarian question. No boring textbook greetings."}
+2. PROMISE & PAYOFF ALIGNMENT: The narrative must escalate directly toward fulfilling the promised payoff. The final segment must clearly resolve the opening question.
+3. PACING & DURATION: Target approximately {target_duration:.0f} seconds total runtime.
+4. OBSERVABLE VISUAL ACTION:
+   - In 'visual_prompt', describe WHAT must be shown (concrete observable action or visual evidence requirement).
+   - DO NOT prescribe glowing UI, neon code, cyberpunk aesthetics, generic B-roll, or aesthetic styling. AutoDirector determines visual style.
 5. FACTUAL GROUNDING:
    - All factual assertions MUST be 100% strictly grounded in the VERIFIED RESEARCH EVIDENCE above. Do not invent ungrounded benchmarks.
 
 OUTPUT SCHEMA REQUIREMENTS:
-- hook: The explosive 3-second opening hook.
-- intro: Quick 4-second conflict setup.
-- segments: 3 to 4 sequential scene segments, each with:
-    * narration: Spoken voiceover for this beat (conversational, punchy).
-    * visual_prompt: Cinematic, dynamic visual description for GFlow/graphics (avoid static slides; specify motion, glowing UI, code metaphors).
-    * target_duration_seconds: Duration in seconds (5.0 to 12.0s per segment).
-- cta: Punchy 1-sentence call to action.
-- voiceover_text: Full seamless contiguous voiceover combining hook, intro, segment narrations, and cta.
-- estimated_duration: Total duration (30.0 to 42.0 seconds).
+- hook: The opening hook line (3-5 seconds).
+- intro: Context setup establishing the stakes and problem.
+- segments: Sequential scene segments, each with:
+    * narration: Spoken voiceover for this beat (conversational, punchy, active voice).
+    * visual_prompt: Observable visual action or concrete evidence requirement (e.g. 'Show reader thread querying database while writer appends to WAL file').
+    * target_duration_seconds: Duration in seconds.
+- cta: Punchy, contextual call to action placed at the very end.
+- voiceover_text: Seamless full contiguous voiceover combining hook, intro, segment narrations, and cta.
+- estimated_duration: Total duration (~{target_duration:.0f} seconds).
 """
-        return self.backend.generate_structured(prompt, ScriptSections)
+        sections = self.backend.generate_structured(prompt, ScriptSections)
+        if hook:
+            sections.hook = hook.text
+            # Re-ensure canonical voiceover includes winning hook
+            sections.ensure_canonical_voiceover()
+
+        return sections
+
+    def rewrite_for_retention(
+        self,
+        channel: Channel,
+        original_sections: ScriptSections,
+        retention_report: ScriptRetentionReport,
+        blueprint: RetentionBlueprint,
+        dossier: ResearchDossier,
+    ) -> ScriptSections:
+        """Rewrite script sections to eliminate detected drop risks and resolve open loops while maintaining factual truth."""
+        issues_summary = "\n".join(f"- Issue: {iss}" for iss in retention_report.issues)
+        instructions_summary = "\n".join(f"- Rewrite instruction: {inst}" for inst in retention_report.rewrite_instructions)
+        sources_summary = "\n".join(
+            f"- {s.title} ({s.url}): {s.content_snapshot[:1200] if s.content_snapshot else 'No snapshot'}"
+            for s in dossier.sources
+        )
+
+        prompt = f"""You are an elite YouTube script doctor repairing retention hazards in a video script for '{channel.title}'.
+
+ORIGINAL SCRIPT VOICEOVER:
+{original_sections.voiceover_text}
+
+DETECTED RETENTION HAZARDS:
+{issues_summary}
+
+REWRITE DIRECTIVES:
+{instructions_summary}
+- Opening Hook: Must preserve '{blueprint.hook.text}'
+- Promised Payoff: Must resolve '{blueprint.promised_payoff}' in the climax/ending
+- Pacing: Eliminate exposition stalls, ensure no CTA before payoff.
+- Observable Visual Action: Describe what must be shown, NOT neon/cyberpunk styling.
+
+GROUND TRUTH RESEARCH EVIDENCE:
+{sources_summary}
+
+Return the repaired ScriptSections with hook, intro, segments, cta, voiceover_text, and estimated_duration.
+"""
+        revised = self.backend.generate_structured(prompt, ScriptSections)
+        if blueprint and blueprint.hook:
+            revised.hook = blueprint.hook.text
+            revised.ensure_canonical_voiceover()
+        return revised
 
     def rewrite_script_sections(
         self,
@@ -156,7 +209,9 @@ GROUND TRUTH RESEARCH EVIDENCE:
 REWRITE RULES:
 1. Replace or delete every single flagged claim with accurate facts directly verifiable from the Research Evidence.
 2. PRESERVE the intense pacing, tension hook, and conversational rhythm (NO textbook slop, NO generic lecture voice).
-3. Return the repaired ScriptSections structure with hook, intro, segments, cta, voiceover_text, and estimated_duration.
+3. Ensure visual_prompt describes observable actions or evidence, NOT aesthetic styling or glowing UI slop.
+4. Return the repaired ScriptSections structure with hook, intro, segments, cta, voiceover_text, and estimated_duration.
 """
         return self.backend.generate_structured(prompt, ScriptSections)
+
 
