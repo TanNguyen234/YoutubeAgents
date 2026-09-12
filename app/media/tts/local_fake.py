@@ -52,8 +52,9 @@ class LocalFakeTTSBackend:
     ) -> TTSResult:
         self.call_count += 1
         resolved_voice = voice or self.default_voice
-        create_local_wav(output_path, duration_seconds=self.duration, tag=f"{resolved_voice}|{rate}|{pitch}|{text}")
-        content_bytes = output_path.read_bytes()
+        actual_output = output_path.with_suffix(".wav") if output_path.suffix.lower() == ".mp3" else output_path
+        create_local_wav(actual_output, duration_seconds=self.duration, tag=f"{resolved_voice}|{rate}|{pitch}|{text}")
+        content_bytes = actual_output.read_bytes()
 
         words = text.strip().split()
         timing_events = []
@@ -67,7 +68,7 @@ class LocalFakeTTSBackend:
                 })
 
         return TTSResult(
-            audio_path=str(output_path),
+            audio_path=str(actual_output),
             duration_seconds=self.duration,
             sample_rate=44100,
             backend=self.backend_name,
