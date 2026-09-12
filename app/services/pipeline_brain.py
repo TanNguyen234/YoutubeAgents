@@ -83,6 +83,7 @@ class BrainPipeline:
         self.extractor = extractor or ClaimExtractor(backend=self.backend)
         self.checker = checker or FactChecker(backend=self.backend)
         self.tts_backend = tts_backend
+        self.last_retention_report: Optional[Any] = None
 
     def run_stage_1_to_5(
         self,
@@ -322,13 +323,69 @@ class BrainPipeline:
             # 7b. Post-Fact-Check Final Retention QA (fact-check rewrite can alter pacing)
             final_ret_report = retention_evaluator.evaluate(project.script, blueprint=blueprint)
 
+            # Option (a): If FactCheck passed, but retention QA failed for non-factual creative defects:
+            # Perform at most ONE bounded retention rewrite, then RE-RUN claim extraction + fact checking, then retention QA again.
+            if (
+                report.overall_verdict == QualityStatus.PASSED
+                and report.failed_count == 0
+                and len(report.claims) > 0
+                and not final_ret_report.passed
+                and len(final_ret_report.rewrite_instructions) > 0
+                and project.script.sections is not None
+            ):
+                revised_sections = self.generator.rewrite_for_retention(
+                    channel=channel,
+                    original_sections=project.script.sections,
+                    retention_report=final_ret_report,
+                    blueprint=blueprint,
+                    dossier=dossier,
+                )
+                revised_script = self.writer.build_script(
+                    script_id=f"scr-{project_id}-ret-final",
+                    title=keyword,
+                    sections=revised_sections,
+                    content_format=content_format,
+                    retention_blueprint=blueprint,
+                )
+                project.script = revised_script
+                project.content_format = content_format
+                self.repo.save_video_project(project)
+
+                # CRITICAL INVARIANT: NEVER modify script after fact check without re-running fact check!
+                extracted_claims = self.extractor.extract_from_script(project.script)
+                dossier.claims = extracted_claims
+                report = self.checker.verify_all_claims(
+                    claims=extracted_claims,
+                    dossier=dossier,
+                    project_id=project_id,
+                )
+                self.repo.save_fact_check_report(report)
+
+                # Re-evaluate final retention report after re-verification
+                final_ret_report = retention_evaluator.evaluate(project.script, blueprint=blueprint)
+
+            # Persist final retention report onto script and pipeline instance
+            if project.script:
+                project.script.retention_report = final_ret_report
+                if project.script.sections:
+                    project.script.sections.retention_report = final_ret_report
+            self.last_retention_report = final_ret_report
+            self.repo.save_video_project(project)
+
             # 8. Stage 6: Authoritative Verification Gate
             if report.overall_verdict == QualityStatus.PASSED and report.failed_count == 0 and len(report.claims) > 0:
-                self.repo.update_project_state(
-                    project_id=project_id,
-                    to_state=VideoLifecycleState.VERIFIED,
-                    reason=f"All {report.verified_count} factual claims verified against source evidence",
-                )
+                if final_ret_report.passed:
+                    self.repo.update_project_state(
+                        project_id=project_id,
+                        to_state=VideoLifecycleState.VERIFIED,
+                        reason=f"All {report.verified_count} factual claims verified against source evidence and retention QA passed",
+                    )
+                else:
+                    self.repo.update_project_state(
+                        project_id=project_id,
+                        to_state=VideoLifecycleState.VERIFIED,
+                        reason=f"All {report.verified_count} factual claims verified against source evidence (retention warning: {len(final_ret_report.issues)} issue(s))",
+                    )
             else:
                 self.repo.update_project_state(
                     project_id=project_id,
@@ -347,6 +404,8 @@ class BrainPipeline:
         if updated_project and updated_project.script and project and project.script:
             if not updated_project.script.retention_blueprint and project.script.retention_blueprint:
                 updated_project.script.retention_blueprint = project.script.retention_blueprint
+            if not getattr(updated_project.script, "retention_report", None) and getattr(project.script, "retention_report", None):
+                updated_project.script.retention_report = project.script.retention_report
         return updated_project, report
 
     def run_full_autonomous_lifecycle(

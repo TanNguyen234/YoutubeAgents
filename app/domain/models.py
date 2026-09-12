@@ -340,6 +340,9 @@ class ScriptSections(BaseModel):
     retention_blueprint: Optional[RetentionBlueprint] = Field(
         default=None, description="Format-aware narrative retention blueprint"
     )
+    retention_report: Optional[Any] = Field(
+        default=None, description="Format-aware script retention evaluation report"
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -376,6 +379,9 @@ class Script(BaseModel):
     content_format: ContentFormat = Field(default=ContentFormat.EXPLAINER, description="Content format archetype")
     retention_blueprint: Optional[RetentionBlueprint] = Field(
         default=None, description="Format-aware narrative retention blueprint"
+    )
+    retention_report: Optional[Any] = Field(
+        default=None, description="Format-aware script retention evaluation report"
     )
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

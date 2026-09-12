@@ -469,6 +469,20 @@ class MediaProductionPipeline:
                         canonical_narration=canonical_narration,
                     )
 
+                # Populate real TTS timestamps on script retention report if present
+                if project.script and getattr(project.script, "retention_report", None):
+                    try:
+                        ret_rep = project.script.retention_report
+                        if hasattr(ret_rep, "populate_timestamps"):
+                            ret_rep.populate_timestamps(
+                                total_duration_seconds=tts_res.duration_seconds,
+                                timing_events=tts_res.timing_events,
+                                canonical_narration=canonical_narration,
+                            )
+                            self.repo.save_video_project(project)
+                    except Exception:
+                        pass
+
                 timeline, storyboard = self.director.plan_and_render_timeline(
                     project_id=project_id,
                     script=project.script,

@@ -616,4 +616,336 @@ def test_fewer_than_3_retention_moments_reports_weakness_without_fabrication(sam
     assert any("FEW_RETENTION_MOMENTS" in iss for iss in report.issues)
 
 
+def test_final_retention_qa_consumed_and_observable_in_pipeline(tmp_path, monkeypatch):
+    """Verify final retention QA report is meaningfully consumed, observable on script, and saved in repository."""
+    from unittest.mock import MagicMock
+    from app.db.repository import SQLiteRepository
+    from app.domain.enums import ClaimVerificationVerdict, QualityStatus, VideoLifecycleState
+    from app.domain.models import Claim, FactCheckReport, HookAngle, HookCandidate, ResearchDossier, ResearchSource
+    from app.services.pipeline_brain import BrainPipeline
+
+    repo = SQLiteRepository(str(tmp_path / "test_obs.db"))
+
+    channel = Channel(
+        id="chan_ret_obs",
+        title="Systems Engineering",
+        handle="@SystemsEng",
+        description="Deep tech channel",
+        niche="Database Internals",
+        target_audience="Engineers",
+    )
+    repo.save_channel(channel)
+
+    brain = BrainPipeline(repository=repo)
+
+    mock_dossier = ResearchDossier(
+        id="dos_ret_obs",
+        topic_id="top_ret_obs",
+        topic="SQLite Concurrency",
+        summary="SQLite WAL eliminates reader blocking.",
+        sources=[ResearchSource(id="s1", title="SQLite WAL", url="https://sqlite.org/wal.html", content_snapshot="WAL mode eliminates reader blocking.", author="Richard Hipp", content_sha256="dummy_sha")],
+        claims=[],
+    )
+    brain.research_agent.build_dossier_from_urls = MagicMock(return_value=mock_dossier)
+    brain.strategist.duplicate_detector.check_duplicate = MagicMock(return_value=(False, 0.0, None))
+    brain.evaluator.evaluate_topic_with_reasoning = MagicMock(return_value=(
+        {
+            "demand": 8.0, "freshness": 7.0, "competition": 3.0,
+            "channel_fit": 8.0, "originality": 7.5, "evidence_quality": 9.0,
+            "production_feasibility": 8.0,
+        },
+        "Strong opportunity",
+        {"volume_source": "seed"},
+    ))
+
+    mock_scenes = [
+        Scene(index=0, hook="SQLite concurrency is misunderstood.", narration="WAL mode changes locking.", target_duration_seconds=15.0),
+        Scene(index=1, hook="Payoff.", narration="WAL readers never block writers in production.", target_duration_seconds=15.0),
+    ]
+    mock_sections = ScriptSections(
+        hook="SQLite concurrency is misunderstood.",
+        intro="Let's unpack how WAL mode changes locking.",
+        segments=mock_scenes,
+        cta="WAL fixes reader-writer blocking, but checkpointing creates the next bottleneck — that's the next breakdown.",
+        estimated_duration=30.0,
+    )
+    brain.generator.generate_script_sections = MagicMock(return_value=mock_sections)
+    brain.extractor.extract_from_script = MagicMock(return_value=[
+        Claim(id="c1", statement="WAL readers never block writers in production.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True, source_id="s1")
+    ])
+
+    sample_hook = HookCandidate(
+        text="SQLite concurrency is misunderstood.",
+        angle=HookAngle.CURIOSITY_GAP,
+        promise="Unpack WAL concurrency.",
+    )
+    monkeypatch.setattr(
+        "app.services.pipeline_brain.HookTournamentService.generate_hook_candidates",
+        lambda *args, **kwargs: [sample_hook],
+    )
+    monkeypatch.setattr(
+        "app.services.pipeline_brain.HookTournamentService.run_tournament",
+        lambda *args, **kwargs: (sample_hook, MagicMock(), [MagicMock()]),
+    )
+
+    brain.checker.verify_all_claims = MagicMock(return_value=FactCheckReport(
+        id="fcr_obs_test",
+        project_id="proj_ret_obs",
+        audit_summary="All claims verified.",
+        claims=[
+            Claim(id="c1", statement="WAL readers never block writers in production.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True)
+        ],
+        verified_count=1,
+        failed_count=0,
+        overall_verdict=QualityStatus.PASSED,
+    ))
+
+    project, report = brain.run_stage_1_to_5(
+        project_id="proj_ret_obs",
+        channel=channel,
+        keyword="SQLite Concurrency",
+        seed_urls=["https://sqlite.org/wal.html"],
+    )
+
+    # 1. State must be VERIFIED
+    assert project.state == VideoLifecycleState.VERIFIED
+    # 2. Final retention report must be observable on project.script
+    assert project.script.retention_report is not None
+    # 3. Final retention report must be observable on brain
+    assert brain.last_retention_report is not None
+    assert brain.last_retention_report.hook_quality_score > 0.0
+    # 4. Project retrieved from repo must also have retention report preserved
+    reloaded = repo.get_video_project("proj_ret_obs")
+    assert reloaded is not None
+    assert reloaded.script is not None
+    assert reloaded.script.retention_report is not None
+
+
+def test_final_retention_defect_triggers_bounded_rewrite_and_refactcheck(tmp_path, monkeypatch):
+    """When FactCheck passes but retention QA detects non-factual creative defects, a bounded rewrite and re-factcheck run."""
+    from unittest.mock import MagicMock
+    from app.db.repository import SQLiteRepository
+    from app.domain.enums import ClaimVerificationVerdict, QualityStatus, VideoLifecycleState
+    from app.domain.models import Claim, FactCheckReport, HookAngle, HookCandidate, ResearchDossier, ResearchSource
+    from app.services.pipeline_brain import BrainPipeline
+    from app.services.script_retention import ScriptRetentionReport
+
+    repo = SQLiteRepository(str(tmp_path / "test_rewrite.db"))
+
+    channel = Channel(
+        id="chan_ret_rewrite",
+        title="Systems Engineering",
+        handle="@SystemsEng",
+        description="Deep tech channel",
+        niche="Database Internals",
+        target_audience="Engineers",
+    )
+    repo.save_channel(channel)
+
+    brain = BrainPipeline(repository=repo)
+
+    mock_dossier = ResearchDossier(
+        id="dos_ret_rewrite",
+        topic_id="top_ret_rewrite",
+        topic="SQLite Concurrency",
+        summary="SQLite WAL eliminates reader blocking.",
+        sources=[ResearchSource(id="s1", title="SQLite WAL", url="https://sqlite.org/wal.html", content_snapshot="WAL mode eliminates reader blocking.", author="Richard Hipp", content_sha256="dummy_sha")],
+        claims=[],
+    )
+    brain.research_agent.build_dossier_from_urls = MagicMock(return_value=mock_dossier)
+    brain.strategist.duplicate_detector.check_duplicate = MagicMock(return_value=(False, 0.0, None))
+    brain.evaluator.evaluate_topic_with_reasoning = MagicMock(return_value=(
+        {"demand": 8.0, "freshness": 7.0, "competition": 3.0, "channel_fit": 8.0, "originality": 7.5, "evidence_quality": 9.0, "production_feasibility": 8.0},
+        "Strong opportunity",
+        {"volume_source": "seed"},
+    ))
+
+    mock_scenes = [
+        Scene(index=0, hook="SQLite concurrency is misunderstood.", narration="WAL mode changes locking.", target_duration_seconds=15.0),
+        Scene(index=1, hook="Payoff.", narration="WAL readers never block writers in production.", target_duration_seconds=15.0),
+    ]
+    mock_sections = ScriptSections(
+        hook="SQLite concurrency is misunderstood.",
+        intro="Let's unpack how WAL mode changes locking.",
+        segments=mock_scenes,
+        cta="Like and subscribe.",  # Detached CTA defect
+        estimated_duration=30.0,
+    )
+    brain.generator.generate_script_sections = MagicMock(return_value=mock_sections)
+
+    revised_sections = ScriptSections(
+        hook="SQLite concurrency is misunderstood.",
+        intro="Let's unpack how WAL mode changes locking.",
+        segments=mock_scenes,
+        cta="WAL fixes reader-writer blocking, but checkpointing creates the next bottleneck — that's the next breakdown.",
+        estimated_duration=30.0,
+    )
+    brain.generator.rewrite_for_retention = MagicMock(return_value=revised_sections)
+
+    sample_hook = HookCandidate(
+        text="SQLite concurrency is misunderstood.",
+        angle=HookAngle.CURIOSITY_GAP,
+        promise="Unpack WAL concurrency.",
+    )
+    monkeypatch.setattr(
+        "app.services.pipeline_brain.HookTournamentService.generate_hook_candidates",
+        lambda *args, **kwargs: [sample_hook],
+    )
+    monkeypatch.setattr(
+        "app.services.pipeline_brain.HookTournamentService.run_tournament",
+        lambda *args, **kwargs: (sample_hook, MagicMock(), [MagicMock()]),
+    )
+
+    brain.extractor.extract_from_script = MagicMock(return_value=[
+        Claim(id="c1", statement="WAL readers never block writers in production.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True, source_id="s1")
+    ])
+
+    verify_calls = []
+    def mock_verify(*args, **kwargs):
+        verify_calls.append(True)
+        return FactCheckReport(
+            id=f"fcr_rewrite_{len(verify_calls)}",
+            project_id="proj_ret_rewrite",
+            audit_summary="Claims verified.",
+            claims=[
+                Claim(id="c1", statement="WAL readers never block writers in production.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True)
+            ],
+            verified_count=1,
+            failed_count=0,
+            overall_verdict=QualityStatus.PASSED,
+        )
+
+    brain.checker.verify_all_claims = MagicMock(side_effect=mock_verify)
+
+    project, report = brain.run_stage_1_to_5(
+        project_id="proj_ret_rewrite",
+        channel=channel,
+        keyword="SQLite Concurrency",
+        seed_urls=["https://sqlite.org/wal.html"],
+    )
+
+    # Verify that bounded rewrite was triggered
+    assert brain.generator.rewrite_for_retention.call_count >= 1
+    # Verify that fact-check was re-run after the retention rewrite (total calls >= 2)
+    assert len(verify_calls) >= 2
+    # State should be VERIFIED
+    assert project.state == VideoLifecycleState.VERIFIED
+    assert project.script.retention_report is not None
+
+
+def test_retention_rewrite_failure_in_factcheck_fails_verification(tmp_path, monkeypatch):
+    """If a retention rewrite introduces ungrounded claims, FactChecker rejects it and state becomes FAILED."""
+    from unittest.mock import MagicMock
+    from app.db.repository import SQLiteRepository
+    from app.domain.enums import ClaimVerificationVerdict, QualityStatus, VideoLifecycleState
+    from app.domain.models import Claim, FactCheckReport, HookAngle, HookCandidate, ResearchDossier, ResearchSource
+    from app.services.pipeline_brain import BrainPipeline
+
+    repo = SQLiteRepository(str(tmp_path / "test_fail.db"))
+
+    channel = Channel(
+        id="chan_ret_fail",
+        title="Systems Engineering",
+        handle="@SystemsEng",
+        description="Deep tech channel",
+        niche="Database Internals",
+        target_audience="Engineers",
+    )
+    repo.save_channel(channel)
+
+    brain = BrainPipeline(repository=repo)
+
+    mock_dossier = ResearchDossier(
+        id="dos_ret_fail",
+        topic_id="top_ret_fail",
+        topic="SQLite Concurrency",
+        summary="SQLite WAL eliminates reader blocking.",
+        sources=[ResearchSource(id="s1", title="SQLite WAL", url="https://sqlite.org/wal.html", content_snapshot="WAL mode eliminates reader blocking.", author="Richard Hipp", content_sha256="dummy_sha")],
+        claims=[],
+    )
+    brain.research_agent.build_dossier_from_urls = MagicMock(return_value=mock_dossier)
+    brain.strategist.duplicate_detector.check_duplicate = MagicMock(return_value=(False, 0.0, None))
+    brain.evaluator.evaluate_topic_with_reasoning = MagicMock(return_value=(
+        {"demand": 8.0, "freshness": 7.0, "competition": 3.0, "channel_fit": 8.0, "originality": 7.5, "evidence_quality": 9.0, "production_feasibility": 8.0},
+        "Strong opportunity",
+        {"volume_source": "seed"},
+    ))
+
+    mock_scenes = [
+        Scene(index=0, hook="SQLite concurrency is misunderstood.", narration="WAL mode changes locking.", target_duration_seconds=15.0),
+        Scene(index=1, hook="Payoff.", narration="WAL readers never block writers in production.", target_duration_seconds=15.0),
+    ]
+    mock_sections = ScriptSections(
+        hook="SQLite concurrency is misunderstood.",
+        intro="Let's unpack how WAL mode changes locking.",
+        segments=mock_scenes,
+        cta="Like and subscribe.",
+        estimated_duration=30.0,
+    )
+    brain.generator.generate_script_sections = MagicMock(return_value=mock_sections)
+    brain.generator.rewrite_for_retention = MagicMock(return_value=mock_sections)
+
+    sample_hook = HookCandidate(
+        text="SQLite concurrency is misunderstood.",
+        angle=HookAngle.CURIOSITY_GAP,
+        promise="Unpack WAL concurrency.",
+    )
+    monkeypatch.setattr(
+        "app.services.pipeline_brain.HookTournamentService.generate_hook_candidates",
+        lambda *args, **kwargs: [sample_hook],
+    )
+    monkeypatch.setattr(
+        "app.services.pipeline_brain.HookTournamentService.run_tournament",
+        lambda *args, **kwargs: (sample_hook, MagicMock(), [MagicMock()]),
+    )
+
+    brain.extractor.extract_from_script = MagicMock(return_value=[
+        Claim(id="c1", statement="WAL readers never block writers in production.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True, source_id="s1")
+    ])
+
+    verify_calls = []
+    def mock_verify(*args, **kwargs):
+        verify_calls.append(True)
+        if len(verify_calls) == 1:
+            # First pass: passed
+            return FactCheckReport(
+                id="fcr_1",
+                project_id="proj_ret_fail",
+                audit_summary="Pass initially.",
+                claims=[
+                    Claim(id="c1", statement="WAL readers never block writers in production.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True)
+                ],
+                verified_count=1,
+                failed_count=0,
+                overall_verdict=QualityStatus.PASSED,
+            )
+        else:
+            # Second pass after retention rewrite: hallucination introduced, FAILED
+            return FactCheckReport(
+                id="fcr_2",
+                project_id="proj_ret_fail",
+                audit_summary="Retention rewrite introduced hallucinated claim.",
+                claims=[
+                    Claim(id="c2", statement="WAL speeds up 1000x on quantum hardware.", verdict=ClaimVerificationVerdict.REMOVE, verified=False)
+                ],
+                verified_count=0,
+                failed_count=1,
+                overall_verdict=QualityStatus.FAILED,
+            )
+
+    brain.checker.verify_all_claims = MagicMock(side_effect=mock_verify)
+
+    project, report = brain.run_stage_1_to_5(
+        project_id="proj_ret_fail",
+        channel=channel,
+        keyword="SQLite Concurrency",
+        seed_urls=["https://sqlite.org/wal.html"],
+    )
+
+    # Verification gate must fail-closed: FAILED
+    assert project.state == VideoLifecycleState.FAILED
+    assert "unverified claim" in repo.get_state_history("proj_ret_fail")[-1]["reason"].lower()
+
+
+
 
