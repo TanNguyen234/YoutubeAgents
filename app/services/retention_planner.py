@@ -30,6 +30,8 @@ FORMAT_GRAMMARS: Dict[ContentFormat, FormatNarrativeGrammar] = {
         stages=["Hook", "Problem", "Mechanism", "Surprising Implication", "Payoff"],
         description="Core mechanism explanation with intuitive analogy and visual proof.",
         script_prompt_instructions=(
+            "FORMAT: EXPLAINER\n"
+            "- Structure: Hook -> Mental Model -> Core Mechanism -> Edge Cases -> Takeaway\n"
             "NARRATIVE GRAMMAR (EXPLAINER):\n"
             "1. Hook: Immediate paradox, misconception, or bold question.\n"
             "2. Problem: Why default mental models fail or why this matters.\n"
@@ -43,6 +45,8 @@ FORMAT_GRAMMARS: Dict[ContentFormat, FormatNarrativeGrammar] = {
         stages=["Desired Result", "Setup", "Action", "Visible Result", "Failure/Edge Case", "Takeaway"],
         description="Hands-on demonstration showing action, live syntax, and observable output.",
         script_prompt_instructions=(
+            "FORMAT: DEMO / HANDS-ON TUTORIAL\n"
+            "- Structure: Expected outcome -> show setup -> run command/code -> observe output -> troubleshooting\n"
             "NARRATIVE GRAMMAR (DEMO / TUTORIAL):\n"
             "1. Desired Result: Show the target outcome first.\n"
             "2. Setup: Minimal prerequisite configuration without fluff.\n"
@@ -57,6 +61,8 @@ FORMAT_GRAMMARS: Dict[ContentFormat, FormatNarrativeGrammar] = {
         stages=["Shared Problem", "Option A", "Option B", "Decisive Dimension", "Tradeoff", "Verdict"],
         description="Head-to-head evaluation analyzing trade-offs across decisive dimensions.",
         script_prompt_instructions=(
+            "FORMAT: HEAD-TO-HEAD COMPARISON\n"
+            "- Structure: Contender overview -> workload benchmark -> A behavior -> B behavior -> decision matrix\n"
             "NARRATIVE GRAMMAR (COMPARISON / HEAD-TO-HEAD):\n"
             "1. Shared Problem: The common challenge both contenders attempt to solve.\n"
             "2. Option A: Strengths and core design philosophy of Contender A.\n"

@@ -163,12 +163,22 @@ class VideoCreativeBrief(BaseModel):
     primary_goal: PrimaryVideoGoal = Field(default=PrimaryVideoGoal.WATCH_TIME, description="Primary video objective")
     tone: TonePreset = Field(default=TonePreset.CONVERSATIONAL, description="Audience delivery tone")
     desired_viewer_emotion: Optional[str] = Field(default=None, description="Key target emotional response")
+    common_misconception: Optional[str] = Field(
+        default=None, description="Grounded common misconception from user input or dossier evidence"
+    )
+    common_failure: Optional[str] = Field(
+        default=None, description="Grounded common failure mode or bottleneck from user input or dossier evidence"
+    )
 
 
 def resolve_default_creative_brief(
     platform_format: PlatformFormat = PlatformFormat.SHORTS_9_16,
     content_format: ContentFormat = ContentFormat.EXPLAINER,
     requested_duration: Optional[float] = None,
+    primary_goal: Optional[PrimaryVideoGoal] = None,
+    dossier: Optional["ResearchDossier"] = None,
+    common_misconception: Optional[str] = None,
+    common_failure: Optional[str] = None,
 ) -> VideoCreativeBrief:
     """Provide deterministic defaults for creative brief based on format archetype."""
     if requested_duration and requested_duration > 0.0:
@@ -199,11 +209,46 @@ def resolve_default_creative_brief(
         content_format, (TonePreset.CONVERSATIONAL, PrimaryVideoGoal.WATCH_TIME, "curiosity and clarity")
     )
 
+    if primary_goal is not None:
+        goal = primary_goal
+        if primary_goal == PrimaryVideoGoal.REVENUE:
+            emotion = "commercial value and ROI"
+
+    # Derive grounded misconception/failure if not explicitly supplied
+    grounded_misconception = common_misconception
+    grounded_failure = common_failure
+
+    if dossier and (grounded_misconception is None or grounded_failure is None):
+        import re
+        misconception_keywords = ("misconception", "misunderstood", "myth", "mistakenly", "misinterpreted", "confused")
+        failure_keywords = ("failure", "bottleneck", "crash", "outage", "flaw", "bug", "deadlock", "timeout", "latency spike")
+
+        candidate_texts = []
+        for c in getattr(dossier, "claims", []):
+            if getattr(c, "statement", None):
+                candidate_texts.append(c.statement)
+        for s in getattr(dossier, "sources", []):
+            if getattr(s, "content_snapshot", None):
+                for sent in re.split(r"(?<=[.!?])\s+", s.content_snapshot):
+                    if len(sent.split()) >= 4:
+                        candidate_texts.append(sent.strip())
+
+        for text in candidate_texts:
+            t_lower = text.lower()
+            if grounded_misconception is None and any(k in t_lower for k in misconception_keywords):
+                grounded_misconception = text.rstrip(".")
+            if grounded_failure is None and any(k in t_lower for k in failure_keywords):
+                grounded_failure = text.rstrip(".")
+            if grounded_misconception is not None and grounded_failure is not None:
+                break
+
     return VideoCreativeBrief(
         target_duration_seconds=duration,
         primary_goal=goal,
         tone=tone,
         desired_viewer_emotion=emotion,
+        common_misconception=grounded_misconception,
+        common_failure=grounded_failure,
     )
 
 

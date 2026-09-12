@@ -154,6 +154,7 @@ class PrimaryVideoGoal(str, Enum):
     AUTHORITY = "AUTHORITY"
     LEAD_GENERATION = "LEAD_GENERATION"
     SHAREABILITY = "SHAREABILITY"
+    REVENUE = "REVENUE"
 
 
 class TonePreset(str, Enum):

@@ -94,6 +94,23 @@ class ScriptGenerator:
         tone_instruction = f"Tone: {brief.tone.value}" if brief else "Tone: CONVERSATIONAL"
         goal_instruction = f"Primary Goal: {brief.primary_goal.value}" if brief else "Primary Goal: WATCH_TIME"
 
+        cta_framing = "Flow naturally from the delivered payoff to the next logical question or valuable takeaway."
+        if brief:
+            from app.domain.enums import PrimaryVideoGoal
+            if brief.primary_goal == PrimaryVideoGoal.REVENUE:
+                cta_framing = "Primary Goal is REVENUE: Anchor the CTA around commercial value, ROI, or business efficiency without ungrounded financial promises."
+            elif brief.primary_goal == PrimaryVideoGoal.SUBSCRIBE:
+                cta_framing = "Primary Goal is SUBSCRIBE: Flow naturally from the delivered payoff into the next unresolved topic in the series."
+            elif brief.primary_goal == PrimaryVideoGoal.LEAD_GENERATION:
+                cta_framing = "Primary Goal is LEAD_GENERATION: Direct viewers to actionable resources or tools directly tied to solving the problem."
+
+        context_brief_notes = []
+        if brief and brief.common_misconception:
+            context_brief_notes.append(f"- Documented Misconception: {brief.common_misconception}")
+        if brief and brief.common_failure:
+            context_brief_notes.append(f"- Documented Failure/Bottleneck: {brief.common_failure}")
+        brief_notes_str = ("CREATIVE CONTEXT NOTES:\n" + "\n".join(context_brief_notes) + "\n\n") if context_brief_notes else ""
+
         prompt = f"""You are an elite YouTube creator and scriptwriter renowned for high-retention viral tech videos for '{channel.title}'.
 Audience: {channel.target_audience}
 Niche: {channel.niche}
@@ -104,7 +121,7 @@ TARGET RUNTIME: ~{target_duration:.0f} seconds
 
 {grammar_instructions}
 
-{hook_instruction}{blueprint_instruction}{continuity_section}VERIFIED GROUND-TRUTH RESEARCH EVIDENCE:
+{hook_instruction}{blueprint_instruction}{brief_notes_str}{continuity_section}VERIFIED GROUND-TRUTH RESEARCH EVIDENCE:
 {sources_summary}
 
 STRICT RETENTION & FACTUAL GROUNDING RULES:
@@ -124,7 +141,7 @@ OUTPUT SCHEMA REQUIREMENTS:
     * narration: Spoken voiceover for this beat (conversational, punchy, active voice).
     * visual_prompt: Observable visual action or concrete evidence requirement (e.g. 'Show reader thread querying database while writer appends to WAL file').
     * target_duration_seconds: Duration in seconds.
-- cta: Punchy, contextual call to action placed at the very end.
+- cta: Punchy, contextual call to action placed at the very end ({cta_framing}).
 - voiceover_text: Seamless full contiguous voiceover combining hook, intro, segment narrations, and cta.
 - estimated_duration: Total duration (~{target_duration:.0f} seconds).
 """

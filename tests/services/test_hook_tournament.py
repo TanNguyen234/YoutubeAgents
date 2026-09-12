@@ -191,3 +191,72 @@ def test_tournament_raises_if_all_candidates_unsafe(mock_dossier, mock_brief):
         service.run_tournament(candidates, "SQLite WAL", mock_dossier, mock_brief)
 
     assert "factual safety" in str(exc_info.value).lower()
+
+
+def test_primary_video_goal_revenue_and_cta_framing():
+    """Verify PrimaryVideoGoal.REVENUE exists, preserves all goals, and influences framing without fake analytics."""
+    expected_goals = {
+        "WATCH_TIME",
+        "SUBSCRIBE",
+        "EDUCATE",
+        "AUTHORITY",
+        "LEAD_GENERATION",
+        "SHAREABILITY",
+        "REVENUE",
+    }
+    actual_goals = {g.value for g in PrimaryVideoGoal}
+    assert actual_goals == expected_goals
+
+    brief_revenue = resolve_default_creative_brief(
+        content_format=ContentFormat.EXPLAINER,
+        primary_goal=PrimaryVideoGoal.REVENUE,
+    )
+    assert brief_revenue.primary_goal == PrimaryVideoGoal.REVENUE
+    assert "commercial value" in brief_revenue.desired_viewer_emotion.lower()
+
+
+def test_creative_brief_grounded_misconception_and_failure(mock_dossier):
+    """Creative brief extracts grounded misconception and failure from dossier or keeps None without hallucination."""
+    # 1. Without evidence, values must remain None (never invent 'everyone does X')
+    brief_empty = resolve_default_creative_brief(
+        content_format=ContentFormat.EXPLAINER,
+        dossier=mock_dossier,
+    )
+    assert brief_empty.common_misconception is None
+    assert brief_empty.common_failure is None
+
+    # 2. User explicit input is respected
+    brief_user = resolve_default_creative_brief(
+        content_format=ContentFormat.EXPLAINER,
+        common_misconception="readers always acquire exclusive table locks",
+        common_failure="checkpoint starvation under continuous heavy writes",
+    )
+    assert brief_user.common_misconception == "readers always acquire exclusive table locks"
+    assert brief_user.common_failure == "checkpoint starvation under continuous heavy writes"
+
+    # 3. Grounded extraction from dossier claims
+    mock_dossier.claims.append(
+        Claim(
+            id="clm_misconception",
+            statement="A common misconception is that WAL mode eliminates all disk synchronization overhead",
+            source_id="src_sqlite_wal",
+            verified=True,
+        )
+    )
+    mock_dossier.claims.append(
+        Claim(
+            id="clm_failure",
+            statement="The main bottleneck occurs when checkpoints cannot complete due to active readers",
+            source_id="src_sqlite_wal",
+            verified=True,
+        )
+    )
+    brief_grounded = resolve_default_creative_brief(
+        content_format=ContentFormat.EXPLAINER,
+        dossier=mock_dossier,
+    )
+    assert brief_grounded.common_misconception is not None
+    assert "WAL mode eliminates all disk synchronization overhead" in brief_grounded.common_misconception
+    assert brief_grounded.common_failure is not None
+    assert "checkpoints cannot complete" in brief_grounded.common_failure
+
