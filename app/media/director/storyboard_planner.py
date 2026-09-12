@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import re
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 from app.domain.enums import ClaimVerificationVerdict
 from app.domain.models import Claim, FactCheckReport, ResearchDossier, ResearchSource, Script
@@ -137,16 +138,21 @@ class StoryboardPlanner:
         dossier: Optional[ResearchDossier] = None,
         fact_report: Optional[FactCheckReport] = None,
     ) -> Optional[EvidenceBinding]:
-        """Resolve evidence binding from verified fact-check claims and research dossier sources."""
-        if beat.evidence_binding:
-            return beat.evidence_binding
+        """Resolve evidence binding from verified fact-check claims and research dossier sources.
 
+        Never treats incoming beat.evidence_binding as authoritative. Factual provenance
+        must be grounded against verified claims and real ResearchSource objects in dossier.
+        """
         claims: List[Claim] = []
         if fact_report and fact_report.claims:
-            claims.extend(fact_report.claims)
+            claims.extend(
+                c for c in fact_report.claims
+                if bool(c.verified or getattr(c, "verdict", None) == ClaimVerificationVerdict.VERIFIED)
+            )
         if dossier and dossier.claims:
             for c in dossier.claims:
-                if not any(ec.id == c.id for ec in claims):
+                is_v = bool(c.verified or getattr(c, "verdict", None) == ClaimVerificationVerdict.VERIFIED)
+                if is_v and not any(ec.id == c.id for ec in claims):
                     claims.append(c)
 
         if not claims:
@@ -176,16 +182,18 @@ class StoryboardPlanner:
         if best_claim.source_id and sources:
             matched_source = next((s for s in sources if s.id == best_claim.source_id), None)
         if not matched_source and best_claim.cited_url and sources:
-            matched_source = next((s for s in sources if s.url == best_claim.cited_url), None)
-        if not matched_source and sources and best_claim.source_id:
-            matched_source = next((s for s in sources if best_claim.source_id in s.id or s.id in best_claim.source_id), None)
+            matched_source = next((s for s in sources if s.url == best_claim.cited_url or getattr(s, "final_url", None) == best_claim.cited_url), None)
 
-        is_verified = bool(best_claim.verified or getattr(best_claim, "verdict", None) == ClaimVerificationVerdict.VERIFIED)
-        if not is_verified:
+        if not matched_source:
+            # Source resolution must be real: cannot resolve to actual ResearchSource in dossier
             return None
 
-        source_url = matched_source.url if matched_source else best_claim.cited_url
+        source_url = matched_source.url or getattr(matched_source, "final_url", None)
         if not source_url or not source_url.strip():
+            return None
+
+        parsed = urlparse(source_url.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
             return None
 
         url_lower = source_url.lower().strip()
@@ -201,11 +209,13 @@ class StoryboardPlanner:
         if any(pat in url_lower for pat in placeholder_patterns):
             return None
 
-        source_ref = matched_source.id if matched_source else best_claim.source_id
+        source_ref = matched_source.id
         if not source_ref or source_ref.strip() in ("src_verified", "placeholder", "fake_ref"):
             return None
 
-        source_title = matched_source.title if matched_source else (best_claim.cited_url or "Source Reference")
+        source_title = matched_source.title or (best_claim.cited_url or "Source Reference")
+        source_excerpt = best_claim.cited_excerpt
+        excerpt_is_verbatim = bool(source_excerpt and source_excerpt.strip())
 
         binding = EvidenceBinding(
             claim_id=best_claim.id,
@@ -213,13 +223,14 @@ class StoryboardPlanner:
             source_title=source_title,
             source_url=source_url,
             claim_text=best_claim.statement,
-            source_excerpt=best_claim.cited_excerpt,
-            excerpt_is_verbatim=bool(best_claim.cited_excerpt),
-            claim_verified=is_verified,
-            quote_or_excerpt=best_claim.cited_excerpt or best_claim.statement,
+            source_excerpt=source_excerpt,
+            excerpt_is_verbatim=excerpt_is_verbatim,
+            claim_verified=True,
+            quote_or_excerpt=source_excerpt or best_claim.statement,
         )
         is_valid, _ = validate_evidence_binding(binding)
         return binding if is_valid else None
+
 
     def plan_storyboard(
         self,
@@ -265,12 +276,8 @@ class StoryboardPlanner:
                 resolved_binding = self._resolve_evidence_binding(beat, dossier, fact_report)
                 if resolved_binding:
                     beat.evidence_binding = resolved_binding
-                elif beat.evidence_binding:
-                    is_valid, _ = validate_evidence_binding(beat.evidence_binding)
-                    if not is_valid:
-                        beat.evidence_binding = None
-                        selected_mod = VisualModality.DIAGRAM
                 else:
+                    beat.evidence_binding = None
                     selected_mod = VisualModality.DIAGRAM
 
             # 3. COMPARISON requires structured comparison points or extractable entities
@@ -338,6 +345,15 @@ class StoryboardPlanner:
                                 break
 
                         if matched_claim:
+                            resolved_src_ref = matched_claim.source_id or (matched_claim.cited_url if matched_claim.cited_url else None)
+                            if dossier and dossier.sources:
+                                real_s = None
+                                if matched_claim.source_id:
+                                    real_s = next((s for s in dossier.sources if s.id == matched_claim.source_id), None)
+                                if not real_s and matched_claim.cited_url:
+                                    real_s = next((s for s in dossier.sources if s.url == matched_claim.cited_url or getattr(s, "final_url", None) == matched_claim.cited_url), None)
+                                if real_s:
+                                    resolved_src_ref = real_s.id
                             grounded_datums.append(
                                 ChartDatum(
                                     label=context_label,
@@ -345,19 +361,26 @@ class StoryboardPlanner:
                                     unit=cleaned_unit,
                                     origin=ChartDatumOrigin.VERIFIED_CLAIM,
                                     claim_id=matched_claim.id,
-                                    source_ref=matched_claim.source_id or (matched_claim.cited_url if matched_claim.cited_url else None),
+                                    source_ref=resolved_src_ref,
                                 )
                             )
                         elif beat.source_refs:
-                            grounded_datums.append(
-                                ChartDatum(
-                                    label=context_label,
-                                    value=float(num_val),
-                                    unit=cleaned_unit,
-                                    origin=ChartDatumOrigin.EXTERNAL_SOURCE,
-                                    source_ref=beat.source_refs[0],
+                            matched_src = None
+                            if dossier and dossier.sources:
+                                matched_src = next((s for s in dossier.sources if s.id == beat.source_refs[0]), None)
+                            elif not dossier:
+                                if not any(p in beat.source_refs[0].lower() for p in ["placeholder", "fake_ref"]):
+                                    matched_src = type("StubSource", (), {"id": beat.source_refs[0]})()
+                            if matched_src:
+                                grounded_datums.append(
+                                    ChartDatum(
+                                        label=context_label,
+                                        value=float(num_val),
+                                        unit=cleaned_unit,
+                                        origin=ChartDatumOrigin.EXTERNAL_SOURCE,
+                                        source_ref=matched_src.id,
+                                    )
                                 )
-                            )
 
                     if grounded_datums:
                         shot_chart_data = grounded_datums

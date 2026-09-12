@@ -96,6 +96,12 @@ class MissingGroundedVisualData(ValueError):
     pass
 
 
+class DirectorOutputError(RuntimeError):
+    """Raised when AutoDirector returns empty or invalid timeline/storyboard output."""
+    pass
+
+
+
 class ChartDatum(BaseModel):
     """Grounded datum point for data visualization shots."""
 
@@ -127,6 +133,40 @@ class EvidenceBinding(BaseModel):
     excerpt_is_verbatim: bool = Field(default=False, description="Whether excerpt is a verbatim extract from document")
     claim_verified: bool = Field(default=False, description="Whether associated claim is verified by fact checker")
     quote_or_excerpt: Optional[str] = Field(default=None, description="Legacy field for backward compatibility")
+
+
+class ProposedNarrativeBeat(BaseModel):
+    """Untrusted LLM-proposed narrative beat before server-side provenance materialization.
+
+    Strictly isolated from trust-sensitive factual provenance fields.
+    MUST NOT contain: key_claim, source_refs, claim_id, claim_verified, evidence_binding,
+    chart_data, ChartDatum, ChartDatumOrigin, source_url, source_excerpt.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    beat_id: str = Field(description="Unique beat identifier (e.g. b_01, b_02)")
+    scene_index: int = Field(default=0, ge=0, description="Parent script scene sequence index")
+    narration: str = Field(description="Spoken narration text corresponding to this beat")
+    start_hint: Optional[float] = Field(default=None, ge=0.0, description="Estimated start time in seconds")
+    duration_hint: Optional[float] = Field(default=None, ge=0.1, description="Estimated duration in seconds")
+    purpose: BeatPurpose = Field(default=BeatPurpose.EXPLAIN, description="Storytelling role of this beat")
+    key_entities: List[str] = Field(default_factory=list, description="Key subjects/tools/concepts mentioned")
+    visual_intent: VisualIntent = Field(default=VisualIntent.SHOW_MECHANISM, description="Desired visual goal")
+    importance: float = Field(default=0.5, ge=0.0, le=1.0, description="Visual priority weight")
+    preferred_modalities: List[VisualModality] = Field(default_factory=list, description="Priority visual modalities")
+    avoid_modalities: List[VisualModality] = Field(
+        default_factory=lambda: [VisualModality.STATIC_CARD], description="Modalities that dilute impact"
+    )
+    creative_rationale: Optional[str] = Field(default=None, description="Optional LLM creative rationale")
+    suggested_subject: Optional[str] = Field(default=None, description="Optional LLM suggested subject")
+    suggested_action: Optional[str] = Field(default=None, description="Optional LLM suggested visual action")
+
+
+class ProposedBeatsPayload(BaseModel):
+    """Structured LLM payload for proposed narrative beats."""
+
+    beats: List[ProposedNarrativeBeat] = Field(default_factory=list)
 
 
 class NarrativeBeat(BaseModel):
@@ -295,6 +335,27 @@ class Storyboard(BaseModel):
             for s in self.shots
         )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def validate_director_output(timeline: Optional[ShotTimeline], storyboard: Optional[Storyboard]) -> None:
+    """Validate that AutoDirector produced non-empty, continuous, and valid timeline and storyboard."""
+    if timeline is None:
+        raise DirectorOutputError("Director returned None timeline.")
+    if storyboard is None:
+        raise DirectorOutputError("Director returned None storyboard.")
+    if not timeline.shots:
+        raise DirectorOutputError("Director returned timeline with zero shots.")
+    if not storyboard.shots:
+        raise DirectorOutputError("Director returned storyboard with zero shots.")
+    if len(timeline.shots) != len(storyboard.shots):
+        raise DirectorOutputError(
+            f"Director output mismatch: timeline has {len(timeline.shots)} shots, "
+            f"storyboard has {len(storyboard.shots)} shots."
+        )
+    if timeline.total_duration <= 0.0:
+        raise DirectorOutputError(
+            f"Director timeline total_duration ({timeline.total_duration}) must be greater than zero."
+        )
 
 
 class VisualEvaluation(BaseModel):

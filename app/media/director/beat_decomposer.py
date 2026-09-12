@@ -2,7 +2,7 @@
 
 import math
 import re
-from typing import List, Optional
+from typing import Any, List, Optional, Union
 from pydantic import BaseModel, Field
 
 from app.core.backend import ReasoningBackend
@@ -12,14 +12,62 @@ from app.media.director.models import (
     BeatPurpose,
     ContentFormat,
     NarrativeBeat,
+    ProposedBeatsPayload,
+    ProposedNarrativeBeat,
     VisualIntent,
     VisualModality,
 )
 
 
+def materialize_proposed_beats(
+    proposed_beats: List[Union[ProposedNarrativeBeat, NarrativeBeat, Any]],
+) -> List[NarrativeBeat]:
+    """Deterministically convert untrusted proposed beats into clean NarrativeBeat objects.
+
+    All trust-sensitive provenance fields (key_claim, source_refs, chart_data,
+    evidence_binding) start clean: None or empty. The LLM must never populate them.
+    """
+    materialized: List[NarrativeBeat] = []
+    for b in proposed_beats:
+        beat_id = getattr(b, "beat_id", "")
+        scene_index = getattr(b, "scene_index", 0)
+        narration = getattr(b, "narration", "")
+        start_hint = getattr(b, "start_hint", None)
+        duration_hint = getattr(b, "duration_hint", None)
+        purpose = getattr(b, "purpose", BeatPurpose.EXPLAIN)
+        key_entities = getattr(b, "key_entities", []) or []
+        visual_intent = getattr(b, "visual_intent", VisualIntent.SHOW_MECHANISM)
+        importance = getattr(b, "importance", 0.5)
+        preferred_modalities = getattr(b, "preferred_modalities", []) or []
+        avoid_modalities = getattr(b, "avoid_modalities", [VisualModality.STATIC_CARD]) or [VisualModality.STATIC_CARD]
+
+        mat_beat = NarrativeBeat(
+            beat_id=beat_id,
+            scene_index=scene_index,
+            narration=narration,
+            start_hint=start_hint,
+            duration_hint=duration_hint,
+            purpose=purpose,
+            key_claim=None,
+            key_entities=list(key_entities),
+            visual_intent=visual_intent,
+            importance=importance,
+            requires_evidence=visual_intent in (VisualIntent.SHOW_EVIDENCE, VisualIntent.SHOW_DATA) or "%" in narration,
+            preferred_modalities=list(preferred_modalities),
+            avoid_modalities=list(avoid_modalities),
+            source_refs=[],
+            chart_data=[],
+            evidence_binding=None,
+        )
+        materialized.append(mat_beat)
+    return materialized
+
+
 class DecomposedBeatsPayload(BaseModel):
     """Structured LLM payload for decomposed narrative beats."""
-    beats: List[NarrativeBeat] = Field(default_factory=list)
+
+    beats: List[Union[ProposedNarrativeBeat, NarrativeBeat]] = Field(default_factory=list)
+
 
 
 class BeatDecomposer:
@@ -175,14 +223,24 @@ class BeatDecomposer:
     def decompose_script(
         self,
         script: Script,
-        total_audio_duration: float,
+        total_audio_duration: float = 0.0,
         content_format: ContentFormat = ContentFormat.EXPLAINER,
         claims: Optional[List[Claim]] = None,
         sources: Optional[List[ResearchSource]] = None,
+        dossier: Optional[Any] = None,
+        fact_report: Optional[Any] = None,
+        total_duration_seconds: Optional[float] = None,
     ) -> List[NarrativeBeat]:
         """Decompose an entire Script into a sequenced list of narrative beats fitting total audio duration."""
         if not script or not script.scenes:
             return []
+
+        if total_duration_seconds is not None and total_audio_duration == 0.0:
+            total_audio_duration = total_duration_seconds
+        if dossier is not None and sources is None:
+            sources = getattr(dossier, "sources", None)
+        if fact_report is not None and claims is None:
+            claims = getattr(fact_report, "claims", None)
 
         scenes = script.scenes
         total_scenes = len(scenes)
@@ -217,11 +275,11 @@ Script Scenes:
                 for idx, sc in enumerate(scenes):
                     prompt += f"Scene {idx} ({scene_durations[idx]:.1f}s): {sc.narration}\n"
 
-                result: DecomposedBeatsPayload = self.backend.generate_structured(
-                    prompt, DecomposedBeatsPayload
+                result = self.backend.generate_structured(
+                    prompt, ProposedBeatsPayload
                 )
-                if result and result.beats and len(result.beats) >= len(scenes):
-                    all_beats = result.beats
+                if result and getattr(result, "beats", None) and len(result.beats) >= len(scenes):
+                    all_beats = materialize_proposed_beats(result.beats)
             except Exception:
                 all_beats = []
 
@@ -259,13 +317,30 @@ def enrich_beats_with_provenance(
     beats: List[NarrativeBeat],
     claims: Optional[List[Claim]] = None,
     sources: Optional[List[ResearchSource]] = None,
+    trusted_input: bool = False,
+    dossier: Optional[Any] = None,
+    fact_report: Optional[Any] = None,
 ) -> List[NarrativeBeat]:
     """Canonical post-processing pass attaching verified factual provenance to narrative beats.
 
     Runs uniformly for both LLM-generated and deterministic decomposition.
+    Defensively resets any pre-existing or self-asserted trusted fields from untrusted callers.
     """
     if not beats:
         return []
+
+    if dossier is not None and sources is None:
+        sources = getattr(dossier, "sources", None)
+    if fact_report is not None and claims is None:
+        claims = getattr(fact_report, "claims", None)
+
+    # Defensive reset: untrusted/LLM input must never retain self-asserted provenance
+    if not trusted_input:
+        for beat in beats:
+            beat.evidence_binding = None
+            beat.chart_data = []
+            beat.source_refs = []
+            beat.key_claim = None
 
     verified_claims = [
         c for c in (claims or [])
@@ -296,28 +371,42 @@ def enrich_beats_with_provenance(
             matched_claim_stmt = best_claim.statement
             s_ref = None
             if sources and best_claim.source_id:
-                real_s = next((s for s in sources if s.id == best_claim.source_id or best_claim.source_id in s.id), None)
+                real_s = next((s for s in sources if s.id == best_claim.source_id), None)
                 if real_s:
                     s_ref = real_s.id
             if not s_ref and sources and best_claim.cited_url:
-                real_s = next((s for s in sources if s.url == best_claim.cited_url), None)
+                real_s = next((s for s in sources if s.url == best_claim.cited_url or getattr(s, "final_url", None) == best_claim.cited_url), None)
                 if real_s:
                     s_ref = real_s.id
-            if not s_ref and best_claim.source_id:
-                s_ref = best_claim.source_id
-            elif not s_ref and best_claim.cited_url:
-                s_ref = best_claim.cited_url
 
-            if s_ref and not any(p in s_ref.lower() for p in ["verified-source.internal", "placeholder", "localhost"]):
+            # Source resolution MUST be real: do not preserve arbitrary source_id if not found in sources
+            if s_ref and not any(p in s_ref.lower() for p in ["verified-source.internal", "placeholder", "localhost", "127.0.0.1", "example.com", ".internal", "test.local", "fake_ref"]):
                 matched_source_refs.append(s_ref)
-
-            beat.key_claim = matched_claim_stmt
-            beat.source_refs = list(dict.fromkeys(matched_source_refs))
-            beat.requires_evidence = True
+                beat.key_claim = matched_claim_stmt
+                beat.source_refs = list(dict.fromkeys(matched_source_refs))
+                beat.requires_evidence = True
+            elif not sources and best_claim.source_id and not any(p in best_claim.source_id.lower() for p in ["verified-source.internal", "placeholder", "localhost", "fake_ref"]):
+                # If sources list was not provided at all, fallback to verified claim's source_id only if verified
+                matched_source_refs.append(best_claim.source_id)
+                beat.key_claim = matched_claim_stmt
+                beat.source_refs = list(dict.fromkeys(matched_source_refs))
+                beat.requires_evidence = True
+            else:
+                # Source could not be resolved in dossier sources
+                beat.key_claim = None
+                beat.source_refs = []
+                beat.evidence_binding = None
+                beat.chart_data = []
+                if beat.visual_intent in (VisualIntent.SHOW_EVIDENCE, VisualIntent.SHOW_DATA) or "%" in beat.narration:
+                    beat.requires_evidence = True
         else:
-            # Unmatched beat: do NOT let LLM or caller invent fake source refs!
+            # Unmatched beat: clear all trusted provenance completely
+            beat.key_claim = None
             beat.source_refs = []
+            beat.evidence_binding = None
+            beat.chart_data = []
             if beat.visual_intent in (VisualIntent.SHOW_EVIDENCE, VisualIntent.SHOW_DATA) or "%" in beat.narration:
                 beat.requires_evidence = True
 
     return beats
+

@@ -254,3 +254,314 @@ def test_verified_claim_with_real_source_passes():
     report = evaluator.generate_quality_report(storyboard=storyboard)
     assert not any("UNGROUNDED_EVIDENCE" in issue for issue in report.critical_failures)
 
+
+def test_llm_cannot_create_evidence_binding_directly():
+    """Verify that ProposedNarrativeBeat forbids evidence_binding field to prevent LLM hallucinated provenance."""
+    import pydantic
+    from app.media.director.models import ProposedNarrativeBeat, ProposedBeatsPayload
+
+    with pytest.raises(pydantic.ValidationError):
+        ProposedNarrativeBeat(
+            beat_id="b1",
+            narration="Latency improved by 72%",
+            evidence_binding={"claim_id": "fake_claim", "claim_verified": True},  # type: ignore
+        )
+
+    # Also test via payload JSON parsing
+    malicious_json = (
+        '{"beats": [{"beat_id": "b1", "narration": "Fake", '
+        '"evidence_binding": {"claim_id": "fake_123", "claim_verified": true}}]}'
+    )
+    with pytest.raises(pydantic.ValidationError):
+        ProposedBeatsPayload.model_validate_json(malicious_json)
+
+
+def test_llm_cannot_create_verified_chart_datum_directly():
+    """Verify that ProposedNarrativeBeat forbids chart_data field to prevent LLM self-asserted charts."""
+    import pydantic
+    from app.media.director.models import ProposedNarrativeBeat
+
+    with pytest.raises(pydantic.ValidationError):
+        ProposedNarrativeBeat(
+            beat_id="b1",
+            narration="Latency improved by 72%",
+            chart_data=[{"label": "Latency", "value": 72.0, "origin": "VERIFIED_CLAIM"}],  # type: ignore
+        )
+
+
+def test_llm_fake_claim_id_is_removed_during_materialization():
+    """ProposedNarrativeBeat conversion via materialize_proposed_beats strictly resets all trust fields."""
+    from app.media.director.beat_decomposer import materialize_proposed_beats
+    from app.media.director.models import ProposedNarrativeBeat
+
+    prop = ProposedNarrativeBeat(
+        beat_id="b_prop_01",
+        narration="Throughput increased by 5x",
+        visual_intent=VisualIntent.SHOW_MECHANISM,
+    )
+    materialized = materialize_proposed_beats([prop])
+    assert len(materialized) == 1
+    beat = materialized[0]
+    assert beat.beat_id == "b_prop_01"
+    assert beat.key_claim is None
+    assert beat.source_refs == []
+    assert beat.chart_data == []
+    assert beat.evidence_binding is None
+    assert beat.requires_evidence is False
+
+
+def test_llm_fake_source_ref_is_removed_during_enrichment():
+    """enrich_beats_with_provenance defensively clears unverified source_refs on incoming beats."""
+    from app.media.director.beat_decomposer import enrich_beats_with_provenance
+
+    beat = NarrativeBeat(
+        beat_id="b_adversarial",
+        narration="PostgreSQL handles millions of writes safely.",
+        key_claim="Unverified claim from LLM",
+        source_refs=["fake_source_ref_123"],
+    )
+    dossier = ResearchDossier(id="dos_empty", topic_id="top", sources=[], claims=[], summary="Empty summary")
+    fact_report = FactCheckReport(id="fc_empty", project_id="proj", claims=[], audit_summary="Audit summary")
+
+    enriched = enrich_beats_with_provenance([beat], dossier=dossier, fact_report=fact_report, trusted_input=False)
+    assert len(enriched) == 1
+    assert enriched[0].source_refs == []
+    assert enriched[0].key_claim is None
+
+
+def test_unmatched_llm_key_claim_is_cleared():
+    """Unmatched LLM beats have their key_claim, evidence_binding, and chart_data strictly cleared."""
+    from app.media.director.beat_decomposer import enrich_beats_with_provenance
+
+    beat = NarrativeBeat(
+        beat_id="b_unmatched",
+        narration="An unmatched narrative claim about system scaling.",
+        key_claim="AI claim not present in fact check report",
+        source_refs=["src_does_not_exist"],
+    )
+    source = ResearchSource(
+        id="src_pg",
+        title="PostgreSQL Doc",
+        url="https://postgresql.org",
+        content_sha256="hash123",
+    )
+    claim = Claim(
+        id="clm_different",
+        source_id="src_pg",
+        statement="Completely different topic about index creation.",
+        verified=True,
+        verdict=ClaimVerificationVerdict.VERIFIED,
+        cited_url="https://postgresql.org",
+    )
+    dossier = ResearchDossier(id="dos_1", topic_id="top", sources=[source], claims=[claim], summary="Summary")
+    fact_report = FactCheckReport(id="fc_1", project_id="proj", claims=[claim], audit_summary="Audit summary")
+
+    enriched = enrich_beats_with_provenance([beat], dossier=dossier, fact_report=fact_report, trusted_input=False)
+    res_beat = enriched[0]
+    assert res_beat.key_claim is None
+    assert res_beat.source_refs == []
+    assert res_beat.evidence_binding is None
+    assert res_beat.chart_data == []
+
+
+def test_evidence_binding_claim_id_must_exist_in_fact_report():
+    """Creative QA must reject EvidenceBinding whose claim_id does not exist in FactCheckReport."""
+    from app.media.director.models import ShotSpec, Storyboard
+    from app.media.director.quality_evaluator import VisualShotEvaluator
+
+    evaluator = VisualShotEvaluator()
+    source = ResearchSource(id="src_valid", title="Valid", url="https://example.com/doc", content_sha256="h1")
+    dossier = ResearchDossier(id="dos", topic_id="t", sources=[source], claims=[], summary="Summary")
+    fact_report = FactCheckReport(id="fc", project_id="p", claims=[], audit_summary="Audit summary")
+
+    binding = EvidenceBinding(
+        claim_id="fabricated_claim_999",
+        source_ref="src_valid",
+        source_title="Valid Source",
+        source_url="https://postgresql.org/docs/16/wal.html",
+        claim_verified=True,
+    )
+    shot = ShotSpec(
+        shot_id="shot_fake_claim",
+        scene_index=0,
+        beat_id="b1",
+        duration_seconds=3.0,
+        visual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        evidence_binding=binding,
+        narration_segment="Fabricated claim.",
+    )
+    storyboard = Storyboard(project_id="p", shots=[shot], total_duration=3.0)
+
+    report = evaluator.generate_quality_report(storyboard=storyboard, fact_report=fact_report, dossier=dossier)
+    assert report.creative_status == "FAIL"
+    assert any("does not exist in FactCheckReport" in err for err in report.critical_failures)
+
+
+def test_evidence_binding_source_ref_must_exist_in_dossier():
+    """Creative QA must reject EvidenceBinding whose source_ref is not found in ResearchDossier."""
+    from app.media.director.models import ShotSpec, Storyboard
+    from app.media.director.quality_evaluator import VisualShotEvaluator
+
+    evaluator = VisualShotEvaluator()
+    claim = Claim(
+        id="clm_valid",
+        statement="Valid claim.",
+        verified=True,
+        verdict=ClaimVerificationVerdict.VERIFIED,
+        cited_url="https://postgresql.org/docs/16/wal.html",
+    )
+    dossier = ResearchDossier(id="dos", topic_id="t", sources=[], claims=[claim], summary="Summary")
+    fact_report = FactCheckReport(id="fc", project_id="p", claims=[claim], audit_summary="Audit summary")
+
+    binding = EvidenceBinding(
+        claim_id="clm_valid",
+        source_ref="fabricated_source_ref",
+        source_title="Fabricated",
+        source_url="https://postgresql.org/docs/16/wal.html",
+        claim_verified=True,
+    )
+    shot = ShotSpec(
+        shot_id="shot_fake_src",
+        scene_index=0,
+        beat_id="b1",
+        duration_seconds=3.0,
+        visual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        evidence_binding=binding,
+        narration_segment="Valid claim with fake source ref.",
+    )
+    storyboard = Storyboard(project_id="p", shots=[shot], total_duration=3.0)
+
+    report = evaluator.generate_quality_report(storyboard=storyboard, fact_report=fact_report, dossier=dossier)
+    assert report.creative_status == "FAIL"
+    assert any("does not resolve to ResearchDossier sources" in err for err in report.critical_failures)
+
+
+def test_grounded_chart_verified_claim_id_must_exist_in_fact_report():
+    """Creative QA must reject ChartDatum with origin=VERIFIED_CLAIM if claim_id not verified in fact_report."""
+    from app.media.director.models import ChartDatum, ChartDatumOrigin, ShotSpec, Storyboard
+    from app.media.director.quality_evaluator import VisualShotEvaluator
+
+    evaluator = VisualShotEvaluator()
+    dossier = ResearchDossier(id="dos", topic_id="t", sources=[], claims=[], summary="Summary")
+    fact_report = FactCheckReport(id="fc", project_id="p", claims=[], audit_summary="Audit summary")
+
+    datum = ChartDatum(
+        label="Latency",
+        value=72.0,
+        unit="ms",
+        origin=ChartDatumOrigin.VERIFIED_CLAIM,
+        claim_id="nonexistent_claim_id",
+    )
+    shot = ShotSpec(
+        shot_id="shot_chart",
+        scene_index=0,
+        beat_id="b1",
+        duration_seconds=3.0,
+        visual_modality=VisualModality.DATA_VISUALIZATION,
+        chart_data=[datum],
+        narration_segment="Latency reduced by 72ms.",
+    )
+    storyboard = Storyboard(project_id="p", shots=[shot], total_duration=3.0)
+
+    report = evaluator.generate_quality_report(storyboard=storyboard, fact_report=fact_report, dossier=dossier)
+    assert report.creative_status == "FAIL"
+    assert any("does not exist in FactCheckReport" in err for err in report.critical_failures)
+
+
+def test_grounded_chart_external_source_must_exist_in_dossier():
+    """Creative QA must reject ChartDatum with origin=EXTERNAL_SOURCE if source_ref is not in dossier."""
+    from app.media.director.models import ChartDatum, ChartDatumOrigin, ShotSpec, Storyboard
+    from app.media.director.quality_evaluator import VisualShotEvaluator
+
+    evaluator = VisualShotEvaluator()
+    dossier = ResearchDossier(id="dos", topic_id="t", sources=[], claims=[], summary="Summary")
+    fact_report = FactCheckReport(id="fc", project_id="p", claims=[], audit_summary="Audit summary")
+
+    datum = ChartDatum(
+        label="Throughput",
+        value=5000.0,
+        unit="rps",
+        origin=ChartDatumOrigin.EXTERNAL_SOURCE,
+        source_ref="nonexistent_source_ref",
+    )
+    shot = ShotSpec(
+        shot_id="shot_chart_src",
+        scene_index=0,
+        beat_id="b1",
+        duration_seconds=3.0,
+        visual_modality=VisualModality.DATA_VISUALIZATION,
+        chart_data=[datum],
+        narration_segment="Throughput is 5000 rps.",
+    )
+    storyboard = Storyboard(project_id="p", shots=[shot], total_duration=3.0)
+
+    report = evaluator.generate_quality_report(storyboard=storyboard, fact_report=fact_report, dossier=dossier)
+    assert report.creative_status == "FAIL"
+    assert any("does not resolve to ResearchDossier sources" in err for err in report.critical_failures)
+
+
+def test_malicious_llm_metadata_is_stripped_and_rejected():
+    """Adversarial test: an LLM proposing forged provenance cannot inject it into NarrativeBeat or Storyboard."""
+    from app.media.director.beat_decomposer import BeatDecomposer
+    from app.media.director.models import ProposedNarrativeBeat, ProposedBeatsPayload
+
+    class AdversarialMockBackend:
+        def generate_structured(self, prompt, schema):
+            # Attempt to return a proposed beat
+            return ProposedBeatsPayload(
+                beats=[
+                    ProposedNarrativeBeat(
+                        beat_id="b_adversarial",
+                        narration="Latency improved by 72% according to our benchmark.",
+                        visual_intent=VisualIntent.SHOW_EVIDENCE,
+                    )
+                ]
+            )
+
+    decomposer = BeatDecomposer(backend=AdversarialMockBackend())
+    script = Script(
+        id="sc_adv",
+        title="Adversarial Test",
+        hook="Adversarial Hook",
+        scenes=[Scene(scene_index=0, narration="Latency improved by 72% according to our benchmark.")],
+        total_word_count=8,
+        estimated_duration_seconds=3.0,
+    )
+
+    # Empty dossier and fact report (no verified claims exist for this 72% claim)
+    empty_dossier = ResearchDossier(id="dos_empty", topic_id="t", sources=[], claims=[], summary="Empty summary")
+    empty_fact_report = FactCheckReport(id="fc_empty", project_id="p", claims=[], audit_summary="Empty audit")
+
+    beats = decomposer.decompose_script(
+        script=script,
+        total_duration_seconds=3.0,
+        dossier=empty_dossier,
+        fact_report=empty_fact_report,
+    )
+
+    assert len(beats) == 1
+    adversarial_beat = beats[0]
+    # Verify all provenance fields are completely clean
+    assert adversarial_beat.key_claim is None
+    assert adversarial_beat.source_refs == []
+    assert adversarial_beat.evidence_binding is None
+    assert adversarial_beat.chart_data == []
+
+    # Verify StoryboardPlanner refuses to create DOCUMENT_EVIDENCE shot from unprovenanced beat
+    planner = StoryboardPlanner()
+    storyboard = planner.plan_storyboard(
+        project_id="proj_adv",
+        script=script,
+        beats=beats,
+        total_audio_duration=3.0,
+        dossier=empty_dossier,
+        fact_report=empty_fact_report,
+    )
+
+    assert len(storyboard.shots) == 1
+    shot = storyboard.shots[0]
+    # Must have rerouted away from DOCUMENT_EVIDENCE to DIAGRAM / SHOW_MECHANISM
+    assert shot.visual_modality != VisualModality.DOCUMENT_EVIDENCE
+    assert shot.evidence_binding is None
+
+

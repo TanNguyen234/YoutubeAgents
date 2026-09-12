@@ -3,7 +3,10 @@
 from pathlib import Path
 import re
 from typing import Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
 
+from app.domain.enums import ClaimVerificationVerdict
+from app.domain.models import FactCheckReport, ResearchDossier
 from app.media.director.models import (
     ChannelCreativeProfile,
     ChartDatumOrigin,
@@ -27,8 +30,10 @@ def validate_evidence_binding(binding: Optional[EvidenceBinding]) -> Tuple[bool,
     - Missing claim_id
     - Unverified claim (claim_verified is not True)
     - Missing or empty source_url
+    - Disallowed URL structure (missing http/https scheme or netloc)
     - Placeholder/internal URLs (e.g. verified-source.internal, localhost, example.com, etc.)
     - Fake/generic source refs (e.g. 'src_verified' or 'placeholder')
+    - Missing or empty source_excerpt when excerpt_is_verbatim is True
     """
     if not binding:
         return False, "MISSING_BINDING: No EvidenceBinding attached to DOCUMENT_EVIDENCE shot."
@@ -38,6 +43,10 @@ def validate_evidence_binding(binding: Optional[EvidenceBinding]) -> Tuple[bool,
         return False, "UNVERIFIED_CLAIM: EvidenceBinding claim is not verified by fact checker."
     if not binding.source_url or not binding.source_url.strip():
         return False, "MISSING_SOURCE_URL: EvidenceBinding has empty source_url."
+
+    parsed = urlparse(binding.source_url.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False, f"INVALID_URL_STRUCTURE: EvidenceBinding source_url '{binding.source_url}' is not a valid http/https URL."
 
     url_lower = binding.source_url.lower().strip()
     placeholder_patterns = [
@@ -54,6 +63,9 @@ def validate_evidence_binding(binding: Optional[EvidenceBinding]) -> Tuple[bool,
 
     if not binding.source_ref or binding.source_ref.strip() in ("src_verified", "placeholder", "fake_ref"):
         return False, f"INVALID_SOURCE_REF: EvidenceBinding has ungrounded source_ref '{binding.source_ref}'."
+
+    if binding.excerpt_is_verbatim and (not binding.source_excerpt or not binding.source_excerpt.strip()):
+        return False, "EMPTY_VERBATIM_EXCERPT: EvidenceBinding marked excerpt_is_verbatim but source_excerpt is empty."
 
     return True, "VALID"
 
@@ -219,6 +231,8 @@ class VisualShotEvaluator:
         max_static_card_ratio: float = 0.15,
         director_fallback_occurred: bool = False,
         creative_fallback_reason: Optional[str] = None,
+        fact_report: Optional[FactCheckReport] = None,
+        dossier: Optional[ResearchDossier] = None,
     ) -> VideoQualityReport:
         """Build a comprehensive machine-readable quality report for the completed video production."""
         critical_failures: List[str] = []
@@ -304,6 +318,31 @@ class VisualShotEvaluator:
                     is_valid, reason = validate_evidence_binding(binding)
                     if not is_valid:
                         critical_failures.append(f"UNGROUNDED_EVIDENCE: Shot '{spec.shot_id}' {reason}")
+                    else:
+                        if fact_report:
+                            matching_claim = next((c for c in (fact_report.claims or []) if c.id == binding.claim_id), None)
+                            if not matching_claim:
+                                critical_failures.append(
+                                    f"UNGROUNDED_EVIDENCE: Shot '{spec.shot_id}' claim_id '{binding.claim_id}' does not exist in FactCheckReport."
+                                )
+                            else:
+                                is_v = bool(matching_claim.verified or getattr(matching_claim, "verdict", None) == ClaimVerificationVerdict.VERIFIED)
+                                if not is_v:
+                                    critical_failures.append(
+                                        f"UNGROUNDED_EVIDENCE: Shot '{spec.shot_id}' claim '{binding.claim_id}' is not VERIFIED in FactCheckReport."
+                                    )
+                        if dossier:
+                            matching_source = next((s for s in (dossier.sources or []) if s.id == binding.source_ref), None)
+                            if not matching_source:
+                                critical_failures.append(
+                                    f"UNGROUNDED_EVIDENCE: Shot '{spec.shot_id}' source_ref '{binding.source_ref}' does not resolve to ResearchDossier sources."
+                                )
+                            else:
+                                expected_url = matching_source.url or getattr(matching_source, "final_url", None)
+                                if expected_url and binding.source_url != expected_url:
+                                    critical_failures.append(
+                                        f"UNGROUNDED_EVIDENCE: Shot '{spec.shot_id}' source_url '{binding.source_url}' does not match resolved ResearchSource URL '{expected_url}'."
+                                    )
                 elif spec.visual_modality == VisualModality.DATA_VISUALIZATION:
                     data_mode = getattr(spec, "visual_data_mode", VisualizationDataMode.GROUNDED)
                     if data_mode == VisualizationDataMode.GROUNDED:
@@ -314,10 +353,30 @@ class VisualShotEvaluator:
                             for cd in chart_data:
                                 if getattr(cd, "origin", None) == ChartDatumOrigin.CONCEPTUAL:
                                     critical_failures.append(f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' has CONCEPTUAL origin in a GROUNDED chart.")
-                                elif getattr(cd, "origin", None) == ChartDatumOrigin.EXTERNAL_SOURCE and not getattr(cd, "source_ref", None):
-                                    critical_failures.append(f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' has EXTERNAL_SOURCE origin but missing source_ref.")
-                                elif getattr(cd, "origin", None) == ChartDatumOrigin.VERIFIED_CLAIM and not getattr(cd, "claim_id", None):
-                                    critical_failures.append(f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' has VERIFIED_CLAIM origin but missing claim_id.")
+                                elif getattr(cd, "origin", None) == ChartDatumOrigin.EXTERNAL_SOURCE:
+                                    if not getattr(cd, "source_ref", None):
+                                        critical_failures.append(f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' has EXTERNAL_SOURCE origin but missing source_ref.")
+                                    elif dossier:
+                                        matching_source = next((s for s in (dossier.sources or []) if s.id == cd.source_ref), None)
+                                        if not matching_source:
+                                            critical_failures.append(
+                                                f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' source_ref '{cd.source_ref}' does not resolve to ResearchDossier sources."
+                                            )
+                                elif getattr(cd, "origin", None) == ChartDatumOrigin.VERIFIED_CLAIM:
+                                    if not getattr(cd, "claim_id", None):
+                                        critical_failures.append(f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' has VERIFIED_CLAIM origin but missing claim_id.")
+                                    elif fact_report:
+                                        matching_claim = next((c for c in (fact_report.claims or []) if c.id == cd.claim_id), None)
+                                        if not matching_claim:
+                                            critical_failures.append(
+                                                f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' claim_id '{cd.claim_id}' does not exist in FactCheckReport."
+                                            )
+                                        else:
+                                            is_v = bool(matching_claim.verified or getattr(matching_claim, "verdict", None) == ClaimVerificationVerdict.VERIFIED)
+                                            if not is_v:
+                                                critical_failures.append(
+                                                    f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' claim '{cd.claim_id}' is not VERIFIED in FactCheckReport."
+                                                )
                                 elif not getattr(cd, "source_ref", None) and not getattr(cd, "claim_id", None):
                                     critical_failures.append(f"UNGROUNDED_CHART_DATA: Shot '{spec.shot_id}' datum '{cd.label}' lacks both claim_id and source_ref in a GROUNDED chart.")
                     elif data_mode == VisualizationDataMode.CONCEPTUAL:
