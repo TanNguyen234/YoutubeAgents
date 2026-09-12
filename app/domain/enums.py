@@ -201,3 +201,17 @@ class ConcreteAnchorType(str, Enum):
     DEMONSTRATION = "DEMONSTRATION"
 
 
+class PsychologicalMechanism(str, Enum):
+    """Descriptive label for audience engagement mechanism (no neuroscience claims)."""
+
+    CURIOSITY_GAP = "CURIOSITY_GAP"
+    ANTICIPATION = "ANTICIPATION"
+    CONTRAST = "CONTRAST"
+    STAKES = "STAKES"
+    NOVELTY = "NOVELTY"
+    PREDICTION_ERROR = "PREDICTION_ERROR"
+    PAYOFF = "PAYOFF"
+    CALLBACK = "CALLBACK"
+
+
+

@@ -1,11 +1,14 @@
-"""Script retention evaluator detecting drop risks, open loop resolution, and pacing quality."""
-
 import re
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from app.domain.enums import ConcreteAnchorType, ContentFormat, RetentionCueType
+from app.domain.enums import (
+    ConcreteAnchorType,
+    ContentFormat,
+    PsychologicalMechanism,
+    RetentionCueType,
+)
 from app.domain.models import RetentionBlueprint, Script, ScriptSections
 
 
@@ -31,9 +34,15 @@ class OpenLoopAudit(BaseModel):
 class RetentionMoment(BaseModel):
     """Strong positive retention milestone detected in script."""
 
-    position_ratio: float = Field(ge=0.0, le=1.0)
+    position_ratio: float = Field(ge=0.0, le=1.0, description="Normalized script position ratio")
+    timestamp_seconds: Optional[float] = Field(default=None, ge=0.0, description="Mapped timestamp in seconds from real audio")
     type: RetentionCueType
     reason: str
+    psychological_mechanism: str = Field(
+        default="CURIOSITY_GAP",
+        description="Descriptive psychological cue label (e.g. CURIOSITY_GAP, ANTICIPATION, CONTRAST, STAKES, NOVELTY, PREDICTION_ERROR, PAYOFF, CALLBACK)",
+    )
+
 
 
 class ScriptRetentionReport(BaseModel):
@@ -51,6 +60,21 @@ class ScriptRetentionReport(BaseModel):
     strongest_moments: List[RetentionMoment] = Field(default_factory=list)
     issues: List[str] = Field(default_factory=list)
     rewrite_instructions: List[str] = Field(default_factory=list)
+
+    def populate_timestamps(
+        self,
+        total_duration_seconds: float,
+        timing_events: Optional[List[Dict[str, Any]]] = None,
+        canonical_narration: Optional[str] = None,
+    ) -> "ScriptRetentionReport":
+        """Populate actual timestamps on retention moments after real TTS."""
+        self.strongest_moments = map_retention_moments_to_timestamps(
+            moments=self.strongest_moments,
+            total_duration_seconds=total_duration_seconds,
+            timing_events=timing_events,
+            canonical_narration=canonical_narration,
+        )
+        return self
 
 
 class ScriptRetentionEvaluator:
@@ -153,8 +177,10 @@ class ScriptRetentionEvaluator:
             strongest_moments.append(
                 RetentionMoment(
                     position_ratio=0.05,
+                    timestamp_seconds=None,
                     type=RetentionCueType.OPEN_LOOP,
                     reason="Crisp opening hook establishes immediate curiosity gap",
+                    psychological_mechanism="CURIOSITY_GAP",
                 )
             )
 
@@ -202,12 +228,95 @@ class ScriptRetentionEvaluator:
             strongest_moments.append(
                 RetentionMoment(
                     position_ratio=0.88,
+                    timestamp_seconds=None,
                     type=RetentionCueType.LOOP_CLOSE,
                     reason="Ending cleanly resolves core question and delivers payoff",
+                    psychological_mechanism="PAYOFF",
                 )
             )
 
         open_loops.append(loop_audit)
+
+        # Check for genuine mid-script retention moments (anchors, contrast, escalation, prediction error)
+        for idx, s in enumerate(scenes):
+            s_lower = s.narration.lower()
+            s_ratio = round((idx + 0.5) / total_scenes, 2)
+            if s_ratio <= 0.15 or s_ratio >= 0.85:
+                continue
+
+            if any(abs(m.position_ratio - s_ratio) < 0.08 for m in strongest_moments):
+                continue
+
+            if any(k in s_lower for k in ["think of it like", "imagine a", "analogy", "mental model"]):
+                strongest_moments.append(
+                    RetentionMoment(
+                        position_ratio=s_ratio,
+                        timestamp_seconds=None,
+                        type=RetentionCueType.REVEAL,
+                        reason=f"Intuitive analogy in Scene {idx+1} bridges abstract theory into concrete understanding",
+                        psychological_mechanism=PsychologicalMechanism.NOVELTY.value,
+                    )
+                )
+            elif any(k in s_lower for k in ["for example", "for instance", "in practice", "observed in production"]):
+                strongest_moments.append(
+                    RetentionMoment(
+                        position_ratio=s_ratio,
+                        timestamp_seconds=None,
+                        type=RetentionCueType.REVEAL,
+                        reason=f"Concrete real-world example in Scene {idx+1} grounds technical mechanics",
+                        psychological_mechanism=PsychologicalMechanism.CONTRAST.value,
+                    )
+                )
+            elif any(k in s_lower for k in ["compared to", "in contrast", "versus", "unlike", "trade-off", "tradeoff"]):
+                strongest_moments.append(
+                    RetentionMoment(
+                        position_ratio=s_ratio,
+                        timestamp_seconds=None,
+                        type=RetentionCueType.PATTERN_INTERRUPT,
+                        reason=f"Decisive comparison in Scene {idx+1} creates sharp technical contrast",
+                        psychological_mechanism=PsychologicalMechanism.CONTRAST.value,
+                    )
+                )
+            elif any(k in s_lower for k in ["bottleneck", "flaw", "fails", "crashing", "danger", "deadlock"]):
+                strongest_moments.append(
+                    RetentionMoment(
+                        position_ratio=s_ratio,
+                        timestamp_seconds=None,
+                        type=RetentionCueType.ESCALATION,
+                        reason=f"Failure mode escalation in Scene {idx+1} raises technical stakes",
+                        psychological_mechanism=PsychologicalMechanism.STAKES.value,
+                    )
+                )
+            elif any(k in s_lower for k in ["surprisingly", "counterintuitive", "actually", "in reality", "unexpected"]):
+                strongest_moments.append(
+                    RetentionMoment(
+                        position_ratio=s_ratio,
+                        timestamp_seconds=None,
+                        type=RetentionCueType.REVEAL,
+                        reason=f"Surprising insight in Scene {idx+1} delivers prediction error",
+                        psychological_mechanism=PsychologicalMechanism.PREDICTION_ERROR.value,
+                    )
+                )
+            elif any(k in s_lower for k in ["next", "what happens when", "here is the catch", "stay tuned"]):
+                strongest_moments.append(
+                    RetentionMoment(
+                        position_ratio=s_ratio,
+                        timestamp_seconds=None,
+                        type=RetentionCueType.REHOOK,
+                        reason=f"Pacing rehook in Scene {idx+1} creates forward anticipation",
+                        psychological_mechanism=PsychologicalMechanism.ANTICIPATION.value,
+                    )
+                )
+            elif any(k in s_lower for k in ["remember", "as we saw", "earlier", "circling back"]):
+                strongest_moments.append(
+                    RetentionMoment(
+                        position_ratio=s_ratio,
+                        timestamp_seconds=None,
+                        type=RetentionCueType.LOOP_CLOSE,
+                        reason=f"Thematic callback in Scene {idx+1} reinforces core concepts",
+                        psychological_mechanism=PsychologicalMechanism.CALLBACK.value,
+                    )
+                )
 
         # 3. Narrative Progression & Exposition Pacing
         progression_score = 0.90
@@ -382,7 +491,20 @@ class ScriptRetentionEvaluator:
                     rewrite_hint="Replace dramatic teases with concrete technical facts.",
                 )
             )
-            rewrite_instructions.append("Purge hollow clickbait phrases and ground tension in actual technical mechanics.")
+        # Expose exactly the strongest top 3 moments when at least 3 exist.
+        # If fewer than 3 genuinely strong moments exist, do NOT fabricate them; return fewer and report the weakness.
+        strongest_moments.sort(key=lambda m: m.position_ratio)
+        if len(strongest_moments) >= 3:
+            if len(strongest_moments) > 3:
+                first_m = strongest_moments[0]
+                last_m = strongest_moments[-1]
+                mid_candidates = strongest_moments[1:-1]
+                best_mid = min(mid_candidates, key=lambda m: abs(m.position_ratio - 0.5))
+                strongest_moments = [first_m, best_mid, last_m]
+        else:
+            issues.append(
+                f"FEW_RETENTION_MOMENTS: Script contains only {len(strongest_moments)} verified retention moment(s) (target is at least 3)."
+            )
 
         # Normalize final scores
         final_hook_score = max(0.0, min(1.0, round(hook_score, 2)))
@@ -408,3 +530,68 @@ class ScriptRetentionEvaluator:
             issues=issues,
             rewrite_instructions=rewrite_instructions,
         )
+
+    @staticmethod
+    def map_moment_timestamps(
+        report: ScriptRetentionReport,
+        total_duration_seconds: float,
+        timing_events: Optional[List[Dict[str, Any]]] = None,
+        canonical_narration: Optional[str] = None,
+    ) -> ScriptRetentionReport:
+        """Map retention moments to actual timestamps after real TTS."""
+        return report.populate_timestamps(
+            total_duration_seconds=total_duration_seconds,
+            timing_events=timing_events,
+            canonical_narration=canonical_narration,
+        )
+
+
+def map_retention_moments_to_timestamps(
+    moments: List[RetentionMoment],
+    total_duration_seconds: float,
+    timing_events: Optional[List[Dict[str, Any]]] = None,
+    canonical_narration: Optional[str] = None,
+) -> List[RetentionMoment]:
+    """Map retention moments to actual timestamps after real TTS audio duration and word boundaries."""
+    if total_duration_seconds <= 0.0 or not moments:
+        return moments
+
+    updated_moments: List[RetentionMoment] = []
+    for m in moments:
+        matched_time = None
+
+        # Try to match key phrase/words from moment reason against timing words
+        if timing_events:
+            reason_words = [
+                w
+                for w in re.findall(r"\b\w+\b", m.reason.lower())
+                if len(w) > 3 and w not in ScriptRetentionEvaluator.STOP_WORDS
+            ]
+            for rw in reason_words:
+                for evt in timing_events:
+                    w_text = (evt.get("word") or evt.get("text") or "").strip().lower()
+                    w_clean = re.sub(r"[^\w\s]", "", w_text)
+                    if w_clean == rw:
+                        if "start" in evt:
+                            matched_time = float(evt["start"])
+                        elif "offset" in evt:
+                            matched_time = round(float(evt["offset"]) / 10_000_000.0, 3)
+                        break
+                if matched_time is not None:
+                    break
+
+        # Ratio-based calculation fallback
+        if matched_time is None:
+            matched_time = round(m.position_ratio * total_duration_seconds, 3)
+
+        clamped_time = max(0.0, min(total_duration_seconds, matched_time))
+        updated_moments.append(
+            RetentionMoment(
+                position_ratio=m.position_ratio,
+                timestamp_seconds=clamped_time,
+                type=m.type,
+                reason=m.reason,
+                psychological_mechanism=m.psychological_mechanism,
+            )
+        )
+    return updated_moments

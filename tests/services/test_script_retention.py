@@ -517,3 +517,103 @@ def test_value_linked_cta_qa_rejects_detached_cta(sample_hook, sample_blueprint)
     assert not any("CTA_NOT_LINKED_TO_VALUE" in iss for iss in report_valuable.issues)
 
 
+def test_top_3_retention_moments_before_and_after_tts(sample_hook, sample_blueprint):
+    """RetentionMoments expose descriptive psychological labels, exactly top 3 moments, and map real TTS timestamps."""
+    from app.domain.enums import PsychologicalMechanism
+
+    evaluator = ScriptRetentionEvaluator()
+
+    rich_script = Script(
+        id="scr_rich_retention",
+        title="SQLite Locking Deep Dive",
+        hook=sample_hook.text,
+        scenes=[
+            Scene(index=0, narration="In default rollback journal mode, writing acquires an exclusive lock.", target_duration_seconds=10.0),
+            Scene(index=1, narration="Think of it like a shared single-lane bridge where all cars must stop for a truck.", target_duration_seconds=10.0),
+            Scene(index=2, narration="The hidden danger is a cascading bottleneck where threads deadlock under load.", target_duration_seconds=10.0),
+            Scene(index=3, narration="WAL mode fixes this by writing to a separate log, delivering massive concurrent read throughput.", target_duration_seconds=12.0),
+        ],
+        total_word_count=70,
+        estimated_duration_seconds=42.0,
+        content_format=ContentFormat.EXPLAINER,
+        sections=ScriptSections(
+            hook=sample_hook.text,
+            intro="In default rollback journal mode, writing acquires an exclusive lock.",
+            segments=[
+                Scene(index=0, narration="In default rollback journal mode, writing acquires an exclusive lock.", target_duration_seconds=10.0),
+                Scene(index=1, narration="Think of it like a shared single-lane bridge where all cars must stop for a truck.", target_duration_seconds=10.0),
+                Scene(index=2, narration="The hidden danger is a cascading bottleneck where threads deadlock under load.", target_duration_seconds=10.0),
+                Scene(index=3, narration="WAL mode fixes this by writing to a separate log, delivering massive concurrent read throughput.", target_duration_seconds=12.0),
+            ],
+            cta="WAL fixes reader-writer blocking, but checkpointing creates the next bottleneck — that's the next breakdown.",
+            estimated_duration=42.0,
+        ),
+    )
+
+    report = evaluator.evaluate(rich_script, blueprint=sample_blueprint)
+
+    # Must expose exactly top 3 moments when at least 3 genuine moments exist
+    assert len(report.strongest_moments) == 3
+
+    # Before TTS: timestamp_seconds must be None
+    for m in report.strongest_moments:
+        assert m.timestamp_seconds is None
+        assert 0.0 <= m.position_ratio <= 1.0
+        # Must be descriptive labels, no neuroscience claims
+        assert m.psychological_mechanism in [p.value for p in PsychologicalMechanism]
+
+    # Check that diverse mechanisms are present
+    mechanisms = [m.psychological_mechanism for m in report.strongest_moments]
+    assert PsychologicalMechanism.CURIOSITY_GAP.value in mechanisms
+    assert PsychologicalMechanism.PAYOFF.value in mechanisms
+
+    # After real TTS mapping: populate actual timestamps
+    timing_events = [
+        {"word": "bridge", "start": 12.5},
+        {"word": "bottleneck", "start": 23.8},
+        {"word": "throughput", "start": 38.2},
+    ]
+    report.populate_timestamps(
+        total_duration_seconds=42.0,
+        timing_events=timing_events,
+        canonical_narration=rich_script.get_canonical_narration(),
+    )
+
+    for m in report.strongest_moments:
+        assert m.timestamp_seconds is not None
+        assert 0.0 <= m.timestamp_seconds <= 42.0
+
+
+def test_fewer_than_3_retention_moments_reports_weakness_without_fabrication(sample_hook, sample_blueprint):
+    """When fewer than 3 genuine moments exist, evaluator does not fabricate and reports FEW_RETENTION_MOMENTS."""
+    evaluator = ScriptRetentionEvaluator()
+
+    weak_script = Script(
+        id="scr_weak_moments",
+        title="Theoretical Math",
+        hook="Welcome back to another math video.",  # Generic hook
+        scenes=[
+            Scene(index=0, narration="Mathematics is about abstract symbols.", target_duration_seconds=15.0),
+            Scene(index=1, narration="Symbols represent quantities in space.", target_duration_seconds=15.0),
+        ],
+        total_word_count=20,
+        estimated_duration_seconds=30.0,
+        content_format=ContentFormat.EXPLAINER,
+        sections=ScriptSections(
+            hook="Welcome back to another math video.",
+            intro="Mathematics is about abstract symbols.",
+            segments=[
+                Scene(index=0, narration="Mathematics is about abstract symbols.", target_duration_seconds=15.0),
+                Scene(index=1, narration="Symbols represent quantities in space.", target_duration_seconds=15.0),
+            ],
+            cta="Like and subscribe.",
+            estimated_duration=30.0,
+        ),
+    )
+
+    report = evaluator.evaluate(weak_script, blueprint=sample_blueprint)
+    assert len(report.strongest_moments) < 3
+    assert any("FEW_RETENTION_MOMENTS" in iss for iss in report.issues)
+
+
+
