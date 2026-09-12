@@ -16,8 +16,10 @@ from app.media.capabilities import check_media_capabilities
 from app.media.director import (
     AutoDirectorService,
     ContentFormat,
+    DirectorOutputError,
     VisualModality,
     VisualShotEvaluator,
+    validate_director_output,
 )
 from app.media.director.models import CreativeFallbackPolicy
 from app.media.director.profiles import get_channel_profile_for_niche
@@ -432,8 +434,8 @@ class MediaProductionPipeline:
                     dossier=research_dossier,
                     fact_report=fact_report,
                 )
-                if timeline and len(timeline.shots) > 0:
-                    used_director = True
+                validate_director_output(timeline, storyboard)
+                used_director = True
             except Exception as exc:
                 if active_fallback_policy == CreativeFallbackPolicy.FAIL_CLOSED:
                     raise MediaProductionError(
@@ -638,6 +640,8 @@ class MediaProductionPipeline:
                     storyboard=storyboard,
                     failed_attempts=failed_attempts,
                     director_fallback_occurred=False,
+                    fact_report=fact_report,
+                    dossier=research_dossier,
                 )
                 report_path = proj_dir / "manifests" / f"creative_qa_report_{project_id}.json"
                 report_path.write_text(visual_report.model_dump_json(indent=2), encoding="utf-8")
@@ -649,6 +653,8 @@ class MediaProductionPipeline:
                     failed_attempts=failed_attempts,
                     director_fallback_occurred=True,
                     creative_fallback_reason=creative_fallback_reason,
+                    fact_report=fact_report,
+                    dossier=research_dossier,
                 )
                 report_path = proj_dir / "manifests" / f"creative_qa_report_{project_id}.json"
                 report_path.write_text(visual_report.model_dump_json(indent=2), encoding="utf-8")

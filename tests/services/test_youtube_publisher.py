@@ -448,8 +448,22 @@ def test_gflow_director_asset_sets_manifest_synthetic_media(repo_and_tmp):
         shots=[shot],
         total_duration=3.0,
     )
+    from app.media.director.models import ShotSpec, Storyboard
+    spec = ShotSpec(
+        shot_id="shot-01",
+        beat_id="beat-01",
+        scene_index=0,
+        narration_segment="Testing synthetic media detection.",
+        duration_seconds=3.0,
+        visual_modality=VisualModality.GENERATED_IMAGE,
+    )
+    storyboard = Storyboard(
+        project_id=project.id,
+        shots=[spec],
+        total_duration=3.0,
+    )
 
-    pipeline.director.plan_and_render_timeline = lambda *args, **kwargs: (timeline, None)
+    pipeline.director.plan_and_render_timeline = lambda *args, **kwargs: (timeline, storyboard)
 
     proj, qa_res, manifest = pipeline.run_production(project.id)
     assert manifest.contains_synthetic_media is True

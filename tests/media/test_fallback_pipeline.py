@@ -199,3 +199,156 @@ def test_selective_shot_regeneration(tmp_path: Path):
 
     # Verify other shot remained completely untouched
     assert updated_timeline.shots[1].asset_sha256 == orig_other_shot_hash
+
+
+def test_empty_director_timeline_fails_closed(repo_with_verified_project, tmp_path: Path):
+    """When Director returns empty timeline (shots=[]), FAIL_CLOSED mode must raise MediaProductionError."""
+    from app.media.director.models import ShotTimeline, Storyboard
+    from app.media.pipeline import MediaProductionError
+
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_empty_timeline",
+    )
+
+    def return_empty_timeline(*args, **kwargs):
+        return ShotTimeline(project_id=project_id, shots=[], total_duration=0.0), Storyboard(project_id=project_id, shots=[], total_duration=0.0)
+
+    pipeline.director.plan_and_render_timeline = return_empty_timeline
+
+    with pytest.raises(MediaProductionError) as exc_info:
+        pipeline.run_production(project_id=project_id)
+
+    assert "AutoDirector failed in FAIL_CLOSED mode" in str(exc_info.value)
+    assert "zero shots" in str(exc_info.value)
+
+
+def test_empty_director_storyboard_fails_closed(repo_with_verified_project, tmp_path: Path):
+    """When Director returns empty storyboard, FAIL_CLOSED mode must raise MediaProductionError."""
+    from app.media.director.models import ShotTimeline, Storyboard, TimelineShot
+    from app.media.pipeline import MediaProductionError
+
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_empty_storyboard",
+    )
+
+    dummy_shot_path = tmp_path / "dummy.png"
+    dummy_shot_path.write_bytes(b"dummy image bytes")
+
+    valid_timeline = ShotTimeline(
+        project_id=project_id,
+        shots=[
+            TimelineShot(
+                shot_id="s1",
+                scene_index=0,
+                beat_id="b1",
+                asset_path=str(dummy_shot_path),
+                asset_sha256="hash1",
+                duration=3.0,
+                start=0.0,
+                end=3.0,
+                modality=VisualModality.DIAGRAM,
+            )
+        ],
+        total_duration=3.0,
+    )
+    empty_storyboard = Storyboard(project_id=project_id, shots=[], total_duration=0.0)
+
+    pipeline.director.plan_and_render_timeline = lambda *args, **kwargs: (valid_timeline, empty_storyboard)
+
+    with pytest.raises(MediaProductionError) as exc_info:
+        pipeline.run_production(project_id=project_id)
+
+    assert "AutoDirector failed in FAIL_CLOSED mode" in str(exc_info.value)
+    assert "zero shots" in str(exc_info.value)
+
+
+def test_empty_director_output_preview_marks_fallback(repo_with_verified_project, tmp_path: Path):
+    """When Director returns empty output in preview mode, fallback is marked and creative QA fails."""
+    from app.media.director.models import CreativeFallbackPolicy, ShotTimeline, Storyboard
+
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_empty_preview",
+        fallback_policy=CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW,
+    )
+
+    pipeline.director.plan_and_render_timeline = lambda *args, **kwargs: (
+        ShotTimeline(project_id=project_id, shots=[], total_duration=0.0),
+        Storyboard(project_id=project_id, shots=[], total_duration=0.0),
+    )
+
+    proj, qa_res, manifest = pipeline.run_production(project_id=project_id)
+
+    assert manifest.director_used is False
+    assert manifest.director_fallback_occurred is True
+    assert manifest.qa_verdict == "FAILED"
+    assert "zero shots" in (manifest.creative_fallback_reason or "")
+
+
+def test_empty_director_output_preview_cannot_reach_ready_for_review(repo_with_verified_project, tmp_path: Path):
+    """In preview mode, empty Director output strictly halts at QA_FAILED and cannot reach READY_FOR_REVIEW."""
+    from app.media.director.models import CreativeFallbackPolicy, ShotTimeline, Storyboard
+
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_preview_norfr",
+        fallback_policy=CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW,
+    )
+
+    pipeline.director.plan_and_render_timeline = lambda *args, **kwargs: (
+        ShotTimeline(project_id=project_id, shots=[], total_duration=0.0),
+        Storyboard(project_id=project_id, shots=[], total_duration=0.0),
+    )
+
+    proj, qa_res, manifest = pipeline.run_production(project_id=project_id)
+    assert proj.state == VideoLifecycleState.QA_FAILED
+
+    # Ensure state machine rejects direct mutation to READY_FOR_REVIEW or publication
+    with pytest.raises(Exception):
+        repo.update_project_state(
+            project_id=project_id,
+            to_state=VideoLifecycleState.REVIEW_APPROVED,
+            expected_current_state=VideoLifecycleState.READY_FOR_REVIEW,
+        )
+
+
+def test_invalid_director_output_never_silently_invokes_legacy_production(repo_with_verified_project, tmp_path: Path):
+    """Empty or invalid Director output must never silently route to legacy slideshow in FAIL_CLOSED mode."""
+    from unittest.mock import MagicMock
+    from app.media.director.models import ShotTimeline, Storyboard
+    from app.media.pipeline import MediaProductionError
+
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_no_silent_legacy",
+    )
+
+    pipeline.planner.plan_scenes = MagicMock()
+    pipeline.director.plan_and_render_timeline = lambda *args, **kwargs: (
+        ShotTimeline(project_id=project_id, shots=[], total_duration=0.0),
+        Storyboard(project_id=project_id, shots=[], total_duration=0.0),
+    )
+
+    with pytest.raises(MediaProductionError):
+        pipeline.run_production(project_id=project_id)
+
+    # Legacy slideshow planner must NEVER have been called
+    pipeline.planner.plan_scenes.assert_not_called()
+

@@ -7,8 +7,11 @@ from app.media.director.models import (
     BeatPurpose,
     ChannelCreativeProfile,
     ContentFormat,
+    DirectorOutputError,
     NarrativeBeat,
     OverlaySpec,
+    ProposedBeatsPayload,
+    ProposedNarrativeBeat,
     ShotSpec,
     ShotTimeline,
     Storyboard,
@@ -17,6 +20,7 @@ from app.media.director.models import (
     VisualEvaluation,
     VisualIntent,
     VisualModality,
+    validate_director_output,
 )
 from app.media.director.profiles import (
     BENCHMARK_ANALYSIS_PROFILE,
@@ -40,9 +44,12 @@ __all__ = [
     "ChannelCreativeProfile",
     "ContentFormat",
     "DirectorError",
+    "DirectorOutputError",
     "EDITORIAL_TECH_PROFILE",
     "NarrativeBeat",
     "OverlaySpec",
+    "ProposedBeatsPayload",
+    "ProposedNarrativeBeat",
     "ShotSpec",
     "ShotTimeline",
     "Storyboard",
@@ -57,4 +64,5 @@ __all__ = [
     "VisualShotEvaluator",
     "calculate_narration_duplication",
     "get_channel_profile_for_niche",
+    "validate_director_output",
 ]
