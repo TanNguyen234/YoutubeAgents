@@ -143,3 +143,49 @@ class ApprovalOrigin(str, Enum):
     HUMAN = "HUMAN"
     AUTOMATION = "AUTOMATION"
     TEST = "TEST"
+
+
+class PrimaryVideoGoal(str, Enum):
+    """Primary objective of the video."""
+
+    WATCH_TIME = "WATCH_TIME"
+    SUBSCRIBE = "SUBSCRIBE"
+    EDUCATE = "EDUCATE"
+    AUTHORITY = "AUTHORITY"
+    LEAD_GENERATION = "LEAD_GENERATION"
+    SHAREABILITY = "SHAREABILITY"
+
+
+class TonePreset(str, Enum):
+    """Narrative delivery tone preset."""
+
+    EXCITED = "EXCITED"
+    SERIOUS = "SERIOUS"
+    CONVERSATIONAL = "CONVERSATIONAL"
+    INVESTIGATIVE = "INVESTIGATIVE"
+    CINEMATIC_STORY = "CINEMATIC_STORY"
+    TECHNICAL = "TECHNICAL"
+
+
+class HookAngle(str, Enum):
+    """Psychological or narrative angle for opening hooks."""
+
+    CURIOSITY_GAP = "CURIOSITY_GAP"
+    PAIN_POINT = "PAIN_POINT"
+    CONTRARIAN = "CONTRARIAN"
+    RESULT_FIRST = "RESULT_FIRST"
+    STAKES_FIRST = "STAKES_FIRST"
+
+
+class RetentionCueType(str, Enum):
+    """Discrete retention pacing and structural cues."""
+
+    OPEN_LOOP = "OPEN_LOOP"
+    REHOOK = "REHOOK"
+    PATTERN_INTERRUPT = "PATTERN_INTERRUPT"
+    ESCALATION = "ESCALATION"
+    REVEAL = "REVEAL"
+    CLIMAX = "CLIMAX"
+    LOOP_CLOSE = "LOOP_CLOSE"
+    CTA = "CTA"
+

@@ -11,12 +11,16 @@ from app.domain.enums import (
     ContentFormat,
     EditorialSlotStatus,
     ExperimentStatus,
+    HookAngle,
     PlatformFormat,
+    PrimaryVideoGoal,
     PrivacyStatus,
     PublicationStatus,
     QualityStatus,
+    RetentionCueType,
     ReviewAction,
     TitleVariantType,
+    TonePreset,
     VideoLifecycleState,
 )
 
@@ -150,6 +154,103 @@ class Scene(BaseModel):
 
 # Alias for backward and forward compatibility with director pipeline
 ScriptScene = Scene
+
+
+class VideoCreativeBrief(BaseModel):
+    """Creative constraints and narrative tone configuration for scriptwriting."""
+
+    target_duration_seconds: float = Field(default=40.0, ge=5.0, description="Target video runtime in seconds")
+    primary_goal: PrimaryVideoGoal = Field(default=PrimaryVideoGoal.WATCH_TIME, description="Primary video objective")
+    tone: TonePreset = Field(default=TonePreset.CONVERSATIONAL, description="Audience delivery tone")
+    desired_viewer_emotion: Optional[str] = Field(default=None, description="Key target emotional response")
+
+
+def resolve_default_creative_brief(
+    platform_format: PlatformFormat = PlatformFormat.SHORTS_9_16,
+    content_format: ContentFormat = ContentFormat.EXPLAINER,
+    requested_duration: Optional[float] = None,
+) -> VideoCreativeBrief:
+    """Provide deterministic defaults for creative brief based on format archetype."""
+    if requested_duration and requested_duration > 0.0:
+        duration = float(requested_duration)
+    elif platform_format == PlatformFormat.LONG_FORM_16_9:
+        duration = 240.0
+    elif platform_format == PlatformFormat.SQUARE_1_1:
+        duration = 50.0
+    else:
+        duration = 40.0
+
+    format_profiles = {
+        ContentFormat.NEWS: (TonePreset.SERIOUS, PrimaryVideoGoal.SHAREABILITY, "urgency and awareness"),
+        ContentFormat.CASE_STUDY: (TonePreset.INVESTIGATIVE, PrimaryVideoGoal.AUTHORITY, "forensic curiosity"),
+        ContentFormat.DEMO: (TonePreset.TECHNICAL, PrimaryVideoGoal.EDUCATE, "practical competence"),
+        ContentFormat.COMPARISON: (TonePreset.CONVERSATIONAL, PrimaryVideoGoal.EDUCATE, "analytical clarity"),
+        ContentFormat.EXPERIMENT: (TonePreset.TECHNICAL, PrimaryVideoGoal.WATCH_TIME, "empirical suspense"),
+        ContentFormat.BREAKDOWN: (TonePreset.TECHNICAL, PrimaryVideoGoal.EDUCATE, "deep architectural insight"),
+        ContentFormat.MYTH_BUSTING: (TonePreset.CONVERSATIONAL, PrimaryVideoGoal.SHAREABILITY, "eye-opening revelation"),
+        ContentFormat.STORY: (TonePreset.CINEMATIC_STORY, PrimaryVideoGoal.WATCH_TIME, "narrative immersion"),
+        ContentFormat.CHALLENGE: (TonePreset.EXCITED, PrimaryVideoGoal.WATCH_TIME, "high-stakes anticipation"),
+        ContentFormat.RANKING: (TonePreset.CONVERSATIONAL, PrimaryVideoGoal.WATCH_TIME, "evaluative engagement"),
+        ContentFormat.BEFORE_AFTER: (TonePreset.CONVERSATIONAL, PrimaryVideoGoal.EDUCATE, "transformational payoff"),
+        ContentFormat.PROBLEM_SOLUTION: (TonePreset.CONVERSATIONAL, PrimaryVideoGoal.LEAD_GENERATION, "problem-solving relief"),
+        ContentFormat.EXPLAINER: (TonePreset.CONVERSATIONAL, PrimaryVideoGoal.WATCH_TIME, "aha-moment enlightenment"),
+    }
+    tone, goal, emotion = format_profiles.get(
+        content_format, (TonePreset.CONVERSATIONAL, PrimaryVideoGoal.WATCH_TIME, "curiosity and clarity")
+    )
+
+    return VideoCreativeBrief(
+        target_duration_seconds=duration,
+        primary_goal=goal,
+        tone=tone,
+        desired_viewer_emotion=emotion,
+    )
+
+
+class HookCandidate(BaseModel):
+    """An individual candidate hook generated from a specific psychological angle."""
+
+    text: str = Field(description="The spoken hook text (first 3-5 seconds)")
+    angle: HookAngle = Field(description="Psychological hook strategy")
+    promise: str = Field(description="Implicit or explicit viewer promise that must be resolved")
+    required_claim_ids: List[str] = Field(default_factory=list, description="Claim IDs this hook depends upon")
+
+
+class HookEvaluation(BaseModel):
+    """Heuristic quality evaluation metrics for an individual hook candidate."""
+
+    hook_index: int = Field(description="Index of the hook candidate")
+    brevity_score: float = Field(ge=0.0, le=1.0, description="Score for concise delivery (3-5s target)")
+    clarity_score: float = Field(ge=0.0, le=1.0, description="Score for cognitive clarity")
+    curiosity_score: float = Field(ge=0.0, le=1.0, description="Score for curiosity gap induction")
+    relevance_score: float = Field(ge=0.0, le=1.0, description="Score for topic alignment")
+    promise_alignment_score: float = Field(ge=0.0, le=1.0, description="Score for clear viewer promise")
+    factual_safe: bool = Field(description="Whether hook claims are strictly verified or non-empirical")
+    penalties: List[str] = Field(default_factory=list, description="Specific penalty flags applied")
+    total_score: float = Field(description="Composite evaluation score (-100 to 1.0)")
+
+
+class RetentionCue(BaseModel):
+    """Pacing and narrative cue anchored to normalized timeline position (0.0 - 1.0)."""
+
+    cue_id: str = Field(description="Unique cue identifier")
+    cue_type: RetentionCueType = Field(description="Pacing cue category")
+    target_position_ratio: float = Field(ge=0.0, le=1.0, description="Target timeline position (0.0 to 1.0)")
+    purpose: str = Field(description="Narrative or visual objective for this cue")
+    anchor_text: Optional[str] = None
+    linked_hook_promise: Optional[str] = None
+
+
+class RetentionBlueprint(BaseModel):
+    """Structured narrative retention plan orchestrating pacing, open loops, and payoff."""
+
+    hook: HookCandidate = Field(description="Winning hook candidate")
+    cues: List[RetentionCue] = Field(default_factory=list, description="Sequenced retention cues")
+    core_question: str = Field(description="Core unanswered question driving viewer curiosity")
+    promised_payoff: str = Field(description="Definitive insight or resolution delivered by video conclusion")
+    content_format: ContentFormat = Field(default=ContentFormat.EXPLAINER, description="Format grammar archetype")
+    target_duration_seconds: float = Field(default=40.0, ge=5.0, description="Planned total duration")
+
 
 
 def compose_canonical_narration(
