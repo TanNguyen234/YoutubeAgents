@@ -344,6 +344,9 @@ class BrainPipeline:
             raise
 
         updated_project = self.repo.get_video_project(project_id) or project
+        if updated_project and updated_project.script and project and project.script:
+            if not updated_project.script.retention_blueprint and project.script.retention_blueprint:
+                updated_project.script.retention_blueprint = project.script.retention_blueprint
         return updated_project, report
 
     def run_full_autonomous_lifecycle(

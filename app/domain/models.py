@@ -292,6 +292,9 @@ class ScriptSections(BaseModel):
     cta: str = Field(description="Call to action / outro")
     voiceover_text: str = Field(default="", description="Consolidated full spoken narration text")
     estimated_duration: float = Field(default=30.0, ge=1.0, description="Estimated total runtime in seconds")
+    retention_blueprint: Optional[RetentionBlueprint] = Field(
+        default=None, description="Format-aware narrative retention blueprint"
+    )
 
     @model_validator(mode="before")
     @classmethod

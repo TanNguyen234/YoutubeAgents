@@ -496,6 +496,7 @@ class SQLiteRepository:
                     content_format=c_format,
                     total_word_count=s_row["total_word_count"],
                     estimated_duration_seconds=s_row["estimated_duration_seconds"],
+                    retention_blueprint=sections.retention_blueprint if sections else None,
                     created_at=datetime.fromisoformat(s_row["created_at"]),
                 )
 

@@ -37,6 +37,11 @@ class ScriptWriter:
         retention_blueprint: Optional[Any] = None,
     ) -> Script:
         """Build and validate a typed Script domain model from sections."""
+        if retention_blueprint is not None and sections is not None:
+            sections.retention_blueprint = retention_blueprint
+        elif sections is not None and getattr(sections, "retention_blueprint", None) is not None:
+            retention_blueprint = sections.retention_blueprint
+
         all_narrations = [s.narration for s in sections.segments if s.narration]
         full_voiceover = sections.voiceover_text or " ".join(all_narrations)
         total_words = self.count_words(full_voiceover)
