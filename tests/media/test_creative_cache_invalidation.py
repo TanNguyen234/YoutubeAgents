@@ -415,3 +415,31 @@ def test_request_fingerprint_is_stable_for_same_request_and_policies():
 
     assert fp_1 == fp_2
 
+
+def test_director_pipeline_version_change_invalidates_request_fingerprint():
+    """Bumping director_pipeline_version alters the request/production fingerprint."""
+    base_params = dict(
+        canonical_narration_sha256="narr_hash_123",
+        render_profile_name="SHORTS_9_16",
+        tts_backend="mock-tts",
+        voice="voice-1",
+        tts_rate="+0%",
+        tts_pitch="+0Hz",
+        subtitle_format="srt",
+        ordered_scene_asset_hashes=["hash1", "hash2"],
+        audio_mode="both",
+        creative_pipeline_version="director-v3",
+        content_format="EXPLAINER",
+        creative_profile_name="tech-explainer",
+        visual_plan_hash="plan_hash_123",
+        fallback_policy="FAIL_CLOSED",
+        grounding_policy_version="grounding-v2",
+        creative_qa_policy_version="creative-qa-v2",
+    )
+
+    fp_v1 = compute_production_fingerprint(**base_params, director_pipeline_version="director-v2")
+    fp_v2 = compute_production_fingerprint(**base_params, director_pipeline_version="director-v3")
+
+    assert fp_v1 != fp_v2
+
+

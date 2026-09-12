@@ -213,6 +213,7 @@ def compute_production_fingerprint(
     provider_config_id: str = "default",
     renderer_config_hash: Optional[str] = None,
     fallback_policy: str = "FAIL_CLOSED",
+    director_pipeline_version: str = DIRECTOR_PIPELINE_VERSION,
     grounding_policy_version: str = GROUNDING_POLICY_VERSION,
     creative_qa_policy_version: str = CREATIVE_QA_POLICY_VERSION,
 ) -> str:
@@ -223,7 +224,7 @@ def compute_production_fingerprint(
         f"{tts_rate}|{tts_pitch}|{subtitle_format}|{','.join(ordered_scene_asset_hashes or [])}|"
         f"{audio_mode}|{creative_pipeline_version}|{content_format}|{creative_profile_name}|"
         f"{storyboard_hash or ''}|{visual_plan_hash or ''}|{provider_config_id}|{renderer_config_hash or ''}|"
-        f"{fallback_policy}|{grounding_policy_version}|{creative_qa_policy_version}"
+        f"{fallback_policy}|{director_pipeline_version}|{grounding_policy_version}|{creative_qa_policy_version}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 

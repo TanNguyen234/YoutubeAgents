@@ -260,6 +260,7 @@ class MediaProductionPipeline:
             creative_profile_name=creative_profile_name,
             visual_plan_hash=visual_plan_hash,
             fallback_policy=active_fallback_policy.value,
+            director_pipeline_version=DIRECTOR_PIPELINE_VERSION,
             grounding_policy_version=GROUNDING_POLICY_VERSION,
             creative_qa_policy_version=CREATIVE_QA_POLICY_VERSION,
         )
@@ -549,6 +550,7 @@ class MediaProductionPipeline:
                 creative_profile_name=creative_profile_name,
                 visual_plan_hash=visual_plan_hash,
                 fallback_policy=active_fallback_policy.value,
+                director_pipeline_version=DIRECTOR_PIPELINE_VERSION,
                 grounding_policy_version=GROUNDING_POLICY_VERSION,
                 creative_qa_policy_version=CREATIVE_QA_POLICY_VERSION,
             )
