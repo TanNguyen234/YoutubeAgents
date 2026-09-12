@@ -395,3 +395,125 @@ def test_fact_rewrite_runs_final_retention_qa(monkeypatch, tmp_path):
     # Initial retention QA was run, and final retention QA was run after factual rewrite
     assert len(eval_calls) >= 2
 
+
+def test_missing_concrete_anchor_flagged_for_abstract_explainer(sample_hook, sample_blueprint):
+    """Abstract explainer script without concrete anchors triggers MISSING_CONCRETE_ANCHOR."""
+    evaluator = ScriptRetentionEvaluator()
+
+    # Pure abstract exposition without example, analogy, comparison, demo, or case
+    abstract_script = Script(
+        id="scr_abstract",
+        title="Theoretical Locking Systems",
+        hook=sample_hook.text,
+        scenes=[
+            Scene(index=0, narration="Concurrency protocols dictate mutual exclusion across computational threads.", target_duration_seconds=12.0),
+            Scene(index=1, narration="Mathematical isolation theorems guarantee serializable transaction execution order.", target_duration_seconds=12.0),
+            Scene(index=2, narration="Log serialization buffers enforce monotonic sequential progression.", target_duration_seconds=12.0),
+        ],
+        total_word_count=45,
+        estimated_duration_seconds=36.0,
+        content_format=ContentFormat.EXPLAINER,
+        sections=ScriptSections(
+            hook=sample_hook.text,
+            intro="Concurrency protocols dictate mutual exclusion.",
+            segments=[
+                Scene(index=0, narration="Concurrency protocols dictate mutual exclusion across computational threads.", target_duration_seconds=12.0),
+                Scene(index=1, narration="Mathematical isolation theorems guarantee serializable transaction execution order.", target_duration_seconds=12.0),
+                Scene(index=2, narration="Log serialization buffers enforce monotonic sequential progression.", target_duration_seconds=12.0),
+            ],
+            cta="Explore the full locking theorem in our upcoming systems paper.",
+            estimated_duration=36.0,
+        ),
+    )
+
+    report = evaluator.evaluate(abstract_script, blueprint=sample_blueprint)
+    assert any("MISSING_CONCRETE_ANCHOR" in iss for iss in report.issues)
+
+    # Adding a concrete analogy resolves the issue
+    anchored_script = Script(
+        id="scr_anchored",
+        title="Theoretical Locking Systems",
+        hook=sample_hook.text,
+        scenes=[
+            Scene(index=0, narration="Concurrency protocols dictate mutual exclusion across computational threads.", target_duration_seconds=12.0),
+            Scene(index=1, narration="Think of it like a shared notebook where readers photocopy pages while the writer appends.", target_duration_seconds=12.0),
+            Scene(index=2, narration="Log serialization buffers enforce monotonic sequential progression.", target_duration_seconds=12.0),
+        ],
+        total_word_count=50,
+        estimated_duration_seconds=36.0,
+        content_format=ContentFormat.EXPLAINER,
+        sections=ScriptSections(
+            hook=sample_hook.text,
+            intro="Concurrency protocols dictate mutual exclusion.",
+            segments=[
+                Scene(index=0, narration="Concurrency protocols dictate mutual exclusion across computational threads.", target_duration_seconds=12.0),
+                Scene(index=1, narration="Think of it like a shared notebook where readers photocopy pages while the writer appends.", target_duration_seconds=12.0),
+                Scene(index=2, narration="Log serialization buffers enforce monotonic sequential progression.", target_duration_seconds=12.0),
+            ],
+            cta="Explore the full locking theorem in our upcoming systems paper.",
+            estimated_duration=36.0,
+        ),
+    )
+    report_anchored = evaluator.evaluate(anchored_script, blueprint=sample_blueprint)
+    assert not any("MISSING_CONCRETE_ANCHOR" in iss for iss in report_anchored.issues)
+
+
+def test_value_linked_cta_qa_rejects_detached_cta(sample_hook, sample_blueprint):
+    """Detached CTAs such as 'Like and subscribe' are rejected with CTA_NOT_LINKED_TO_VALUE."""
+    evaluator = ScriptRetentionEvaluator()
+
+    # 1. Detached generic CTA
+    detached_script = Script(
+        id="scr_detached_cta",
+        title="WAL Breakdown",
+        hook=sample_hook.text,
+        scenes=[
+            Scene(index=0, narration="For example, in default mode write locks freeze all queries.", target_duration_seconds=10.0),
+            Scene(index=1, narration="WAL mode writes pages to a separate log, eliminating reader blocking entirely.", target_duration_seconds=15.0),
+        ],
+        total_word_count=35,
+        estimated_duration_seconds=25.0,
+        content_format=ContentFormat.EXPLAINER,
+        sections=ScriptSections(
+            hook=sample_hook.text,
+            intro="In default mode write locks freeze all queries.",
+            segments=[
+                Scene(index=0, narration="For example, in default mode write locks freeze all queries.", target_duration_seconds=10.0),
+                Scene(index=1, narration="WAL mode writes pages to a separate log, eliminating reader blocking entirely.", target_duration_seconds=15.0),
+            ],
+            cta="Like and subscribe.",
+            estimated_duration=25.0,
+        ),
+    )
+
+    report = evaluator.evaluate(detached_script, blueprint=sample_blueprint)
+    assert any("CTA_NOT_LINKED_TO_VALUE" in iss for iss in report.issues)
+
+    # 2. Value-linked CTA flowing from delivered payoff to next question
+    valuable_script = Script(
+        id="scr_value_cta",
+        title="WAL Breakdown",
+        hook=sample_hook.text,
+        scenes=[
+            Scene(index=0, narration="For example, in default mode write locks freeze all queries.", target_duration_seconds=10.0),
+            Scene(index=1, narration="WAL mode writes pages to a separate log, eliminating reader blocking entirely.", target_duration_seconds=15.0),
+        ],
+        total_word_count=45,
+        estimated_duration_seconds=25.0,
+        content_format=ContentFormat.EXPLAINER,
+        sections=ScriptSections(
+            hook=sample_hook.text,
+            intro="In default mode write locks freeze all queries.",
+            segments=[
+                Scene(index=0, narration="For example, in default mode write locks freeze all queries.", target_duration_seconds=10.0),
+                Scene(index=1, narration="WAL mode writes pages to a separate log, eliminating reader blocking entirely.", target_duration_seconds=15.0),
+            ],
+            cta="WAL fixes reader-writer blocking, but checkpointing creates the next bottleneck — that's the next breakdown.",
+            estimated_duration=25.0,
+        ),
+    )
+
+    report_valuable = evaluator.evaluate(valuable_script, blueprint=sample_blueprint)
+    assert not any("CTA_NOT_LINKED_TO_VALUE" in iss for iss in report_valuable.issues)
+
+

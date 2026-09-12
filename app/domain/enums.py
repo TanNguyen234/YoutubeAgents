@@ -190,3 +190,14 @@ class RetentionCueType(str, Enum):
     LOOP_CLOSE = "LOOP_CLOSE"
     CTA = "CTA"
 
+
+class ConcreteAnchorType(str, Enum):
+    """Concrete grounding anchor archetype providing relatable proof or demonstration."""
+
+    REAL_EXAMPLE = "REAL_EXAMPLE"
+    ANALOGY = "ANALOGY"
+    COMPARISON = "COMPARISON"
+    MINI_CASE = "MINI_CASE"
+    DEMONSTRATION = "DEMONSTRATION"
+
+

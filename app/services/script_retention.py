@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-from app.domain.enums import RetentionCueType
+from app.domain.enums import ConcreteAnchorType, ContentFormat, RetentionCueType
 from app.domain.models import RetentionBlueprint, Script, ScriptSections
 
 
@@ -252,9 +252,52 @@ class ScriptRetentionEvaluator:
                             )
                         )
 
-        # 4. CTA Timing & Placement
+        # 3b. Concrete Anchor Requirement for Explanation-Heavy Formats
+        content_format = getattr(script, "content_format", ContentFormat.EXPLAINER)
+        if blueprint and getattr(blueprint, "content_format", None):
+            content_format = blueprint.content_format
+
+        is_explanation_heavy = content_format in (
+            ContentFormat.EXPLAINER,
+            ContentFormat.BREAKDOWN,
+        )
+        anchor_patterns = {
+            ConcreteAnchorType.REAL_EXAMPLE: r"\b(for example|for instance|in practice|real-world|such as|take the case|case of|observed in production)\b",
+            ConcreteAnchorType.ANALOGY: r"\b(think of it like|imagine a|analogy|similar to|like a|metaphor|acts like|works like|mental model)\b",
+            ConcreteAnchorType.COMPARISON: r"\b(compared to|versus|in contrast|unlike|trade-off|tradeoff|difference between|diverges from)\b",
+            ConcreteAnchorType.MINI_CASE: r"\b(post-mortem|incident|outage|production bug|failure event|when engineers at)\b",
+            ConcreteAnchorType.DEMONSTRATION: r"\b(run this|terminal|watch what happens|inspecting the output|benchmark shows|output console|code snippet|demonstration)\b",
+        }
+        all_narration = " ".join(s.narration for s in scenes).lower()
+        all_visuals = " ".join(getattr(s, "visual_prompt", "") for s in scenes).lower()
+        combined_text = f"{all_narration} {all_visuals}"
+
+        found_anchors = []
+        for a_type, pat in anchor_patterns.items():
+            if re.search(pat, combined_text):
+                found_anchors.append(a_type)
+
+        if is_explanation_heavy and total_duration >= 30.0 and not found_anchors:
+            progression_score -= 0.15
+            issues.append(
+                "MISSING_CONCRETE_ANCHOR: Explanation-heavy script lacks concrete anchors (example, analogy, comparison, mini-case, or demonstration)."
+            )
+            drop_risks.append(
+                DropRisk(
+                    start_ratio=0.20,
+                    end_ratio=0.75,
+                    reason="Pure abstract exposition without concrete examples, analogies, or demos causes retention cliff",
+                    severity="MEDIUM",
+                    rewrite_hint="Anchor abstract concepts with a concrete analogy, real-world comparison, or practical demonstration.",
+                )
+            )
+            rewrite_instructions.append("Introduce at least one grounded analogy, real-world example, or practical comparison.")
+
+        # 4. CTA Timing & Value-Linked Placement
         if cta_text:
             cta_words = re.findall(r"\b\w+\b", cta_text)
+            cta_lower = cta_text.lower().strip()
+
             # Check if CTA is placed before the climax / payoff
             if total_scenes > 2:
                 for idx, s in enumerate(scenes[:-1]):
@@ -284,6 +327,37 @@ class ScriptRetentionEvaluator:
                         rewrite_hint="Frame CTA as natural teaser for the next episode or deeper exploration.",
                     )
                 )
+
+            # Value-Linked CTA Check (Reject detached CTAs such as "Like and subscribe.")
+            detached_cta_patterns = [
+                r"^(please\s+)?(like and subscribe|subscribe for more|subscribe to (the |our |my )?channel|don't forget to like and subscribe|leave a like and subscribe|hit subscribe|smash that like button|subscribe)\.?$",
+            ]
+            is_detached_syntax = any(re.match(p, cta_lower) for p in detached_cta_patterns)
+
+            value_link_keywords = [
+                "next", "breakdown", "trade-off", "tradeoff", "bottleneck", "part", "episode",
+                "dive", "explore", "solve", "learn", "avoid", "benchmark", "because", "question",
+                "solution", "checkpoint", "series", "look at",
+            ]
+            has_value_keyword = any(k in cta_lower for k in value_link_keywords)
+            cta_tokens = set(self._tokenize(cta_text))
+            has_domain_overlap = bool(cta_tokens.intersection(promise_tokens or ending_tokens))
+
+            if is_detached_syntax or (not has_value_keyword and not has_domain_overlap and len(cta_words) <= 7):
+                progression_score -= 0.15
+                issues.append(
+                    "CTA_NOT_LINKED_TO_VALUE: Call to action is detached from delivered value and lacks value-driven payoff, next question, or series continuation."
+                )
+                drop_risks.append(
+                    DropRisk(
+                        start_ratio=0.92,
+                        end_ratio=1.0,
+                        reason="Detached CTA ('Like and subscribe') provides no viewer incentive; must flow from delivered value",
+                        severity="MEDIUM",
+                        rewrite_hint="Link CTA directly to the next unresolved question, delivered payoff, or series breakdown.",
+                    )
+                )
+                rewrite_instructions.append("Rewrite CTA to flow directly from the delivered payoff or tease the next breakdown.")
 
         # 5. Clickbait Sludge Check (excessive fake dramatic phrases)
         sludge_patterns = [
