@@ -22,6 +22,12 @@ class HookTournamentError(RuntimeError):
     pass
 
 
+def normalize_hook_text(text: str) -> str:
+    """Normalize hook text by lowercasing and removing non-word characters and whitespace."""
+    clean = re.sub(r"[^\w\s]", "", text.lower())
+    return " ".join(clean.split())
+
+
 class HookCandidatesPayload(BaseModel):
     """Structured LLM response containing generated hook candidates."""
 
@@ -86,50 +92,84 @@ Return a JSON list of HookCandidate items with:
 """
         try:
             payload = self.backend.generate_structured(prompt, HookCandidatesPayload)
-            if payload and payload.candidates and len(payload.candidates) >= 1:
-                return payload.candidates
+            if payload and payload.candidates:
+                validated_candidates: List[HookCandidate] = []
+                seen_angles = set()
+                seen_texts = set()
+                for c in payload.candidates:
+                    norm_text = normalize_hook_text(c.text)
+                    if c.angle in angles_to_cover and c.angle not in seen_angles and norm_text not in seen_texts:
+                        seen_angles.add(c.angle)
+                        seen_texts.add(norm_text)
+                        validated_candidates.append(c)
+
+                missing_angles = [a for a in angles_to_cover if a not in seen_angles]
+                if missing_angles:
+                    fallbacks = self._generate_fallback_candidates(topic, dossier, missing_angles, brief=brief)
+                    for fb in fallbacks:
+                        norm_fb = normalize_hook_text(fb.text)
+                        if norm_fb not in seen_texts:
+                            seen_texts.add(norm_fb)
+                            validated_candidates.append(fb)
+
+                if len(validated_candidates) >= len(angles_to_cover):
+                    return validated_candidates[:len(angles_to_cover)]
         except Exception:
             pass
 
         # Deterministic grounded fallback covering distinct angles
-        return self._generate_fallback_candidates(topic, dossier, angles_to_cover)
+        return self._generate_fallback_candidates(topic, dossier, angles_to_cover, brief=brief)
 
     def _generate_fallback_candidates(
         self,
         topic: str,
         dossier: ResearchDossier,
         angles: List[HookAngle],
+        brief: Optional[VideoCreativeBrief] = None,
     ) -> List[HookCandidate]:
         """Generate deterministic grounded hook candidates when LLM backend is unavailable."""
         clean_topic = topic.strip().rstrip(".")
         candidates = []
+
+        curiosity_text = f"There is a core mechanism in {clean_topic} that shapes how it actually runs."
+        curiosity_promise = f"Unpack the underlying mechanism behind {clean_topic}."
+
+        if brief and brief.common_failure:
+            pain_text = f"When {clean_topic} runs into {brief.common_failure}, this behavior surfaces."
+            pain_promise = f"Diagnose and resolve {brief.common_failure} in {clean_topic}."
+        else:
+            pain_text = f"Under demanding workloads, {clean_topic} can run into unexpected behavior."
+            pain_promise = f"Diagnose and eliminate unexpected behavior in {clean_topic}."
+
+        if brief and brief.common_misconception:
+            contrarian_text = f"While {clean_topic} is often assumed to behave around {brief.common_misconception}, the actual mechanism is different."
+            contrarian_promise = f"Clarify the real behavior of {clean_topic}."
+        else:
+            contrarian_text = f"{clean_topic} behaves differently once this mechanism enters the picture."
+            contrarian_promise = f"Explain how this mechanism changes {clean_topic}."
+
+        result_text = f"Here is what happens inside {clean_topic} under real execution."
+        result_promise = f"Examine the observed behavior and output of {clean_topic}."
+
+        if brief and brief.common_failure:
+            stakes_text = f"How {clean_topic} manages {brief.common_failure} determines whether workloads stay stable."
+            stakes_promise = f"Prevent system instability in {clean_topic}."
+        else:
+            stakes_text = f"This detail can change how {clean_topic} behaves under real workloads."
+            stakes_promise = f"Understand how {clean_topic} behaves under real workloads."
+
         templates = {
-            HookAngle.CURIOSITY_GAP: (
-                f"There's a subtle detail in {clean_topic} that almost everyone misinterprets.",
-                f"Reveal the counterintuitive mechanism behind {clean_topic}.",
-            ),
-            HookAngle.PAIN_POINT: (
-                f"If your system struggles with {clean_topic}, you're likely hitting this exact bottleneck.",
-                f"Diagnose and eliminate the primary bottleneck in {clean_topic}.",
-            ),
-            HookAngle.CONTRARIAN: (
-                f"The standard way developers handle {clean_topic} is completely backwards.",
-                f"Demonstrate why conventional wisdom fails for {clean_topic}.",
-            ),
-            HookAngle.RESULT_FIRST: (
-                f"Here is what happens when you optimize {clean_topic} the right way.",
-                f"Walk through the verified outcome of properly configured {clean_topic}.",
-            ),
-            HookAngle.STAKES_FIRST: (
-                f"Ignoring this core flaw in {clean_topic} will quietly compromise your production stack.",
-                f"Prevent critical production failures related to {clean_topic}.",
-            ),
+            HookAngle.CURIOSITY_GAP: (curiosity_text, curiosity_promise),
+            HookAngle.PAIN_POINT: (pain_text, pain_promise),
+            HookAngle.CONTRARIAN: (contrarian_text, contrarian_promise),
+            HookAngle.RESULT_FIRST: (result_text, result_promise),
+            HookAngle.STAKES_FIRST: (stakes_text, stakes_promise),
         }
 
         for angle in angles:
             text, promise = templates.get(
                 angle,
-                (f"Here is the essential truth about {clean_topic}.", f"Deliver clear mastery of {clean_topic}."),
+                (f"Here is the essential mechanism in {clean_topic}.", f"Deliver clear mastery of {clean_topic}."),
             )
             candidates.append(
                 HookCandidate(
@@ -157,15 +197,18 @@ Return a JSON list of HookCandidate items with:
         word_count = len(words)
         penalties: List[str] = []
 
-        # 1. Factual Safety (Deterministic)
+        # 1. Factual Safety (Deterministic against current research evidence)
+        # Note: factual_safe means "no unsupported factual content found against current evidence".
+        # It does NOT imply downstream FactCheckReport claim verification has occurred.
         factual_safe = True
+        evidence_corpus = " ".join(
+            [s.content_snapshot or "" for s in dossier.sources]
+            + [s.title for s in dossier.sources]
+            + ([c.statement for c in fact_report.claims] if fact_report else [])
+        ).lower()
+
         number_matches = re.findall(r"\b\d+(?:\.\d+)?%?|\b\d+x\b|\$\d+", text, flags=re.IGNORECASE)
         if number_matches:
-            evidence_corpus = " ".join(
-                [s.content_snapshot or "" for s in dossier.sources]
-                + [s.title for s in dossier.sources]
-                + ([c.statement for c in fact_report.claims] if fact_report else [])
-            )
             for match in number_matches:
                 clean_num = match.strip("$%xX")
                 if clean_num and clean_num not in evidence_corpus:
@@ -173,12 +216,40 @@ Return a JSON list of HookCandidate items with:
                     penalties.append(f"UNVERIFIED_NUMERIC_CLAIM: '{match}' not grounded in dossier evidence")
                     break
 
-        if candidate.required_claim_ids and fact_report:
-            verified_ids = {c.id for c in fact_report.claims if getattr(c, "verdict", None) == ClaimVerificationVerdict.VERIFIED or c.verified}
-            for cid in candidate.required_claim_ids:
-                if cid not in verified_ids:
-                    factual_safe = False
-                    penalties.append(f"UNVERIFIED_REQUIRED_CLAIM_ID: '{cid}'")
+        if candidate.required_claim_ids:
+            if not fact_report:
+                factual_safe = False
+                penalties.append("UNVERIFIED_REQUIRED_CLAIM_IDS_WITHOUT_FACT_REPORT")
+            else:
+                verified_ids = {
+                    c.id for c in fact_report.claims
+                    if getattr(c, "verdict", None) == ClaimVerificationVerdict.VERIFIED or getattr(c, "verified", False)
+                }
+                for cid in candidate.required_claim_ids:
+                    if cid not in verified_ids:
+                        factual_safe = False
+                        penalties.append(f"UNVERIFIED_REQUIRED_CLAIM_ID: '{cid}'")
+
+        # Non-numeric ungrounded hyperbole or universal factual claims
+        risky_generalizations = [
+            r"\balmost everyone misinterprets\b",
+            r"\beveryone misinterprets\b",
+            r"\bcompletely backwards\b",
+            r"\bcompromise your production\b",
+            r"\bcompromise production\b",
+            r"\bprimary bottleneck\b",
+            r"\bcore flaw\b",
+            r"\balways fails\b",
+            r"\bmost developers\b",
+            r"\beveryone does\b",
+            r"\ball developers\b",
+        ]
+        text_lower = text.lower()
+        for pat in risky_generalizations:
+            if re.search(pat, text_lower) and not re.search(pat, evidence_corpus):
+                factual_safe = False
+                penalties.append(f"UNGROUNDED_HYPERBOLIC_CLAIM: '{pat}' not grounded in research evidence")
+                break
 
         # 2. Generic Opener Penalties
         text_lower = text.lower()
@@ -290,6 +361,19 @@ Return a JSON list of HookCandidate items with:
         """Evaluate all candidates in a tournament and select the factually safe winner with highest retention score."""
         if not candidates:
             raise HookTournamentError("Cannot run tournament with zero hook candidates.")
+
+        # Server-side hook diversity validation
+        seen_angles = set()
+        seen_texts = set()
+        for c in candidates:
+            if c.angle in seen_angles:
+                raise HookTournamentError(f"Candidate set contains duplicate hook angle: '{c.angle.value}'.")
+            seen_angles.add(c.angle)
+
+            norm = normalize_hook_text(c.text)
+            if norm in seen_texts:
+                raise HookTournamentError(f"Candidate set contains duplicate normalized hook text: '{c.text}'.")
+            seen_texts.add(norm)
 
         evaluations: List[HookEvaluation] = []
         for idx, candidate in enumerate(candidates):

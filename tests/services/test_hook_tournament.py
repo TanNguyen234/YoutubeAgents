@@ -260,3 +260,121 @@ def test_creative_brief_grounded_misconception_and_failure(mock_dossier):
     assert brief_grounded.common_failure is not None
     assert "checkpoints cannot complete" in brief_grounded.common_failure
 
+
+def test_hook_required_claim_ids_cannot_bypass_without_fact_report(mock_dossier, mock_brief):
+    """Hooks requiring claims cannot pass factual safety when fact_report is None."""
+    service = HookTournamentService()
+    candidate = HookCandidate(
+        text="WAL mode eliminates all locking overhead in SQLite.",
+        angle=HookAngle.CONTRARIAN,
+        promise="Explain WAL locking semantics.",
+        required_claim_ids=["clm_wal_concurrency"],
+    )
+
+    eval_result = service.evaluate_hook(
+        candidate=candidate,
+        hook_index=0,
+        topic="SQLite WAL",
+        dossier=mock_dossier,
+        brief=mock_brief,
+        fact_report=None,
+    )
+    assert eval_result.factual_safe is False
+    assert any("UNVERIFIED_REQUIRED_CLAIM_IDS_WITHOUT_FACT_REPORT" in p for p in eval_result.penalties)
+    assert eval_result.total_score == -100.0
+
+
+def test_non_numeric_ungrounded_fallback_claim_is_not_treated_as_safe(mock_dossier, mock_brief):
+    """Non-numeric ungrounded hyperbole or universal claims absent from evidence are rejected as unsafe."""
+    service = HookTournamentService()
+    hyperbolic_candidate = HookCandidate(
+        text="The standard way developers handle SQLite is completely backwards.",
+        angle=HookAngle.CONTRARIAN,
+        promise="Reveal why developers are completely backwards.",
+    )
+
+    eval_result = service.evaluate_hook(
+        candidate=hyperbolic_candidate,
+        hook_index=0,
+        topic="SQLite WAL",
+        dossier=mock_dossier,
+        brief=mock_brief,
+    )
+    assert eval_result.factual_safe is False
+    assert any("UNGROUNDED_HYPERBOLIC_CLAIM" in p for p in eval_result.penalties)
+
+
+def test_hook_tournament_rejects_duplicate_angles(mock_dossier, mock_brief):
+    """Tournament strictly rejects candidates with duplicate HookAngle."""
+    service = HookTournamentService()
+    candidates = [
+        HookCandidate(
+            text="First curiosity hook text.",
+            angle=HookAngle.CURIOSITY_GAP,
+            promise="Promise 1.",
+        ),
+        HookCandidate(
+            text="Second curiosity hook text.",
+            angle=HookAngle.CURIOSITY_GAP,
+            promise="Promise 2.",
+        ),
+    ]
+    with pytest.raises(HookTournamentError) as exc_info:
+        service.run_tournament(candidates, "SQLite WAL", mock_dossier, mock_brief)
+    assert "duplicate hook angle" in str(exc_info.value).lower()
+
+
+def test_hook_tournament_rejects_duplicate_normalized_text(mock_dossier, mock_brief):
+    """Tournament strictly rejects candidates with duplicate normalized hook text."""
+    service = HookTournamentService()
+    candidates = [
+        HookCandidate(
+            text="There is a core mechanism in SQLite WAL that shapes execution.",
+            angle=HookAngle.CURIOSITY_GAP,
+            promise="Promise 1.",
+        ),
+        HookCandidate(
+            text="There is a core mechanism in SQLite WAL that shapes execution!",
+            angle=HookAngle.PAIN_POINT,
+            promise="Promise 2.",
+        ),
+    ]
+    with pytest.raises(HookTournamentError) as exc_info:
+        service.run_tournament(candidates, "SQLite WAL", mock_dossier, mock_brief)
+    assert "duplicate normalized hook text" in str(exc_info.value).lower()
+
+
+def test_deterministic_fallback_hooks_contain_no_unsupported_hyperbole(mock_dossier, mock_brief):
+    """Verify deterministic fallback hook templates do not generate ungrounded sensationalized hyperbole."""
+    service = HookTournamentService()
+    candidates = service._generate_fallback_candidates(
+        topic="PostgreSQL Replication",
+        dossier=mock_dossier,
+        angles=[
+            HookAngle.CURIOSITY_GAP,
+            HookAngle.PAIN_POINT,
+            HookAngle.CONTRARIAN,
+            HookAngle.RESULT_FIRST,
+            HookAngle.STAKES_FIRST,
+        ],
+        brief=mock_brief,
+    )
+    banned_phrases = [
+        "almost everyone misinterprets",
+        "completely backwards",
+        "compromise your production",
+        "compromise production",
+        "primary bottleneck",
+        "everyone does",
+        "most developers",
+    ]
+    for c in candidates:
+        text_lower = c.text.lower()
+        for phrase in banned_phrases:
+            assert phrase not in text_lower, f"Fallback hook contains ungrounded hyperbole: {phrase}"
+
+        # All fallback hooks must evaluate as factually safe against research evidence
+        evaluation = service.evaluate_hook(c, 0, "PostgreSQL Replication", mock_dossier, mock_brief)
+        assert evaluation.factual_safe is True
+
+
