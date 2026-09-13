@@ -155,3 +155,51 @@ def check_media_capabilities(
         output_writable=output_writable,
         blockers=blockers,
     )
+
+
+class VisualAcquisitionCapabilities(BaseModel):
+    """Runtime capability diagnostics for visual evidence acquisition."""
+
+    playwright_available: bool = Field(description="Playwright sync_api is installed")
+    chromium_available: bool = Field(description="Chromium binary is installed and executable")
+    web_evidence_capture: str = Field(description="AVAILABLE or MISSING")
+    local_ui_capture: str = Field(description="AVAILABLE or MISSING")
+    stock_provider: str = Field(description="AVAILABLE, DISABLED_NO_CREDENTIALS, or MISSING")
+    generated_media: str = Field(description="AVAILABLE or DISABLED_NO_CREDENTIALS")
+    document_capture: str = Field(description="AVAILABLE or MISSING")
+
+
+def check_visual_acquisition_capabilities() -> VisualAcquisitionCapabilities:
+    """Inspect and report visual acquisition capabilities without silent failure."""
+    from app.media.acquisition.stock import PexelsStockProvider
+    from app.media.acquisition.web_capture import is_chromium_available, is_playwright_available
+
+    pw_avail = is_playwright_available()
+    chrom_avail = is_chromium_available()
+
+    web_status = "AVAILABLE" if (pw_avail and chrom_avail) else "MISSING"
+    local_status = "AVAILABLE" if (pw_avail and chrom_avail) else "MISSING"
+    doc_status = "AVAILABLE" if (pw_avail and chrom_avail) else "MISSING"
+
+    # Stock provider check
+    stock_p = PexelsStockProvider()
+    if stock_p.is_available():
+        stock_status = "AVAILABLE"
+    else:
+        stock_status = "DISABLED_NO_CREDENTIALS"
+
+    # Generated media (GFlow) check
+    import os
+    has_gflow = bool(os.environ.get("GFLOW_API_KEY") or os.environ.get("GEMINI_API_KEY"))
+    gen_status = "AVAILABLE" if has_gflow else "DISABLED_NO_CREDENTIALS"
+
+    return VisualAcquisitionCapabilities(
+        playwright_available=pw_avail,
+        chromium_available=chrom_avail,
+        web_evidence_capture=web_status,
+        local_ui_capture=local_status,
+        stock_provider=stock_status,
+        generated_media=gen_status,
+        document_capture=doc_status,
+    )
+
