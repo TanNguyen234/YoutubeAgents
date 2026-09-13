@@ -3,6 +3,7 @@
 import hashlib
 import logging
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,6 +29,8 @@ from app.domain.models import (
     HookCandidate,
     ResearchDossier,
     ResearchSource,
+    RetentionBlueprint,
+    RetentionCue,
     Scene,
     Script,
     ScriptSections,
@@ -41,9 +44,17 @@ from app.domain.retention import (
     ScriptRetentionReport,
     map_retention_moments_to_timestamps,
 )
+from app.media.models import (
+    RenderManifest,
+    RETENTION_POLICY_VERSION,
+    TTSResult,
+    compute_retention_plan_hash,
+)
+from app.media.pipeline import MediaProductionPipeline
 from app.services.pipeline_brain import BrainPipeline
 from app.services.retention_planner import RetentionPlanner
 from app.services.script_retention import ScriptRetentionEvaluator
+from tests.media.test_media_pipeline import MockTTSBackend
 
 
 # ============================================================================
@@ -244,6 +255,290 @@ def test_retention_timestamp_mapping_failure_is_observable(caplog):
             )
 
     assert "RETENTION_TIMESTAMP_MAPPING_FAILED" in caplog.text
+
+
+class TimingMockTTSBackend(MockTTSBackend):
+    def __init__(self, duration_seconds: float = 6.0, timing_events: Optional[list] = None):
+        super().__init__(duration_seconds=duration_seconds)
+        self.timing_events = timing_events or []
+
+    def synthesize(self, *args, **kwargs) -> TTSResult:
+        res = super().synthesize(*args, **kwargs)
+        res.timing_events = list(self.timing_events)
+        return res
+
+
+def _setup_pipeline_project_with_report(tmp_path: Path, moment_timestamp: Optional[float] = None):
+    db_path = tmp_path / "test_pipeline_persistence.db"
+    repo = SQLiteRepository(str(db_path))
+    channel = Channel(
+        id="chan_p1_2",
+        title="Engineering Channel",
+        handle="@Eng",
+        description="Tech",
+        niche="Databases",
+        target_audience="Developers",
+    )
+    repo.save_channel(channel)
+    moment = RetentionMoment(
+        position_ratio=0.5,
+        timestamp_seconds=moment_timestamp,
+        type=RetentionCueType.REVEAL,
+        reason="WAL eliminates reader blocking",
+        psychological_mechanism=PsychologicalMechanism.NOVELTY,
+        narration_anchor="WAL mode eliminates reader blocking",
+    )
+    report = ScriptRetentionReport(
+        passed=True,
+        hook_quality_score=0.90,
+        progression_score=0.85,
+        payoff_alignment_score=0.90,
+        strongest_moments=[moment],
+        concrete_anchors=[
+            ConcreteAnchorAudit(
+                anchor_type=ConcreteAnchorType.ANALOGY,
+                scene_index=0,
+                text="Think of WAL like an append-only ledger",
+                grounded=True,
+            )
+        ],
+    )
+    scenes = [
+        Scene(scene_index=0, narration="SQLite locks readers in default mode.", hook="Hook 1", target_duration_seconds=5.0),
+        Scene(scene_index=1, narration="WAL mode eliminates reader blocking.", hook="Hook 2", target_duration_seconds=5.0),
+    ]
+    sections = ScriptSections(
+        hook="SQLite concurrency is subtle.",
+        intro="Let's unpack locking.",
+        segments=scenes,
+        cta="Subscribe for more.",
+        estimated_duration=10.0,
+        retention_report=report,
+    )
+    script = Script(
+        id="scr_p1_2",
+        title="SQLite WAL Architecture",
+        hook="SQLite concurrency is subtle.",
+        scenes=scenes,
+        sections=sections,
+        total_word_count=12,
+        estimated_duration_seconds=10.0,
+        retention_report=report,
+    )
+    project = VideoProject(
+        id="proj_p1_2",
+        channel_id=channel.id,
+        title="SQLite WAL Architecture",
+        state=VideoLifecycleState.CREATED,
+        script=script,
+    )
+    repo.save_video_project(project)
+    repo.update_project_state(project.id, to_state=VideoLifecycleState.RESEARCHING)
+    repo.update_project_state(project.id, to_state=VideoLifecycleState.PLANNED)
+    repo.update_project_state(project.id, to_state=VideoLifecycleState.SCRIPTED)
+    repo.update_project_state(project.id, to_state=VideoLifecycleState.VERIFIED)
+    return repo, project.id
+
+
+def test_cache_hit_populates_missing_retention_timestamps(tmp_path: Path):
+    """When a cached render is reused, missing retention timestamps are populated from cached timing metadata."""
+    repo, project_id = _setup_pipeline_project_with_report(tmp_path)
+    timing = [
+        {"word": "wal", "start": 3.2},
+        {"word": "mode", "start": 3.5},
+        {"word": "eliminates", "start": 3.8},
+        {"word": "reader", "start": 4.1},
+        {"word": "blocking", "start": 4.5},
+    ]
+    tts = TimingMockTTSBackend(duration_seconds=6.0, timing_events=timing)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_cache_ts",
+    )
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+    assert manifest_1.tts_timing_events is not None
+
+    p = repo.get_video_project(project_id)
+    p.script.retention_report.strongest_moments[0].timestamp_seconds = None
+    p.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(p)
+
+    reloaded_before = repo.get_video_project(project_id)
+    assert reloaded_before.script.retention_report.strongest_moments[0].timestamp_seconds is None
+
+    proj_2, qa_2, manifest_2 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+    assert proj_2.script.retention_report.strongest_moments[0].timestamp_seconds is not None
+    assert proj_2.script.retention_report.strongest_moments[0].timestamp_seconds == 3.2
+
+
+def test_cache_hit_does_not_resynthesize_tts_for_metadata(tmp_path: Path):
+    """Metadata enrichment on render cache hit does not re-invoke external/synthesizing TTS."""
+    repo, project_id = _setup_pipeline_project_with_report(tmp_path)
+    timing = [{"word": "wal", "start": 3.2}]
+    tts = TimingMockTTSBackend(duration_seconds=6.0, timing_events=timing)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_no_tts",
+    )
+
+    pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+
+    p = repo.get_video_project(project_id)
+    p.script.retention_report.strongest_moments[0].timestamp_seconds = None
+    p.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(p)
+
+    pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+
+
+def test_cache_hit_persists_enriched_timestamps(tmp_path: Path):
+    """Enriched timestamps from cache hit survive reloading from SQLite."""
+    repo, project_id = _setup_pipeline_project_with_report(tmp_path)
+    timing = [{"word": "wal", "start": 3.2}, {"word": "mode", "start": 3.5}]
+    tts = TimingMockTTSBackend(duration_seconds=6.0, timing_events=timing)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_persist_ts",
+    )
+
+    pipeline.run_production(project_id=project_id)
+    p = repo.get_video_project(project_id)
+    p.script.retention_report.strongest_moments[0].timestamp_seconds = None
+    p.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(p)
+
+    pipeline.run_production(project_id=project_id)
+
+    reloaded = repo.get_video_project(project_id)
+    assert reloaded.script.retention_report.strongest_moments[0].timestamp_seconds is not None
+    assert reloaded.script.retention_report.strongest_moments[0].timestamp_seconds == 3.2
+
+
+def test_old_cache_without_timing_events_uses_duration_ratio_fallback(tmp_path: Path):
+    """When a cached manifest lacks word-level timing events, duration ratio fallback is used."""
+    repo, project_id = _setup_pipeline_project_with_report(tmp_path)
+    tts = TimingMockTTSBackend(duration_seconds=10.0, timing_events=[])
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_ratio_fallback",
+    )
+
+    pipeline.run_production(project_id=project_id)
+
+    manifest_path = tmp_path / "out_ratio_fallback" / project_id / "manifests" / "render_manifest.json"
+    manifest_obj = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    manifest_dict = manifest_obj.model_dump()
+    manifest_dict["tts_timing_events"] = None
+    manifest_dict["audio_duration_seconds"] = 10.0
+    manifest_path.write_text(RenderManifest(**manifest_dict).model_dump_json(indent=2), encoding="utf-8")
+
+    p = repo.get_video_project(project_id)
+    p.script.retention_report.strongest_moments[0].timestamp_seconds = None
+    p.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(p)
+
+    proj_2, _, _ = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+    assert proj_2.script.retention_report.strongest_moments[0].timestamp_seconds == 5.0
+
+
+def test_timestamp_enrichment_failure_is_logged_not_silenced(tmp_path: Path, caplog):
+    """Failure during cache-hit timestamp enrichment logs a warning and does not crash render reuse."""
+    repo, project_id = _setup_pipeline_project_with_report(tmp_path)
+    tts = TimingMockTTSBackend(duration_seconds=6.0, timing_events=[])
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_log_failure",
+    )
+
+    pipeline.run_production(project_id=project_id)
+
+    p = repo.get_video_project(project_id)
+    p.script.retention_report.strongest_moments[0].timestamp_seconds = None
+    p.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(p)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                ScriptRetentionReport,
+                "populate_timestamps",
+                MagicMock(side_effect=RuntimeError("Corrupt timing data")),
+            )
+            proj_2, qa_2, _ = pipeline.run_production(project_id=project_id)
+
+    assert "RETENTION_TIMESTAMP_MAPPING_FAILED" in caplog.text
+    assert qa_2.passed is True
+
+
+def test_persistence_and_cache_interaction_populates_timestamps(tmp_path: Path):
+    """End-to-end scenario: project with missing timestamps reuses valid render cache, avoids TTS, enriches and persists timestamps."""
+    repo, project_id = _setup_pipeline_project_with_report(tmp_path)
+    timing = [
+        {"word": "wal", "start": 3.2},
+        {"word": "mode", "start": 3.5},
+        {"word": "eliminates", "start": 3.8},
+        {"word": "reader", "start": 4.1},
+        {"word": "blocking", "start": 4.5},
+    ]
+    tts = TimingMockTTSBackend(duration_seconds=6.0, timing_events=timing)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_e2e_cache_ts",
+    )
+
+    # 1. Create project with retention blueprint, retention report, strongest moments without timestamps
+    p = repo.get_video_project(project_id)
+    p.script.retention_blueprint = RetentionBlueprint(
+        hook=HookCandidate(text="Hook", angle=HookAngle.CURIOSITY_GAP, promise="Promise"),
+        cues=[RetentionCue(cue_id="c1", cue_type=RetentionCueType.REVEAL, target_position_ratio=0.5, purpose="P", anchor_text="WAL mode eliminates reader blocking", linked_hook_promise="Promise")],
+        core_question="Q",
+        promised_payoff="P",
+        content_format=ContentFormat.EXPLAINER,
+        target_duration_seconds=10.0,
+    )
+    p.script.retention_report.strongest_moments[0].timestamp_seconds = None
+    # 2. Persist project
+    repo.save_video_project(p)
+
+    # Initial run to generate valid cache
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+    tts.call_count = 0  # reset call counter
+
+    # Simulate fresh project reload with missing timestamps
+    p2 = repo.get_video_project(project_id)
+    p2.script.retention_report.strongest_moments[0].timestamp_seconds = None
+    p2.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(p2)
+
+    # 4. Call MediaProductionPipeline.run_production
+    proj_out, qa_out, manifest_out = pipeline.run_production(project_id=project_id)
+
+    # 5. Pipeline should REUSE render cache
+    assert manifest_out.final_video_sha256 == manifest_1.final_video_sha256
+    # 6. Must NOT synthesize TTS again
+    assert tts.call_count == 0
+    # 7. Must populate missing retention timestamps
+    assert proj_out.script.retention_report.strongest_moments[0].timestamp_seconds is not None
+
+    # 8-9. Reload project and verify strongly typed contracts
+    reloaded = repo.get_video_project(project_id)
+    assert isinstance(reloaded.script.retention_report, ScriptRetentionReport)
+    assert isinstance(reloaded.script.retention_report.strongest_moments[0], RetentionMoment)
+    assert reloaded.script.retention_report.strongest_moments[0].timestamp_seconds is not None
+    assert reloaded.state in (VideoLifecycleState.READY_FOR_REVIEW, VideoLifecycleState.RENDERED)
 
 
 # ============================================================================
