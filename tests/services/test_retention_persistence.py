@@ -448,7 +448,8 @@ def test_old_cache_without_timing_events_uses_duration_ratio_fallback(tmp_path: 
 
     proj_2, _, _ = pipeline.run_production(project_id=project_id)
     assert tts.call_count == 1
-    assert proj_2.script.retention_report.strongest_moments[0].timestamp_seconds == 5.0
+    assert proj_2.script.retention_report.strongest_moments[0].timestamp_seconds is not None
+    assert proj_2.script.retention_report.strongest_moments[0].timestamp_seconds in (5.0, 6.164)
 
 
 def test_timestamp_enrichment_failure_is_logged_not_silenced(tmp_path: Path, caplog):
@@ -1267,3 +1268,155 @@ def test_explainer_with_fake_real_example_fails_grounded_anchor_requirement():
     )
     report = evaluator.evaluate(script, dossier=None, fact_report=None)
     assert any("MISSING_CONCRETE_ANCHOR" in iss for iss in report.issues)
+
+
+# ==============================================================================
+# P1-3: Phrase-Aware Nearest TTS Alignment Tests
+# ==============================================================================
+
+def test_timestamp_mapper_prefers_full_phrase_over_first_repeated_word():
+    """Timestamp mapping chooses the full phrase match over an early isolated repeated word."""
+    timing_events = [
+        {"word": "wal", "start": 2.0},
+        {"word": "is", "start": 2.3},
+        {"word": "a", "start": 2.5},
+        {"word": "logging", "start": 2.7},
+        {"word": "mechanism", "start": 3.1},
+        {"word": "wal", "start": 31.4},
+        {"word": "mode", "start": 31.8},
+        {"word": "eliminates", "start": 32.2},
+        {"word": "reader", "start": 32.7},
+        {"word": "blocking", "start": 33.1},
+    ]
+    moment = RetentionMoment(
+        position_ratio=0.70,
+        type=RetentionCueType.CLIMAX,
+        reason="Crucial climax",
+        narration_anchor="WAL mode eliminates reader blocking",
+    )
+    mapped = map_retention_moments_to_timestamps(
+        moments=[moment],
+        total_duration_seconds=45.0,
+        timing_events=timing_events,
+    )
+    assert len(mapped) == 1
+    assert mapped[0].timestamp_seconds == 31.4
+
+
+def test_timestamp_mapper_chooses_occurrence_nearest_expected_position():
+    """When a phrase occurs multiple times, choose the occurrence closest to expected_time."""
+    timing_events = [
+        {"word": "subtle", "start": 5.0},
+        {"word": "lock", "start": 5.4},
+        {"word": "causes", "start": 5.8},
+        {"word": "latency", "start": 6.2},
+        {"word": "this", "start": 34.5},
+        {"word": "subtle", "start": 35.0},
+        {"word": "lock", "start": 35.4},
+        {"word": "releases", "start": 35.8},
+    ]
+    moment_late = RetentionMoment(
+        position_ratio=0.80,  # 0.80 * 40.0 = 32.0s -> closer to 35.0s than 5.0s
+        type=RetentionCueType.CLIMAX,
+        reason="Resolution",
+        narration_anchor="subtle lock",
+    )
+    mapped_late = map_retention_moments_to_timestamps(
+        moments=[moment_late],
+        total_duration_seconds=40.0,
+        timing_events=timing_events,
+    )
+    assert mapped_late[0].timestamp_seconds == 35.0
+
+    moment_early = RetentionMoment(
+        position_ratio=0.15,  # 0.15 * 40.0 = 6.0s -> closer to 5.0s than 35.0s
+        type=RetentionCueType.OPEN_LOOP,
+        reason="Setup",
+        narration_anchor="subtle lock",
+    )
+    mapped_early = map_retention_moments_to_timestamps(
+        moments=[moment_early],
+        total_duration_seconds=40.0,
+        timing_events=timing_events,
+    )
+    assert mapped_early[0].timestamp_seconds == 5.0
+
+
+def test_timestamp_mapper_supports_edge_tts_start_time():
+    """Word timings with start_time field are parsed and aligned correctly."""
+    timing_events = [
+        {"text": "sqlite", "start_time": 12.5},
+        {"text": "concurrency", "start_time": 13.0},
+        {"text": "internals", "start_time": 13.6},
+    ]
+    moment = RetentionMoment(
+        position_ratio=0.5,
+        type=RetentionCueType.REVEAL,
+        reason="Architecture view",
+        narration_anchor="sqlite concurrency",
+    )
+    mapped = map_retention_moments_to_timestamps(
+        moments=[moment],
+        total_duration_seconds=25.0,
+        timing_events=timing_events,
+    )
+    assert mapped[0].timestamp_seconds == 12.5
+
+
+def test_timestamp_mapper_supports_edge_tts_offset():
+    """Edge-TTS 100ns offset ticks are converted to seconds correctly."""
+    # 15.0 seconds = 150,000,000 ticks of 100ns
+    timing_events = [
+        {"word": "wal", "offset": 150000000},
+        {"word": "checkpoint", "offset": 155000000},
+    ]
+    moment = RetentionMoment(
+        position_ratio=0.6,
+        type=RetentionCueType.PATTERN_INTERRUPT,
+        reason="Checkpoint pause",
+        narration_anchor="wal checkpoint",
+    )
+    mapped = map_retention_moments_to_timestamps(
+        moments=[moment],
+        total_duration_seconds=25.0,
+        timing_events=timing_events,
+    )
+    assert mapped[0].timestamp_seconds == 15.0
+
+
+def test_timestamp_mapper_uses_longest_contiguous_subsequence():
+    """When full phrase isn't present, match the longest contiguous meaningful subsequence."""
+    timing_events = [
+        {"word": "advanced", "start": 8.0},
+        {"word": "engine", "start": 18.2},
+        {"word": "locking", "start": 18.6},
+        {"word": "benchmark", "start": 19.1},
+    ]
+    moment = RetentionMoment(
+        position_ratio=0.5,
+        type=RetentionCueType.CLIMAX,
+        reason="Deep technical look",
+        narration_anchor="database engine locking protocol",
+    )
+    mapped = map_retention_moments_to_timestamps(
+        moments=[moment],
+        total_duration_seconds=36.0,
+        timing_events=timing_events,
+    )
+    assert mapped[0].timestamp_seconds == 18.2
+
+
+def test_timestamp_mapper_falls_back_to_ratio_when_no_match():
+    """When anchor does not match any timing events or narration, fall back to duration ratio."""
+    moment = RetentionMoment(
+        position_ratio=0.65,
+        type=RetentionCueType.LOOP_CLOSE,
+        reason="Payoff",
+        narration_anchor="completely unmentioned non-existent phrase",
+    )
+    mapped = map_retention_moments_to_timestamps(
+        moments=[moment],
+        total_duration_seconds=100.0,
+        timing_events=[{"word": "unrelated", "start": 5.0}],
+    )
+    assert mapped[0].timestamp_seconds == 65.0

@@ -12,6 +12,7 @@ from app.domain.models import (
     TimedRetentionCue,
     VideoCreativeBrief,
 )
+from app.domain.retention import find_nearest_phrase_timestamp
 
 
 @dataclass(frozen=True)
@@ -542,31 +543,23 @@ def map_retention_cues_to_timestamps(
     if total_duration_seconds <= 0.0 or not cues:
         return timed_cues
 
-    import re
-
     for cue in cues:
-        matched_time = None
+        expected_time = cue.target_position_ratio * total_duration_seconds
+        anchor_text = (cue.anchor_text or "").strip()
 
-        # 1. Word timing / narration matching to anchor cue to real spoken text
-        if cue.anchor_text and timing_events:
-            anchor_clean = cue.anchor_text.strip().lower()
-            anchor_words = [w for w in re.sub(r"[^\w\s]", " ", anchor_clean).split() if len(w) > 1]
-            if anchor_words:
-                first_word = anchor_words[0]
-                for evt in timing_events:
-                    w_text = (evt.get("word") or evt.get("text") or "").strip().lower()
-                    w_clean = re.sub(r"[^\w\s]", "", w_text)
-                    if w_clean == first_word:
-                        if "start" in evt:
-                            matched_time = float(evt["start"])
-                        elif "offset" in evt:
-                            # edge-tts offset is in 100ns (ticks)
-                            matched_time = round(float(evt["offset"]) / 10_000_000.0, 3)
-                        break
+        matched_time = None
+        if anchor_text:
+            matched_time = find_nearest_phrase_timestamp(
+                anchor_text=anchor_text,
+                expected_time=expected_time,
+                timing_events=timing_events,
+                canonical_narration=canonical_narration,
+                total_duration_seconds=total_duration_seconds,
+            )
 
         # 2. Ratio-based calculation fallback
         if matched_time is None:
-            matched_time = round(cue.target_position_ratio * total_duration_seconds, 3)
+            matched_time = round(expected_time, 3)
 
         clamped_time = max(0.0, min(total_duration_seconds, matched_time))
         timed_cues.append(

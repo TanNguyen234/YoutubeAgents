@@ -93,6 +93,110 @@ class ScriptRetentionReport(BaseModel):
         return self
 
 
+class WordTiming(BaseModel):
+    """Normalized word timing token representation."""
+
+    token: str
+    start_seconds: float
+    end_seconds: Optional[float] = None
+
+
+def parse_word_timings(timing_events: Optional[List[Dict[str, Any]]]) -> List[WordTiming]:
+    """Parse various TTS timing event formats into normalized WordTiming instances."""
+    if not timing_events:
+        return []
+    parsed: List[WordTiming] = []
+    for evt in timing_events:
+        raw_text = evt.get("word") if "word" in evt else evt.get("text")
+        if raw_text is None:
+            continue
+        clean_token = re.sub(r"[^\w]", "", str(raw_text).strip().lower())
+        if not clean_token:
+            continue
+
+        start_sec = None
+        if "start_time" in evt:
+            start_sec = float(evt["start_time"])
+        elif "start" in evt:
+            start_sec = float(evt["start"])
+        elif "offset" in evt:
+            start_sec = round(float(evt["offset"]) / 10_000_000.0, 3)
+
+        if start_sec is None:
+            continue
+
+        end_sec = None
+        if "end_time" in evt:
+            end_sec = float(evt["end_time"])
+        elif "end" in evt:
+            end_sec = float(evt["end"])
+        elif "offset" in evt and "duration" in evt:
+            end_sec = round((float(evt["offset"]) + float(evt["duration"])) / 10_000_000.0, 3)
+
+        parsed.append(WordTiming(token=clean_token, start_seconds=start_sec, end_seconds=end_sec))
+    return parsed
+
+
+def find_nearest_phrase_timestamp(
+    anchor_text: str,
+    expected_time: float,
+    timing_events: Optional[List[Dict[str, Any]]] = None,
+    canonical_narration: Optional[str] = None,
+    total_duration_seconds: float = 0.0,
+) -> Optional[float]:
+    """Align narration anchor against nearest TTS timing phrase or fallback sequence.
+
+    Matching hierarchy:
+    1. Full contiguous anchor phrase
+    2. Longest meaningful contiguous token span (>= 2 tokens, or 1 if anchor only has 1)
+    3. Canonical narration location mapped proportionally
+    4. None (caller falls back to position_ratio * total_duration_seconds)
+    """
+    clean_anchor = (anchor_text or "").strip()
+    if not clean_anchor:
+        return None
+
+    words = [re.sub(r"[^\w]", "", w.lower()) for w in re.findall(r"\b\w+\b", clean_anchor)]
+    anchor_tokens = [w for w in words if w]
+
+    word_timings = parse_word_timings(timing_events)
+    if anchor_tokens and word_timings:
+        event_tokens = [wt.token for wt in word_timings]
+        m_len = len(anchor_tokens)
+        n_len = len(event_tokens)
+
+        # 1. Full contiguous match
+        full_matches = []
+        for i in range(n_len - m_len + 1):
+            if event_tokens[i : i + m_len] == anchor_tokens:
+                full_matches.append(word_timings[i].start_seconds)
+
+        if full_matches:
+            return min(full_matches, key=lambda t: abs(t - expected_time))
+
+        # 2. Longest meaningful contiguous subsequence
+        min_subseq_len = 1 if m_len == 1 else 2
+        for sub_len in range(m_len - 1, min_subseq_len - 1, -1):
+            sub_matches = []
+            for s_idx in range(m_len - sub_len + 1):
+                sub_slice = anchor_tokens[s_idx : s_idx + sub_len]
+                for i in range(n_len - sub_len + 1):
+                    if event_tokens[i : i + sub_len] == sub_slice:
+                        sub_matches.append(word_timings[i].start_seconds)
+
+            if sub_matches:
+                return min(sub_matches, key=lambda t: abs(t - expected_time))
+
+    # 3. Canonical narration proportional mapping
+    if canonical_narration and len(canonical_narration) > 0 and total_duration_seconds > 0.0:
+        search_target = clean_anchor.lower()[:30]
+        idx = canonical_narration.lower().find(search_target)
+        if idx >= 0:
+            return round((idx / len(canonical_narration)) * total_duration_seconds, 3)
+
+    return None
+
+
 def map_retention_moments_to_timestamps(
     moments: List[RetentionMoment],
     total_duration_seconds: float,
@@ -102,9 +206,10 @@ def map_retention_moments_to_timestamps(
     """Map retention moments to actual timestamps after real TTS audio duration and word boundaries.
 
     Timestamp matching priority:
-    1. narration_anchor + timing events
-    2. nearest exact word/phrase span in canonical_narration
-    3. ratio-based fallback (position_ratio * total_duration_seconds)
+    1. Full contiguous narration_anchor phrase
+    2. Longest meaningful contiguous token span
+    3. Canonical narration location mapped proportionally
+    4. position_ratio * total_duration_seconds
     Never uses RetentionMoment.reason as a timing source.
     """
     if total_duration_seconds <= 0.0 or not moments:
@@ -112,36 +217,22 @@ def map_retention_moments_to_timestamps(
 
     updated_moments: List[RetentionMoment] = []
     for m in moments:
-        matched_time = None
+        expected_time = m.position_ratio * total_duration_seconds
         anchor_text = (m.narration_anchor or "").strip()
 
-        # 1. narration_anchor + timing events
-        if anchor_text and timing_events:
-            anchor_words = [w.lower() for w in re.findall(r"\b\w+\b", anchor_text) if len(w) > 1]
-            if anchor_words:
-                for w in anchor_words:
-                    for evt in timing_events:
-                        w_evt = (evt.get("word") or evt.get("text") or "").strip().lower()
-                        w_clean = re.sub(r"[^\w\s]", "", w_evt)
-                        if w_clean == w:
-                            if "start" in evt:
-                                matched_time = float(evt["start"])
-                            elif "offset" in evt:
-                                matched_time = round(float(evt["offset"]) / 10_000_000.0, 3)
-                            break
-                    if matched_time is not None:
-                        break
+        matched_time = None
+        if anchor_text:
+            matched_time = find_nearest_phrase_timestamp(
+                anchor_text=anchor_text,
+                expected_time=expected_time,
+                timing_events=timing_events,
+                canonical_narration=canonical_narration,
+                total_duration_seconds=total_duration_seconds,
+            )
 
-        # 2. Nearest exact word/phrase span in canonical_narration
-        if matched_time is None and anchor_text and canonical_narration and len(canonical_narration) > 0:
-            idx = canonical_narration.lower().find(anchor_text.lower()[:30])
-            if idx >= 0:
-                ratio = idx / len(canonical_narration)
-                matched_time = round(ratio * total_duration_seconds, 3)
-
-        # 3. Ratio-based calculation fallback
+        # 4. Ratio-based calculation fallback
         if matched_time is None:
-            matched_time = round(m.position_ratio * total_duration_seconds, 3)
+            matched_time = round(expected_time, 3)
 
         clamped_time = max(0.0, min(total_duration_seconds, matched_time))
         updated_moments.append(
