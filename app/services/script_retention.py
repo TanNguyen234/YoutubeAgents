@@ -1,80 +1,24 @@
-import re
-from typing import Any, Dict, List, Optional
+"""Format-aware narrative retention evaluation and pacing audits for YouTube scripts."""
 
-from pydantic import BaseModel, Field
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.enums import (
+    ClaimVerificationVerdict,
     ConcreteAnchorType,
     ContentFormat,
     PsychologicalMechanism,
     RetentionCueType,
 )
 from app.domain.models import RetentionBlueprint, Script, ScriptSections
-
-
-class DropRisk(BaseModel):
-    """Identified viewer drop-off hazard with severity and suggested remedy."""
-
-    start_ratio: float = Field(ge=0.0, le=1.0, description="Normalized starting position of risk")
-    end_ratio: float = Field(ge=0.0, le=1.0, description="Normalized ending position of risk")
-    reason: str = Field(description="Diagnostic reason for drop risk")
-    severity: str = Field(description="HIGH, MEDIUM, or LOW")
-    rewrite_hint: Optional[str] = Field(default=None, description="Actionable hint for script rewrite")
-
-
-class OpenLoopAudit(BaseModel):
-    """Audit record for a narrative open loop (curiosity gap or unanswered question)."""
-
-    question: str = Field(description="The open loop question or curiosity gap")
-    opened_at_ratio: float = Field(ge=0.0, le=1.0, description="Where loop was initiated")
-    closed_at_ratio: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Where loop was resolved")
-    resolved: bool = Field(default=False, description="Whether open loop reached payoff")
-
-
-class RetentionMoment(BaseModel):
-    """Strong positive retention milestone detected in script."""
-
-    position_ratio: float = Field(ge=0.0, le=1.0, description="Normalized script position ratio")
-    timestamp_seconds: Optional[float] = Field(default=None, ge=0.0, description="Mapped timestamp in seconds from real audio")
-    type: RetentionCueType
-    reason: str
-    psychological_mechanism: str = Field(
-        default="CURIOSITY_GAP",
-        description="Descriptive psychological cue label (e.g. CURIOSITY_GAP, ANTICIPATION, CONTRAST, STAKES, NOVELTY, PREDICTION_ERROR, PAYOFF, CALLBACK)",
-    )
-
-
-
-class ScriptRetentionReport(BaseModel):
-    """Heuristic quality report assessing narrative retention and pacing.
-
-    NOTE: These scores are internal heuristics, NOT real or predicted YouTube analytics.
-    """
-
-    passed: bool = Field(description="Whether script satisfies retention quality gate")
-    hook_quality_score: float = Field(ge=0.0, le=1.0, description="Hook retention heuristic score")
-    progression_score: float = Field(ge=0.0, le=1.0, description="Narrative progression heuristic score")
-    payoff_alignment_score: float = Field(ge=0.0, le=1.0, description="Promise vs payoff alignment heuristic score")
-    drop_risks: List[DropRisk] = Field(default_factory=list)
-    open_loops: List[OpenLoopAudit] = Field(default_factory=list)
-    strongest_moments: List[RetentionMoment] = Field(default_factory=list)
-    issues: List[str] = Field(default_factory=list)
-    rewrite_instructions: List[str] = Field(default_factory=list)
-
-    def populate_timestamps(
-        self,
-        total_duration_seconds: float,
-        timing_events: Optional[List[Dict[str, Any]]] = None,
-        canonical_narration: Optional[str] = None,
-    ) -> "ScriptRetentionReport":
-        """Populate actual timestamps on retention moments after real TTS."""
-        self.strongest_moments = map_retention_moments_to_timestamps(
-            moments=self.strongest_moments,
-            total_duration_seconds=total_duration_seconds,
-            timing_events=timing_events,
-            canonical_narration=canonical_narration,
-        )
-        return self
+from app.domain.retention import (
+    ConcreteAnchorAudit,
+    DropRisk,
+    OpenLoopAudit,
+    RetentionMoment,
+    ScriptRetentionReport,
+    map_retention_moments_to_timestamps,
+)
 
 
 class ScriptRetentionEvaluator:
@@ -93,10 +37,82 @@ class ScriptRetentionEvaluator:
         words = re.findall(r"\b\w+\b", text.lower())
         return [w for w in words if len(w) > 2 and w not in cls.STOP_WORDS]
 
+    @classmethod
+    def _validate_grounding(
+        cls,
+        scene_text: str,
+        dossier: Optional[Any] = None,
+        fact_report: Optional[Any] = None,
+    ) -> Tuple[bool, List[str], List[str]]:
+        """Validate whether an anchor is grounded against verified claims or dossier sources."""
+        scene_tokens = set(cls._tokenize(scene_text))
+        matched_claim_ids: List[str] = []
+        matched_source_refs: List[str] = []
+
+        # 1. FactCheckReport claims
+        if fact_report and hasattr(fact_report, "claims"):
+            for c in fact_report.claims:
+                is_ver = getattr(c, "verified", False) or getattr(c, "verdict", None) in (
+                    ClaimVerificationVerdict.VERIFIED,
+                    "VERIFIED",
+                )
+                if not is_ver:
+                    continue
+                c_stmt = getattr(c, "statement", "")
+                c_tokens = set(cls._tokenize(c_stmt))
+                overlap = scene_tokens.intersection(c_tokens)
+                if len(overlap) >= 2 or (c_stmt.lower() in scene_text.lower() and len(c_tokens) > 0):
+                    cid = getattr(c, "id", f"claim-{len(matched_claim_ids)}")
+                    if cid not in matched_claim_ids:
+                        matched_claim_ids.append(cid)
+                    cited_url = getattr(c, "cited_url", None)
+                    source_id = getattr(c, "source_id", None)
+                    if cited_url and cited_url not in matched_source_refs:
+                        matched_source_refs.append(cited_url)
+                    elif source_id and source_id not in matched_source_refs:
+                        matched_source_refs.append(source_id)
+
+        # 2. ResearchDossier claims & sources
+        if dossier:
+            for c in getattr(dossier, "claims", []):
+                is_ver = getattr(c, "verified", False) or getattr(c, "verdict", None) in (
+                    ClaimVerificationVerdict.VERIFIED,
+                    "VERIFIED",
+                )
+                if is_ver:
+                    c_stmt = getattr(c, "statement", "")
+                    c_tokens = set(cls._tokenize(c_stmt))
+                    overlap = scene_tokens.intersection(c_tokens)
+                    if len(overlap) >= 2 or (c_stmt.lower() in scene_text.lower() and len(c_tokens) > 0):
+                        cid = getattr(c, "id", f"dossier-claim-{len(matched_claim_ids)}")
+                        if cid not in matched_claim_ids:
+                            matched_claim_ids.append(cid)
+                        cited_url = getattr(c, "cited_url", None)
+                        source_id = getattr(c, "source_id", None)
+                        if cited_url and cited_url not in matched_source_refs:
+                            matched_source_refs.append(cited_url)
+                        elif source_id and source_id not in matched_source_refs:
+                            matched_source_refs.append(source_id)
+
+            for s in getattr(dossier, "sources", []):
+                s_url = getattr(s, "url", "")
+                s_title = getattr(s, "title", "")
+                s_snapshot = getattr(s, "content_snapshot", "")
+                s_tokens = set(cls._tokenize(f"{s_title} {s_snapshot[:300]}"))
+                overlap = scene_tokens.intersection(s_tokens)
+                if len(overlap) >= 3 or (s_title and s_title.lower() in scene_text.lower() and len(s_tokens) > 0):
+                    if s_url and s_url not in matched_source_refs:
+                        matched_source_refs.append(s_url)
+
+        grounded = bool(matched_claim_ids or matched_source_refs)
+        return grounded, matched_claim_ids, matched_source_refs
+
     def evaluate(
         self,
         script: Script,
         blueprint: Optional[RetentionBlueprint] = None,
+        dossier: Optional[Any] = None,
+        fact_report: Optional[Any] = None,
     ) -> ScriptRetentionReport:
         """Run heuristic retention QA across the script."""
         scenes = script.scenes or []
@@ -180,7 +196,8 @@ class ScriptRetentionEvaluator:
                     timestamp_seconds=None,
                     type=RetentionCueType.OPEN_LOOP,
                     reason="Crisp opening hook establishes immediate curiosity gap",
-                    psychological_mechanism="CURIOSITY_GAP",
+                    psychological_mechanism=PsychologicalMechanism.CURIOSITY_GAP,
+                    narration_anchor=hook_text,
                 )
             )
 
@@ -225,13 +242,15 @@ class ScriptRetentionEvaluator:
         else:
             loop_audit.resolved = True
             loop_audit.closed_at_ratio = 0.90
+            payoff_anchor = scenes[-1].narration.strip() if scenes else (cta_text or hook_text)
             strongest_moments.append(
                 RetentionMoment(
                     position_ratio=0.88,
                     timestamp_seconds=None,
                     type=RetentionCueType.LOOP_CLOSE,
                     reason="Ending cleanly resolves core question and delivers payoff",
-                    psychological_mechanism="PAYOFF",
+                    psychological_mechanism=PsychologicalMechanism.PAYOFF,
+                    narration_anchor=payoff_anchor,
                 )
             )
 
@@ -247,14 +266,15 @@ class ScriptRetentionEvaluator:
             if any(abs(m.position_ratio - s_ratio) < 0.08 for m in strongest_moments):
                 continue
 
-            if any(k in s_lower for k in ["think of it like", "imagine a", "analogy", "mental model"]):
+            if re.search(r"\b(think of (it|this|\w+)?\s*like|imagine (a|an)?|analogy|similar to|like (a|an)\b|metaphor|acts like|works like|mental model)\b", s_lower):
                 strongest_moments.append(
                     RetentionMoment(
                         position_ratio=s_ratio,
                         timestamp_seconds=None,
                         type=RetentionCueType.REVEAL,
                         reason=f"Intuitive analogy in Scene {idx+1} bridges abstract theory into concrete understanding",
-                        psychological_mechanism=PsychologicalMechanism.NOVELTY.value,
+                        psychological_mechanism=PsychologicalMechanism.NOVELTY,
+                        narration_anchor=s.narration.strip(),
                     )
                 )
             elif any(k in s_lower for k in ["for example", "for instance", "in practice", "observed in production"]):
@@ -264,7 +284,8 @@ class ScriptRetentionEvaluator:
                         timestamp_seconds=None,
                         type=RetentionCueType.REVEAL,
                         reason=f"Concrete real-world example in Scene {idx+1} grounds technical mechanics",
-                        psychological_mechanism=PsychologicalMechanism.CONTRAST.value,
+                        psychological_mechanism=PsychologicalMechanism.CONTRAST,
+                        narration_anchor=s.narration.strip(),
                     )
                 )
             elif any(k in s_lower for k in ["compared to", "in contrast", "versus", "unlike", "trade-off", "tradeoff"]):
@@ -274,7 +295,8 @@ class ScriptRetentionEvaluator:
                         timestamp_seconds=None,
                         type=RetentionCueType.PATTERN_INTERRUPT,
                         reason=f"Decisive comparison in Scene {idx+1} creates sharp technical contrast",
-                        psychological_mechanism=PsychologicalMechanism.CONTRAST.value,
+                        psychological_mechanism=PsychologicalMechanism.CONTRAST,
+                        narration_anchor=s.narration.strip(),
                     )
                 )
             elif any(k in s_lower for k in ["bottleneck", "flaw", "fails", "crashing", "danger", "deadlock"]):
@@ -284,7 +306,8 @@ class ScriptRetentionEvaluator:
                         timestamp_seconds=None,
                         type=RetentionCueType.ESCALATION,
                         reason=f"Failure mode escalation in Scene {idx+1} raises technical stakes",
-                        psychological_mechanism=PsychologicalMechanism.STAKES.value,
+                        psychological_mechanism=PsychologicalMechanism.STAKES,
+                        narration_anchor=s.narration.strip(),
                     )
                 )
             elif any(k in s_lower for k in ["surprisingly", "counterintuitive", "actually", "in reality", "unexpected"]):
@@ -294,7 +317,8 @@ class ScriptRetentionEvaluator:
                         timestamp_seconds=None,
                         type=RetentionCueType.REVEAL,
                         reason=f"Surprising insight in Scene {idx+1} delivers prediction error",
-                        psychological_mechanism=PsychologicalMechanism.PREDICTION_ERROR.value,
+                        psychological_mechanism=PsychologicalMechanism.PREDICTION_ERROR,
+                        narration_anchor=s.narration.strip(),
                     )
                 )
             elif any(k in s_lower for k in ["next", "what happens when", "here is the catch", "stay tuned"]):
@@ -304,7 +328,8 @@ class ScriptRetentionEvaluator:
                         timestamp_seconds=None,
                         type=RetentionCueType.REHOOK,
                         reason=f"Pacing rehook in Scene {idx+1} creates forward anticipation",
-                        psychological_mechanism=PsychologicalMechanism.ANTICIPATION.value,
+                        psychological_mechanism=PsychologicalMechanism.ANTICIPATION,
+                        narration_anchor=s.narration.strip(),
                     )
                 )
             elif any(k in s_lower for k in ["remember", "as we saw", "earlier", "circling back"]):
@@ -314,16 +339,15 @@ class ScriptRetentionEvaluator:
                         timestamp_seconds=None,
                         type=RetentionCueType.LOOP_CLOSE,
                         reason=f"Thematic callback in Scene {idx+1} reinforces core concepts",
-                        psychological_mechanism=PsychologicalMechanism.CALLBACK.value,
+                        psychological_mechanism=PsychologicalMechanism.CALLBACK,
+                        narration_anchor=s.narration.strip(),
                     )
                 )
 
         # 3. Narrative Progression & Exposition Pacing
         progression_score = 0.90
-        cur_ratio = 0.0
 
         for idx, s in enumerate(scenes):
-            scene_ratio = (idx + 0.5) / total_scenes
             words = re.findall(r"\b\w+\b", s.narration)
             w_count = len(words)
 
@@ -370,26 +394,89 @@ class ScriptRetentionEvaluator:
             ContentFormat.EXPLAINER,
             ContentFormat.BREAKDOWN,
         )
-        anchor_patterns = {
-            ConcreteAnchorType.REAL_EXAMPLE: r"\b(for example|for instance|in practice|real-world|such as|take the case|case of|observed in production)\b",
-            ConcreteAnchorType.ANALOGY: r"\b(think of it like|imagine a|analogy|similar to|like a|metaphor|acts like|works like|mental model)\b",
-            ConcreteAnchorType.COMPARISON: r"\b(compared to|versus|in contrast|unlike|trade-off|tradeoff|difference between|diverges from)\b",
-            ConcreteAnchorType.MINI_CASE: r"\b(post-mortem|incident|outage|production bug|failure event|when engineers at)\b",
-            ConcreteAnchorType.DEMONSTRATION: r"\b(run this|terminal|watch what happens|inspecting the output|benchmark shows|output console|code snippet|demonstration)\b",
-        }
-        all_narration = " ".join(s.narration for s in scenes).lower()
-        all_visuals = " ".join(getattr(s, "visual_prompt", "") for s in scenes).lower()
-        combined_text = f"{all_narration} {all_visuals}"
 
-        found_anchors = []
-        for a_type, pat in anchor_patterns.items():
-            if re.search(pat, combined_text):
-                found_anchors.append(a_type)
+        concrete_anchors: List[ConcreteAnchorAudit] = []
+        anchor_patterns = [
+            (ConcreteAnchorType.ANALOGY, r"\b(think of (it|this|\w+)?\s*like|imagine (a|an)?|analogy|similar to|like (a|an)\b|metaphor|acts like|works like|mental model)\b"),
+            (ConcreteAnchorType.MINI_CASE, r"\b(post-mortem|incident|outage|production bug|failure event|when engineers at)\b"),
+            (ConcreteAnchorType.DEMONSTRATION, r"\b(run this|terminal|watch what happens|inspecting the output|benchmark shows|output console|code snippet|demonstration)\b"),
+            (ConcreteAnchorType.COMPARISON, r"\b(compared to|versus|in contrast|unlike|trade-off|tradeoff|difference between|diverges from)\b"),
+            (ConcreteAnchorType.REAL_EXAMPLE, r"\b(for example|for instance|in practice|real-world|such as|take the case|case of|observed in production)\b"),
+        ]
 
-        if is_explanation_heavy and total_duration >= 30.0 and not found_anchors:
+        for s_idx, s in enumerate(scenes):
+            s_narration = s.narration or ""
+            s_lower = s_narration.lower()
+            s_vis = (getattr(s, "visual_prompt", "") or "").lower()
+            combined = f"{s_lower} {s_vis}"
+
+            for a_type, pat in anchor_patterns:
+                m = re.search(pat, combined)
+                if not m:
+                    continue
+
+                sentences = re.split(r"(?<=[.!?])\s+", s_narration)
+                anchor_snippet = s_narration
+                for sent in sentences:
+                    if re.search(pat, sent.lower()):
+                        anchor_snippet = sent.strip()
+                        break
+
+                grounded = False
+                matched_claim_ids: List[str] = []
+                matched_source_refs: List[str] = []
+
+                if a_type == ConcreteAnchorType.ANALOGY:
+                    # Conceptual explanatory analogy does not require external source
+                    grounded = True
+                elif a_type == ConcreteAnchorType.COMPARISON:
+                    # If purely conceptual: illustrative -> grounded = True
+                    # If empirical metrics: must map to verified evidence
+                    is_empirical = bool(re.search(r"\b(\d+x|\d+%\s*faster|\d+ms|latency|throughput|benchmark)\b", s_lower))
+                    if not is_empirical:
+                        grounded = True
+                    else:
+                        grounded, matched_claim_ids, matched_source_refs = self._validate_grounding(
+                            scene_text=s_narration,
+                            dossier=dossier,
+                            fact_report=fact_report,
+                        )
+                elif a_type == ConcreteAnchorType.DEMONSTRATION:
+                    # If claiming empirical result: must map to verified evidence
+                    claims_empirical = bool(re.search(r"\b(benchmark shows|\d+x|\d+%\s*(faster|reduction|improvement)|speedup)\b", s_lower))
+                    if not claims_empirical:
+                        grounded = True
+                    else:
+                        grounded, matched_claim_ids, matched_source_refs = self._validate_grounding(
+                            scene_text=s_narration,
+                            dossier=dossier,
+                            fact_report=fact_report,
+                        )
+                elif a_type in (ConcreteAnchorType.REAL_EXAMPLE, ConcreteAnchorType.MINI_CASE):
+                    # Must map to verified Claim and/or ResearchSource
+                    grounded, matched_claim_ids, matched_source_refs = self._validate_grounding(
+                        scene_text=s_narration,
+                        dossier=dossier,
+                        fact_report=fact_report,
+                    )
+
+                concrete_anchors.append(
+                    ConcreteAnchorAudit(
+                        anchor_type=a_type,
+                        scene_index=s_idx,
+                        text=anchor_snippet,
+                        grounded=grounded,
+                        claim_ids=matched_claim_ids,
+                        source_refs=matched_source_refs,
+                    )
+                )
+
+        grounded_anchors = [a for a in concrete_anchors if a.grounded]
+
+        if is_explanation_heavy and total_duration >= 30.0 and not grounded_anchors:
             progression_score -= 0.15
             issues.append(
-                "MISSING_CONCRETE_ANCHOR: Explanation-heavy script lacks concrete anchors (example, analogy, comparison, mini-case, or demonstration)."
+                "MISSING_CONCRETE_ANCHOR: Explanation-heavy script lacks grounded concrete anchors (grounded example, analogy, comparison, mini-case, or demonstration)."
             )
             drop_risks.append(
                 DropRisk(
@@ -491,6 +578,7 @@ class ScriptRetentionEvaluator:
                     rewrite_hint="Replace dramatic teases with concrete technical facts.",
                 )
             )
+
         # Expose exactly the strongest top 3 moments when at least 3 exist.
         # If fewer than 3 genuinely strong moments exist, do NOT fabricate them; return fewer and report the weakness.
         strongest_moments.sort(key=lambda m: m.position_ratio)
@@ -527,6 +615,7 @@ class ScriptRetentionEvaluator:
             drop_risks=drop_risks,
             open_loops=open_loops,
             strongest_moments=strongest_moments,
+            concrete_anchors=concrete_anchors,
             issues=issues,
             rewrite_instructions=rewrite_instructions,
         )
@@ -544,54 +633,3 @@ class ScriptRetentionEvaluator:
             timing_events=timing_events,
             canonical_narration=canonical_narration,
         )
-
-
-def map_retention_moments_to_timestamps(
-    moments: List[RetentionMoment],
-    total_duration_seconds: float,
-    timing_events: Optional[List[Dict[str, Any]]] = None,
-    canonical_narration: Optional[str] = None,
-) -> List[RetentionMoment]:
-    """Map retention moments to actual timestamps after real TTS audio duration and word boundaries."""
-    if total_duration_seconds <= 0.0 or not moments:
-        return moments
-
-    updated_moments: List[RetentionMoment] = []
-    for m in moments:
-        matched_time = None
-
-        # Try to match key phrase/words from moment reason against timing words
-        if timing_events:
-            reason_words = [
-                w
-                for w in re.findall(r"\b\w+\b", m.reason.lower())
-                if len(w) > 3 and w not in ScriptRetentionEvaluator.STOP_WORDS
-            ]
-            for rw in reason_words:
-                for evt in timing_events:
-                    w_text = (evt.get("word") or evt.get("text") or "").strip().lower()
-                    w_clean = re.sub(r"[^\w\s]", "", w_text)
-                    if w_clean == rw:
-                        if "start" in evt:
-                            matched_time = float(evt["start"])
-                        elif "offset" in evt:
-                            matched_time = round(float(evt["offset"]) / 10_000_000.0, 3)
-                        break
-                if matched_time is not None:
-                    break
-
-        # Ratio-based calculation fallback
-        if matched_time is None:
-            matched_time = round(m.position_ratio * total_duration_seconds, 3)
-
-        clamped_time = max(0.0, min(total_duration_seconds, matched_time))
-        updated_moments.append(
-            RetentionMoment(
-                position_ratio=m.position_ratio,
-                timestamp_seconds=clamped_time,
-                type=m.type,
-                reason=m.reason,
-                psychological_mechanism=m.psychological_mechanism,
-            )
-        )
-    return updated_moments
