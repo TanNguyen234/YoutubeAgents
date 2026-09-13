@@ -27,6 +27,7 @@ from app.domain.models import (
     SEOPackage,
     ThumbnailPackage,
     TopicCandidate,
+    VideoCreativeBrief,
     VideoProject,
 )
 from app.media.gflow_provider import GFlowMediaProvider
@@ -96,6 +97,7 @@ class BrainPipeline:
         max_rewrite_attempts: int = 2,
         content_format: ContentFormat = ContentFormat.EXPLAINER,
         series_continuity: Optional[Dict[str, Any]] = None,
+        creative_brief: Optional[VideoCreativeBrief] = None,
     ) -> Tuple[VideoProject, FactCheckReport]:
         """Execute Stage 1 (Topic Selection) -> Stage 2 (Research) -> Stage 3 (Script) -> Stage 4 (Fact Check) -> Stage 5 (Verification Gate)."""
         recent = recent_topics or []
@@ -196,9 +198,26 @@ class BrainPipeline:
 
         # 6. Stage 4: Creative Brief -> Hook Tournament -> Retention Blueprint -> Script -> Retention QA
         try:
-            brief = resolve_default_creative_brief(
-                content_format=content_format,
-            )
+            if creative_brief is None:
+                brief = resolve_default_creative_brief(
+                    platform_format=project.format,
+                    content_format=content_format,
+                    dossier=dossier,
+                )
+            else:
+                brief = resolve_default_creative_brief(
+                    platform_format=project.format,
+                    content_format=content_format,
+                    requested_duration=creative_brief.target_duration_seconds,
+                    primary_goal=creative_brief.primary_goal,
+                    dossier=dossier,
+                    common_misconception=creative_brief.common_misconception,
+                    common_failure=creative_brief.common_failure,
+                )
+                if creative_brief.tone is not None:
+                    brief.tone = creative_brief.tone
+                if creative_brief.desired_viewer_emotion is not None:
+                    brief.desired_viewer_emotion = creative_brief.desired_viewer_emotion
 
             hook_service = HookTournamentService(backend=self.backend)
             hook_candidates = hook_service.generate_hook_candidates(
@@ -434,6 +453,7 @@ class BrainPipeline:
         simulate_analytics_views: Optional[int] = None,
         content_format: ContentFormat = ContentFormat.EXPLAINER,
         tts_backend: Optional[TTSBackend] = None,
+        creative_brief: Optional[VideoCreativeBrief] = None,
     ) -> Dict[str, Any]:
         """Execute the complete 15-stage YouTube Autopilot lifecycle from Topic Selection to Strategy Feedback."""
         # 0. Editorial Series & Calendar Context
@@ -461,7 +481,22 @@ class BrainPipeline:
             recent_topics=recent_topics,
             series_continuity=continuity,
             content_format=content_format,
+            creative_brief=creative_brief,
         )
+
+        if project.state in (VideoLifecycleState.BLOCKED, VideoLifecycleState.FAILED):
+            return {
+                "project_id": project_id,
+                "lifecycle_state": project.state.value,
+                "fact_check_report": {
+                    "id": fact_report.id,
+                    "overall_verdict": fact_report.overall_verdict.value,
+                    "verified_count": fact_report.verified_count,
+                    "failed_count": fact_report.failed_count,
+                },
+                "status": project.state.value,
+                "halted_reason": f"Project entered {project.state.value} at Stage 5, halting before media production.",
+            }
 
         if slot_id:
             cal_service.book_slot(slot_id, project_id)
