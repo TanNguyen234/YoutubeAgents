@@ -57,7 +57,7 @@ def test_tts_maps_retention_cues_to_real_timestamps():
             cue_type=RetentionCueType.CLIMAX,
             target_position_ratio=0.85,
             purpose="Deliver definitive resolution",
-            anchor_text="solution",
+            anchor_text="unrelated_term",
         ),
     ]
 
@@ -66,6 +66,7 @@ def test_tts_maps_retention_cues_to_real_timestamps():
     timing_events = [
         {"word": "the", "start": 0.2, "end": 0.4},
         {"word": "locking", "start": 3.85, "end": 4.2},
+        {"word": "mechanism", "start": 4.2, "end": 4.6},
         {"word": "bottleneck", "start": 16.25, "end": 16.8},
     ]
 

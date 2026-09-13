@@ -515,16 +515,24 @@ def test_rewrite_and_restart_persists_only_final_authoritative_report(tmp_path: 
     dossier = ResearchDossier(id="dos-01", topic_id="top-01", sources=[src], summary="Asyncio Summary")
 
     sections_v1 = ScriptSections(
-        hook="Why use asyncio?",
+        hook="Why use asyncio concurrency in Python?",
         intro="Asyncio allows writing concurrent code using async/await syntax.",
-        segments=[Scene(index=0, narration="Asyncio makes your CPU 100 times faster instantly.")],
-        cta="Subscribe!",
+        segments=[
+            Scene(index=0, narration="Asyncio makes your CPU 100 times faster instantly. Think of the event loop like an office mail clerk.", target_duration_seconds=15.0),
+            Scene(index=1, narration="In production, async coroutines cooperate to resolve concurrency bottlenecks.", target_duration_seconds=15.0),
+        ],
+        cta="Check out the next breakdown to learn async queues.",
+        estimated_duration=30.0,
     )
     sections_v2 = ScriptSections(
-        hook="Why use asyncio?",
+        hook="Why use asyncio concurrency in Python?",
         intro="Asyncio allows writing concurrent code using async/await syntax.",
-        segments=[Scene(index=0, narration="Asyncio is a library to write concurrent code using the async/await syntax.")],
-        cta="Subscribe!",
+        segments=[
+            Scene(index=0, narration="Asyncio is a library to write concurrent code using the async/await syntax. Think of the event loop like an office mail clerk.", target_duration_seconds=15.0),
+            Scene(index=1, narration="In production, async coroutines cooperate to resolve concurrency bottlenecks.", target_duration_seconds=15.0),
+        ],
+        cta="Check out the next breakdown to learn async queues.",
+        estimated_duration=30.0,
     )
 
     call_count = {"entail": 0}

@@ -2,10 +2,18 @@
 
 import pytest
 
-from app.domain.enums import ContentFormat, HookAngle, RetentionCueType
+from app.domain.enums import (
+    ClaimVerificationVerdict,
+    ConcreteAnchorType,
+    ContentFormat,
+    HookAngle,
+    QualityStatus,
+    RetentionCueType,
+)
 from app.domain.models import (
     Channel,
     Claim,
+    FactCheckReport,
     HookCandidate,
     ResearchDossier,
     ResearchSource,
@@ -14,6 +22,7 @@ from app.domain.models import (
     ScriptSections,
     VideoCreativeBrief,
 )
+from app.domain.retention import ConcreteAnchorAudit
 from app.services.retention_planner import RetentionPlanner
 from app.services.script_generator import ScriptGenerator
 from app.services.script_retention import ScriptRetentionEvaluator
@@ -90,7 +99,7 @@ def test_resolved_promise_passes_retention_qa(sample_hook, sample_blueprint):
         hook=sample_hook.text,
         scenes=[
             Scene(index=0, narration="In default rollback journal mode, writing acquires an exclusive table lock.", target_duration_seconds=8.0),
-            Scene(index=1, narration="When a transaction writes, all concurrent readers are forced to wait.", target_duration_seconds=10.0),
+            Scene(index=1, narration="Think of it like a single-lane bridge where all cars must wait for a slow truck.", target_duration_seconds=10.0),
             Scene(index=2, narration="Switching to WAL mode writes new pages to a separate log file instead.", target_duration_seconds=10.0),
             Scene(index=3, narration="This eliminates reader blocking entirely, unlocking massive concurrent read throughput.", target_duration_seconds=10.0),
         ],
@@ -102,7 +111,7 @@ def test_resolved_promise_passes_retention_qa(sample_hook, sample_blueprint):
             intro="In default mode writing acquires an exclusive table lock.",
             segments=[
                 Scene(index=0, narration="In default rollback journal mode, writing acquires an exclusive table lock.", target_duration_seconds=8.0),
-                Scene(index=1, narration="When a transaction writes, all concurrent readers are forced to wait.", target_duration_seconds=10.0),
+                Scene(index=1, narration="Think of it like a single-lane bridge where all cars must wait for a slow truck.", target_duration_seconds=10.0),
                 Scene(index=2, narration="Switching to WAL mode writes new pages to a separate log file instead.", target_duration_seconds=10.0),
                 Scene(index=3, narration="This eliminates reader blocking entirely, unlocking massive concurrent read throughput.", target_duration_seconds=10.0),
             ],
@@ -320,7 +329,7 @@ def test_fact_rewrite_runs_final_retention_qa(monkeypatch, tmp_path):
     ))
 
     mock_scenes = [
-        Scene(index=0, hook="SQLite concurrency is misunderstood.", narration="WAL mode changes locking.", target_duration_seconds=15.0, visual_prompt="Show WAL log write"),
+        Scene(index=0, hook="SQLite concurrency is misunderstood.", narration="Think of WAL mode like an append-only ledger.", target_duration_seconds=15.0, visual_prompt="Show WAL log write"),
         Scene(index=1, hook="The payoff.", narration="WAL readers never block writers in production.", target_duration_seconds=15.0, visual_prompt="Show concurrent read/write"),
     ]
     mock_sections = ScriptSections(
@@ -332,6 +341,7 @@ def test_fact_rewrite_runs_final_retention_qa(monkeypatch, tmp_path):
     )
     brain.generator.generate_script_sections = MagicMock(return_value=mock_sections)
     brain.generator.rewrite_script_sections = MagicMock(return_value=mock_sections)
+    brain.generator.rewrite_for_retention = MagicMock(return_value=mock_sections)
     brain.extractor.extract_from_script = MagicMock(return_value=[
         Claim(id="c1", statement="SQLite speeds up 100x.", verified=False, source_id="s1")
     ])
@@ -953,6 +963,260 @@ def test_retention_rewrite_failure_in_factcheck_fails_verification(tmp_path, mon
     # Verification gate must fail-closed: FAILED
     assert project.state == VideoLifecycleState.FAILED
     assert "unverified claim" in repo.get_state_history("proj_ret_fail")[-1]["reason"].lower()
+
+
+# ==============================================================================
+# P1-4: Concrete Anchor Hard Gate Tests
+# ==============================================================================
+
+def test_long_explainer_without_valid_anchor_fails_retention_gate():
+    """An explainer >= 30s without any valid retention anchor fails the retention gate."""
+    evaluator = ScriptRetentionEvaluator()
+    script = Script(
+        id="s_long_explainer_no_anchor",
+        title="SQLite Locking Deep Dive",
+        hook="There's a subtle lock in SQLite that silently freezes concurrent readers.",
+        content_format=ContentFormat.EXPLAINER,
+        scenes=[
+            Scene(index=0, narration="In default rollback journal mode, writing acquires an exclusive table lock.", target_duration_seconds=10.0),
+            Scene(index=1, narration="All readers must wait while the write transaction commits to disk.", target_duration_seconds=10.0),
+            Scene(index=2, narration="Switching to WAL mode writes new pages to a separate log file instead.", target_duration_seconds=10.0),
+            Scene(index=3, narration="This eliminates reader blocking entirely, unlocking massive concurrent read throughput.", target_duration_seconds=10.0),
+        ],
+        total_word_count=58,
+        estimated_duration_seconds=40.0,
+    )
+    report = evaluator.evaluate(script)
+    assert report.passed is False
+    assert any("MISSING_CONCRETE_ANCHOR" in iss for iss in report.issues)
+
+
+def test_long_breakdown_without_valid_anchor_fails_retention_gate():
+    """A breakdown format >= 30s without any valid retention anchor fails the retention gate."""
+    evaluator = ScriptRetentionEvaluator()
+    script = Script(
+        id="s_long_breakdown_no_anchor",
+        title="PostgreSQL vs SQLite Architecture",
+        hook="Postgres and SQLite handle multi-threaded queries in completely divergent ways.",
+        content_format=ContentFormat.BREAKDOWN,
+        scenes=[
+            Scene(index=0, narration="First we look at client connection architectures and process boundaries.", target_duration_seconds=10.0),
+            Scene(index=1, narration="Each database engine allocates private buffer pools differently across cores.", target_duration_seconds=10.0),
+            Scene(index=2, narration="Next we inspect the locking protocols applied during bulk transactions.", target_duration_seconds=10.0),
+            Scene(index=3, narration="This architecture breakdown shows why each engine thrives in separate workloads.", target_duration_seconds=10.0),
+        ],
+        total_word_count=56,
+        estimated_duration_seconds=40.0,
+    )
+    report = evaluator.evaluate(script)
+    assert report.passed is False
+    assert any("MISSING_CONCRETE_ANCHOR" in iss for iss in report.issues)
+
+
+def test_long_explainer_with_conceptual_analogy_passes_anchor_gate():
+    """A long explainer with a valid conceptual analogy satisfies the anchor gate without external evidence."""
+    evaluator = ScriptRetentionEvaluator()
+    script = Script(
+        id="s_long_explainer_analogy",
+        title="SQLite Locking Deep Dive",
+        hook="There's a subtle lock in SQLite that silently freezes concurrent readers.",
+        content_format=ContentFormat.EXPLAINER,
+        scenes=[
+            Scene(index=0, narration="In default rollback journal mode, writing acquires an exclusive table lock.", target_duration_seconds=10.0),
+            Scene(index=1, narration="Think of a WAL like an append-only notebook where readers check existing pages while writers append at the end.", target_duration_seconds=10.0),
+            Scene(index=2, narration="Switching to WAL mode writes new pages to a separate log file instead.", target_duration_seconds=10.0),
+            Scene(index=3, narration="This eliminates reader blocking entirely, unlocking massive concurrent read throughput.", target_duration_seconds=10.0),
+        ],
+        total_word_count=65,
+        estimated_duration_seconds=40.0,
+    )
+    report = evaluator.evaluate(script)
+    assert report.passed is True
+    assert not any("MISSING_CONCRETE_ANCHOR" in iss for iss in report.issues)
+    analogy = next(a for a in report.concrete_anchors if a.anchor_type == ConcreteAnchorType.ANALOGY)
+    assert analogy.valid_retention_anchor is True
+    assert analogy.evidence_grounded is False
+
+
+def test_long_explainer_with_verified_real_example_passes_anchor_gate():
+    """A long explainer with a verified real example passes the concrete anchor gate."""
+    evaluator = ScriptRetentionEvaluator()
+    script = Script(
+        id="s_long_explainer_real_example",
+        title="SQLite Locking Deep Dive",
+        hook="There's a subtle lock in SQLite that silently freezes concurrent readers.",
+        content_format=ContentFormat.EXPLAINER,
+        scenes=[
+            Scene(index=0, narration="In default rollback journal mode, writing acquires an exclusive table lock.", target_duration_seconds=10.0),
+            Scene(index=1, narration="In practice, production systems observe massive throughput gains when enabling WAL mode.", target_duration_seconds=10.0),
+            Scene(index=2, narration="Switching to WAL mode writes new pages to a separate log file instead.", target_duration_seconds=10.0),
+            Scene(index=3, narration="This eliminates reader blocking entirely, unlocking massive concurrent read throughput.", target_duration_seconds=10.0),
+        ],
+        total_word_count=60,
+        estimated_duration_seconds=40.0,
+    )
+    fact_report = FactCheckReport(
+        id="fcr_real_ex",
+        project_id="p_real_ex",
+        claims=[
+            Claim(
+                id="c_real_wal",
+                statement="In practice, production systems observe massive throughput gains when enabling WAL mode.",
+                verified=True,
+                verdict=ClaimVerificationVerdict.VERIFIED,
+            )
+        ],
+        verified_count=1,
+        failed_count=0,
+        overall_verdict=QualityStatus.PASSED,
+        audit_summary="Verified",
+    )
+    report = evaluator.evaluate(script, fact_report=fact_report)
+    assert report.passed is True
+    assert not any("MISSING_CONCRETE_ANCHOR" in iss for iss in report.issues)
+    example = next(a for a in report.concrete_anchors if a.anchor_type == ConcreteAnchorType.REAL_EXAMPLE)
+    assert example.valid_retention_anchor is True
+    assert example.evidence_grounded is True
+
+
+def test_short_explainer_does_not_require_anchor():
+    """Short explainers (< 30s) are not required to have a concrete anchor."""
+    evaluator = ScriptRetentionEvaluator()
+    script = Script(
+        id="s_short_explainer",
+        title="SQLite Locking",
+        hook="SQLite concurrency is subtle.",
+        content_format=ContentFormat.EXPLAINER,
+        scenes=[
+            Scene(index=0, narration="Default journal mode acquires an exclusive lock.", target_duration_seconds=8.0),
+            Scene(index=1, narration="WAL mode writes pages to a separate file instead.", target_duration_seconds=8.0),
+        ],
+        total_word_count=18,
+        estimated_duration_seconds=16.0,
+    )
+    report = evaluator.evaluate(script)
+    assert not any("MISSING_CONCRETE_ANCHOR" in iss for iss in report.issues)
+
+
+def test_non_explanation_format_does_not_force_anchor():
+    """Non-explanation formats like RANKING do not mandate concrete anchors even if >= 30s."""
+    evaluator = ScriptRetentionEvaluator()
+    script = Script(
+        id="s_ranking_no_anchor",
+        title="Top Database Engines",
+        hook="Which database architecture handles concurrency best under heavy load?",
+        content_format=ContentFormat.RANKING,
+        scenes=[
+            Scene(index=0, narration="First we look at standard embedded key value stores.", target_duration_seconds=10.0),
+            Scene(index=1, narration="Next we evaluate distributed column stores with strong consistency.", target_duration_seconds=10.0),
+            Scene(index=2, narration="Finally we review relational engines with multiversion concurrency.", target_duration_seconds=10.0),
+            Scene(index=3, narration="The top choice depends directly on your consistency requirements.", target_duration_seconds=10.0),
+        ],
+        total_word_count=50,
+        estimated_duration_seconds=40.0,
+    )
+    report = evaluator.evaluate(script)
+    assert not any("MISSING_CONCRETE_ANCHOR" in iss for iss in report.issues)
+
+
+# ==============================================================================
+# P2: Separation of Retention Validity from Factual Grounding Tests
+# ==============================================================================
+
+def test_conceptual_analogy_is_valid_but_not_evidence_grounded():
+    """Conceptual analogy is marked as valid_retention_anchor=True, evidence_grounded=False."""
+    evaluator = ScriptRetentionEvaluator()
+    script = Script(
+        id="s_analogy_test",
+        title="WAL Analogy",
+        hook="SQLite locking is tricky.",
+        content_format=ContentFormat.EXPLAINER,
+        scenes=[
+            Scene(index=0, narration="Think of a WAL like an append-only notebook for transactions.", target_duration_seconds=10.0),
+        ],
+        total_word_count=10,
+        estimated_duration_seconds=10.0,
+    )
+    report = evaluator.evaluate(script, fact_report=None)
+    analogy = next(a for a in report.concrete_anchors if a.anchor_type == ConcreteAnchorType.ANALOGY)
+    assert analogy.valid_retention_anchor is True
+    assert analogy.evidence_grounded is False
+    assert analogy.grounded is True  # backward compatibility property
+
+
+def test_verified_real_example_is_valid_and_evidence_grounded():
+    """Verified real example is marked as both valid_retention_anchor=True and evidence_grounded=True."""
+    evaluator = ScriptRetentionEvaluator()
+    script = Script(
+        id="s_real_ex_test",
+        title="WAL in Production",
+        hook="SQLite in production.",
+        content_format=ContentFormat.EXPLAINER,
+        scenes=[
+            Scene(index=0, narration="In practice, production systems observe zero reader blocking with WAL.", target_duration_seconds=10.0),
+        ],
+        total_word_count=11,
+        estimated_duration_seconds=10.0,
+    )
+    fact_report = FactCheckReport(
+        id="fcr_ex_test",
+        project_id="p_test",
+        claims=[
+            Claim(
+                id="c_wal_prod",
+                statement="In practice, production systems observe zero reader blocking with WAL.",
+                verified=True,
+                verdict=ClaimVerificationVerdict.VERIFIED,
+            )
+        ],
+        verified_count=1,
+        failed_count=0,
+        overall_verdict=QualityStatus.PASSED,
+        audit_summary="Pass",
+    )
+    report = evaluator.evaluate(script, fact_report=fact_report)
+    example = next(a for a in report.concrete_anchors if a.anchor_type == ConcreteAnchorType.REAL_EXAMPLE)
+    assert example.valid_retention_anchor is True
+    assert example.evidence_grounded is True
+
+
+def test_fake_example_is_neither_valid_nor_grounded():
+    """Fake 'for example' text without evidence backing is neither valid nor grounded."""
+    evaluator = ScriptRetentionEvaluator()
+    script = Script(
+        id="s_fake_ex_test",
+        title="Fake Example",
+        hook="SQLite locking is tricky.",
+        content_format=ContentFormat.EXPLAINER,
+        scenes=[
+            Scene(index=0, narration="For example, databases typically handle multiple operations nicely.", target_duration_seconds=10.0),
+        ],
+        total_word_count=9,
+        estimated_duration_seconds=10.0,
+    )
+    report = evaluator.evaluate(script, fact_report=None)
+    example = next(a for a in report.concrete_anchors if a.anchor_type == ConcreteAnchorType.REAL_EXAMPLE)
+    assert example.valid_retention_anchor is False
+    assert example.evidence_grounded is False
+
+
+def test_old_anchor_json_migrates_without_claiming_fake_evidence_grounding():
+    """Persisted JSON using legacy grounded=True without claims migrates to valid=True, evidence_grounded=False."""
+    legacy_analogy_json = (
+        '{"anchor_type": "ANALOGY", "scene_index": 1, "text": "Think of it like a ledger", "grounded": true}'
+    )
+    audit = ConcreteAnchorAudit.model_validate_json(legacy_analogy_json)
+    assert audit.valid_retention_anchor is True
+    assert audit.evidence_grounded is False
+    assert audit.grounded is True
+
+    legacy_grounded_example = (
+        '{"anchor_type": "REAL_EXAMPLE", "scene_index": 2, "text": "3x speedup", "grounded": true, "claim_ids": ["c1"]}'
+    )
+    audit_grounded = ConcreteAnchorAudit.model_validate_json(legacy_grounded_example)
+    assert audit_grounded.valid_retention_anchor is True
+    assert audit_grounded.evidence_grounded is True
+    assert audit_grounded.grounded is True
 
 
 

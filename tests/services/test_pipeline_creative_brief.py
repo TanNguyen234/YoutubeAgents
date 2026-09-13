@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
+from app.core.backend import MockReasoningBackend
 from app.db.repository import SQLiteRepository
 from app.domain.enums import (
     ClaimVerificationVerdict,
@@ -39,7 +40,7 @@ def mock_pipeline_env(tmp_path: Path):
         target_audience="Software Engineers",
     )
     repo.save_channel(channel)
-    brain = BrainPipeline(repository=repo)
+    brain = BrainPipeline(repository=repo, backend=MockReasoningBackend())
     brain.strategist.duplicate_detector.check_duplicate = MagicMock(return_value=(False, 0.0, None))
     brain.evaluator.evaluate_topic_with_reasoning = MagicMock(return_value=(
         {"demand": 8.0, "freshness": 7.0, "competition": 3.0, "channel_fit": 8.0, "originality": 7.5, "evidence_quality": 9.0, "production_feasibility": 8.0},
@@ -49,19 +50,20 @@ def mock_pipeline_env(tmp_path: Path):
 
     def make_sections(*args, **kwargs):
         return ScriptSections(
-            hook="SQLite concurrency is fundamentally misunderstood.",
-            intro="Let's unpack how WAL mode changes locking.",
+            hook="SQLite concurrency is fundamentally misunderstood in production.",
+            intro="Let us unpack how WAL mode changes locking and eliminates blocking.",
             segments=[
                 Scene(index=0, hook="Hook", narration="Think of a WAL like an append-only journal in production.", target_duration_seconds=15.0),
-                Scene(index=1, hook="Payoff", narration="WAL readers never block writers in production.", target_duration_seconds=15.0),
+                Scene(index=1, hook="Payoff", narration="In production, SQLite concurrency succeeds because WAL readers never block writers.", target_duration_seconds=15.0),
             ],
             cta="WAL eliminates reader-writer locks, but checkpointing is the next bottleneck.",
             estimated_duration=30.0,
         )
 
     brain.generator.generate_script_sections = MagicMock(side_effect=make_sections)
+    brain.generator.rewrite_for_retention = MagicMock(side_effect=make_sections)
     brain.extractor.extract_from_script = MagicMock(return_value=[
-        Claim(id="c1", statement="WAL readers never block writers in production.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True, source_id="s1")
+        Claim(id="c1", statement="In production, SQLite concurrency succeeds because WAL readers never block writers.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True, source_id="s1")
     ])
 
     def mock_verify_all(claims, dossier, project_id, **kwargs):
@@ -342,11 +344,14 @@ def test_revenue_goal_reaches_script_generator(mock_pipeline_env):
 
     with patch.object(brain.generator, "generate_script_sections") as mock_gen_sec:
         mock_gen_sec.side_effect = lambda **kwargs: ScriptSections(
-            hook="Hook",
-            intro="Intro",
-            segments=[Scene(index=0, narration="Commercial ROI explanation.", target_duration_seconds=15.0)],
+            hook="How do cloud database costs drain startup revenue?",
+            intro="Let us examine the hidden cost drivers in modern data architectures.",
+            segments=[
+                Scene(index=0, hook="Hook", narration="Think of serverless queries like meter taxis charging per minute.", target_duration_seconds=15.0),
+                Scene(index=1, hook="Payoff", narration="Commercial database cost optimization unlocks massive enterprise ROI.", target_duration_seconds=15.0),
+            ],
             cta="Explore our database optimization toolkit for enterprise ROI.",
-            estimated_duration=15.0,
+            estimated_duration=30.0,
         )
         brain.run_stage_1_to_5(
             project_id="proj_rev",

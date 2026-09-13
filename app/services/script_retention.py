@@ -422,72 +422,86 @@ class ScriptRetentionEvaluator:
                         anchor_snippet = sent.strip()
                         break
 
-                grounded = False
+                valid_retention_anchor = False
+                evidence_grounded = False
                 matched_claim_ids: List[str] = []
                 matched_source_refs: List[str] = []
 
                 if a_type == ConcreteAnchorType.ANALOGY:
                     # Conceptual explanatory analogy does not require external source
-                    grounded = True
+                    valid_retention_anchor = True
+                    evidence_grounded = False
                 elif a_type == ConcreteAnchorType.COMPARISON:
-                    # If purely conceptual: illustrative -> grounded = True
+                    # If purely conceptual: illustrative -> valid retention anchor, not evidence grounded
                     # If empirical metrics: must map to verified evidence
                     is_empirical = bool(re.search(r"\b(\d+x|\d+%\s*faster|\d+ms|latency|throughput|benchmark)\b", s_lower))
                     if not is_empirical:
-                        grounded = True
+                        valid_retention_anchor = True
+                        evidence_grounded = False
                     else:
-                        grounded, matched_claim_ids, matched_source_refs = self._validate_grounding(
+                        is_grounded, matched_claim_ids, matched_source_refs = self._validate_grounding(
                             scene_text=s_narration,
                             dossier=dossier,
                             fact_report=fact_report,
                         )
+                        valid_retention_anchor = is_grounded
+                        evidence_grounded = is_grounded
                 elif a_type == ConcreteAnchorType.DEMONSTRATION:
                     # If claiming empirical result: must map to verified evidence
                     claims_empirical = bool(re.search(r"\b(benchmark shows|\d+x|\d+%\s*(faster|reduction|improvement)|speedup)\b", s_lower))
                     if not claims_empirical:
-                        grounded = True
+                        valid_retention_anchor = True
+                        evidence_grounded = False
                     else:
-                        grounded, matched_claim_ids, matched_source_refs = self._validate_grounding(
+                        is_grounded, matched_claim_ids, matched_source_refs = self._validate_grounding(
                             scene_text=s_narration,
                             dossier=dossier,
                             fact_report=fact_report,
                         )
+                        valid_retention_anchor = is_grounded
+                        evidence_grounded = is_grounded
                 elif a_type in (ConcreteAnchorType.REAL_EXAMPLE, ConcreteAnchorType.MINI_CASE):
                     # Must map to verified Claim and/or ResearchSource
-                    grounded, matched_claim_ids, matched_source_refs = self._validate_grounding(
+                    is_grounded, matched_claim_ids, matched_source_refs = self._validate_grounding(
                         scene_text=s_narration,
                         dossier=dossier,
                         fact_report=fact_report,
                     )
+                    valid_retention_anchor = is_grounded
+                    evidence_grounded = is_grounded
 
                 concrete_anchors.append(
                     ConcreteAnchorAudit(
                         anchor_type=a_type,
                         scene_index=s_idx,
                         text=anchor_snippet,
-                        grounded=grounded,
+                        valid_retention_anchor=valid_retention_anchor,
+                        evidence_grounded=evidence_grounded,
                         claim_ids=matched_claim_ids,
                         source_refs=matched_source_refs,
                     )
                 )
 
-        grounded_anchors = [a for a in concrete_anchors if a.grounded]
+        valid_anchors = [a for a in concrete_anchors if a.valid_retention_anchor]
 
-        if is_explanation_heavy and total_duration >= 30.0 and not grounded_anchors:
-            progression_score -= 0.15
-            issues.append(
-                "MISSING_CONCRETE_ANCHOR: Explanation-heavy script lacks grounded concrete anchors (grounded example, analogy, comparison, mini-case, or demonstration)."
-            )
-            drop_risks.append(
-                DropRisk(
-                    start_ratio=0.20,
-                    end_ratio=0.75,
-                    reason="Pure abstract exposition without concrete examples, analogies, or demos causes retention cliff",
-                    severity="MEDIUM",
-                    rewrite_hint="Anchor abstract concepts with a concrete analogy, real-world comparison, or practical demonstration.",
+        anchor_requirement_satisfied = True
+        if is_explanation_heavy and total_duration >= 30.0:
+            anchor_requirement_satisfied = bool(valid_anchors)
+            if not anchor_requirement_satisfied:
+                progression_score -= 0.15
+                issues.append(
+                    "MISSING_CONCRETE_ANCHOR: Explanation-heavy script lacks valid concrete retention anchors (analogy, comparison, demonstration, verified example, or mini-case)."
                 )
-            )
-            rewrite_instructions.append("Introduce at least one grounded analogy, real-world example, or practical comparison.")
+                drop_risks.append(
+                    DropRisk(
+                        start_ratio=0.20,
+                        end_ratio=0.75,
+                        reason="Pure abstract exposition without concrete examples, analogies, or demos causes retention cliff",
+                        severity="MEDIUM",
+                        rewrite_hint="Anchor abstract concepts with a concrete analogy, real-world comparison, or practical demonstration.",
+                    )
+                )
+                rewrite_instructions.append("Introduce at least one valid analogy, real-world example, or practical comparison.")
 
         # 4. CTA Timing & Value-Linked Placement
         if cta_text:
@@ -605,6 +619,7 @@ class ScriptRetentionEvaluator:
             and final_prog_score >= 0.60
             and final_payoff_score >= 0.65
             and not has_high_drop_risk
+            and anchor_requirement_satisfied
         )
 
         return ScriptRetentionReport(

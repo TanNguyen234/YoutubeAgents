@@ -2,7 +2,7 @@
 
 import re
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.domain.enums import (
     ConcreteAnchorType,
@@ -36,9 +36,33 @@ class ConcreteAnchorAudit(BaseModel):
     anchor_type: ConcreteAnchorType = Field(description="Concrete anchor archetype")
     scene_index: int = Field(ge=0, description="0-indexed scene containing anchor")
     text: str = Field(description="Extracted anchor text or phrase")
-    grounded: bool = Field(default=False, description="Whether anchor is verified against evidence/claims")
+    valid_retention_anchor: bool = Field(
+        default=False, description="Whether anchor is a valid retention illustration"
+    )
+    evidence_grounded: bool = Field(
+        default=False, description="Whether anchor is verified against factual evidence/claims"
+    )
     claim_ids: List[str] = Field(default_factory=list, description="Associated verified claim IDs")
     source_refs: List[str] = Field(default_factory=list, description="Associated research source references/URLs")
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_grounded(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "grounded" in data:
+            old_grounded = bool(data.get("grounded"))
+            if "valid_retention_anchor" not in data:
+                data["valid_retention_anchor"] = old_grounded
+            if "evidence_grounded" not in data:
+                claim_ids = data.get("claim_ids") or []
+                source_refs = data.get("source_refs") or []
+                data["evidence_grounded"] = old_grounded and bool(claim_ids or source_refs)
+            data.pop("grounded", None)
+        return data
+
+    @property
+    def grounded(self) -> bool:
+        """Backward-compatibility property mapping to valid_retention_anchor."""
+        return self.valid_retention_anchor
 
 
 class RetentionMoment(BaseModel):
