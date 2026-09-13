@@ -188,3 +188,56 @@ def test_final_render_manifest_contains_visual_provenance(tmp_path):
     assert v_asset["attribution"] == "SQLite Documentation"
     assert v_asset["acquisition_method"] == "playwright_web_evidence"
     assert v_asset["synthetic"] is False
+
+
+def test_untrusted_dossier_source_fails_closed_in_router(tmp_path):
+    """Verify that if an evidence shot specifies a URL outside the ResearchDossier, the router fails closed."""
+    from app.domain.models import ResearchDossier, ResearchSource
+    from app.media.renderers.diagram_renderer import DiagramRenderer
+
+    dossier = ResearchDossier(
+        id="dossier_sqlite",
+        summary="SQLite WAL architecture and durability guarantees",
+        topic_id="t_sqlite",
+        sources=[
+            ResearchSource(
+                id="src_official",
+                source_id="src_official",
+                title="SQLite WAL",
+                url="https://sqlite.org/wal.html",
+                content_sha256="sha_official_123",
+            )
+        ],
+    )
+
+    router = VisualAcquisitionRouter(diagram_renderer=DiagramRenderer())
+
+    # Request pointing to an external untrusted domain
+    req = VisualAcquisitionRequest(
+        project_id="p1",
+        shot_id="s_untrusted",
+        modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE,
+        subject="SQLite WAL",
+        target_url="https://untrusted-blog.com/sqlite-post",
+        evidence_binding=EvidenceBinding(
+            claim_id="c1",
+            source_ref="src_fake",
+            source_title="Untrusted Post",
+            source_url="https://untrusted-blog.com/sqlite-post",
+            claim_text="WAL is fast",
+            claim_verified=True,
+        ),
+    )
+
+    res = router.acquire_visual(
+        request=req,
+        output_dir=tmp_path / "acq",
+        dossier=dossier,
+    )
+
+    assert any("UNTRUSTED_SOURCE_URL" in r for r in res.failure_reasons)
+    # Router must NOT select an untrusted scraped asset; it falls back to diagram
+    assert res.selected_candidate is not None
+    assert res.selected_candidate.source_type == VisualSourceType.RENDERED
+    assert res.actual_modality == VisualModality.DIAGRAM

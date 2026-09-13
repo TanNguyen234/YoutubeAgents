@@ -239,8 +239,16 @@ class VisualShotEvaluator:
         critical_failures: List[str] = []
         warnings: List[str] = []
 
-        total_shots = len(timeline.shots) if timeline else 0
-        total_dur = (timeline.total_duration if timeline.total_duration > 0 else sum(s.duration for s in timeline.shots)) if timeline else 0.0
+        if timeline and timeline.shots:
+            total_shots = len(timeline.shots)
+            total_dur = (timeline.total_duration if timeline.total_duration > 0 else sum(s.duration for s in timeline.shots))
+        elif storyboard and storyboard.shots:
+            total_shots = len(storyboard.shots)
+            total_dur = (storyboard.total_duration if storyboard.total_duration > 0 else sum(s.duration_seconds for s in storyboard.shots))
+        else:
+            total_shots = 0
+            total_dur = 0.0
+
         avg_duration = round(total_dur / total_shots, 2) if total_shots > 0 else 0.0
 
         # Modality distribution and motion metrics
@@ -274,6 +282,29 @@ class VisualShotEvaluator:
                         VisualModality.UI_SIMULATION,
                     ):
                         static_semantic_duration += shot.duration
+        elif storyboard and storyboard.shots:
+            for spec in storyboard.shots:
+                mod_name = spec.visual_modality.value if hasattr(spec.visual_modality, "value") else str(spec.visual_modality)
+                modality_dist[mod_name] = modality_dist.get(mod_name, 0) + 1
+                if spec.visual_modality in (VisualModality.GENERATED_VIDEO, VisualModality.STOCK_VIDEO):
+                    true_motion_duration += spec.duration_seconds
+                else:
+                    ken_burns_duration += spec.duration_seconds
+                    if spec.visual_modality == VisualModality.STATIC_CARD:
+                        static_card_duration += spec.duration_seconds
+                    elif spec.visual_modality in (
+                        VisualModality.DIAGRAM,
+                        VisualModality.DATA_VISUALIZATION,
+                        VisualModality.COMPARISON,
+                        VisualModality.DOCUMENT_EVIDENCE,
+                        VisualModality.STATIC_DIAGRAM,
+                        VisualModality.STATIC_CHART,
+                        VisualModality.STATIC_TERMINAL,
+                        VisualModality.MOTION_GRAPHICS,
+                        VisualModality.CODE_ANIMATION,
+                        VisualModality.UI_SIMULATION,
+                    ):
+                        static_semantic_duration += spec.duration_seconds
 
         static_card_ratio = round(static_card_duration / total_dur, 3) if total_dur > 0 else 0.0
         static_semantic_ratio = round(static_semantic_duration / total_dur, 3) if total_dur > 0 else 0.0
@@ -438,6 +469,7 @@ class VisualShotEvaluator:
         if static_card_ratio > 0.50:
             critical_failures.append(f"EXCESSIVE_STATIC_RATIO: {static_card_ratio * 100:.1f}% of runtime is static cards (max allowable 50%).")
         elif static_card_ratio > max_static_card_ratio:
+            warnings.append(f"STATIC_CARD_OVERUSE: {static_card_ratio * 100:.1f}% of runtime is static cards (target <= {max_static_card_ratio * 100:.0f}%).")
             warnings.append(f"HIGH_STATIC_RATIO: {static_card_ratio * 100:.1f}% of runtime is static cards (target <= {max_static_card_ratio * 100:.0f}%).")
 
         # 6. Retention-Aware Visual QA Checks (Phase 12)
@@ -524,3 +556,13 @@ class VisualShotEvaluator:
             critical_failures=critical_failures,
             warnings=warnings,
         )
+
+    def evaluate(self, storyboard: Storyboard, profile: Optional[ChannelCreativeProfile] = None) -> VideoQualityReport:
+        """Evaluate a storyboard against creative quality standards and profile policies."""
+        prof = profile or self.profile
+        max_ratio = getattr(prof, "max_static_card_ratio", 0.15) if prof else 0.15
+        return self.generate_quality_report(storyboard=storyboard, max_static_card_ratio=max_ratio)
+
+
+# Canonical alias for quality evaluation engine
+QualityEvaluator = VisualShotEvaluator

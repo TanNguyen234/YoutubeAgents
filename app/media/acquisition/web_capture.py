@@ -46,26 +46,37 @@ def is_chromium_available() -> bool:
 def _is_private_ip(hostname: str) -> bool:
     """Check whether a hostname or IP string resolves to a private/loopback/link-local address."""
     clean_host = hostname.strip().lower()
-    if clean_host in ("localhost", "0.0.0.0", "127.0.0.1", "::1"):
+    clean_ip_str = clean_host.strip("[]")
+    if clean_ip_str in ("localhost", "0.0.0.0", "127.0.0.1", "::1", "169.254.169.254") or clean_host in ("localhost", "0.0.0.0", "127.0.0.1", "::1"):
+        return True
+    if clean_host in ("metadata.google.internal", "metadata.local", "instance-data", "169.254.169.254"):
         return True
 
-    # Check if host is direct IP address
+    # Check if host is direct IP address (IPv4 or IPv6)
     try:
-        ip = ipaddress.ip_address(clean_host)
-        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified
+        ip = ipaddress.ip_address(clean_ip_str)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_reserved:
+            return True
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            if ip.ipv4_mapped.is_private or ip.ipv4_mapped.is_loopback or ip.ipv4_mapped.is_link_local:
+                return True
     except ValueError:
         pass
 
     # If it's a domain name, check resolved IPs if possible
     try:
-        for addrinfo in socket.getaddrinfo(clean_host, None):
+        addrinfos = socket.getaddrinfo(clean_host, None)
+        for addrinfo in addrinfos:
             sock_addr = addrinfo[4][0]
-            ip = ipaddress.ip_address(sock_addr)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+            ip = ipaddress.ip_address(sock_addr.strip("[]"))
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_reserved:
                 return True
+            if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+                if ip.ipv4_mapped.is_private or ip.ipv4_mapped.is_loopback or ip.ipv4_mapped.is_link_local:
+                    return True
     except Exception:
         # If DNS resolution fails, allow downstream network handling or block if suspicious
-        if clean_host.endswith(".internal") or clean_host.endswith(".local"):
+        if clean_host.endswith(".internal") or clean_host.endswith(".local") or clean_host.endswith(".onion"):
             return True
 
     return False
@@ -75,6 +86,7 @@ def validate_capture_url(
     url: str,
     mode: str = "EVIDENCE",
     trusted_urls: Optional[List[str]] = None,
+    check_dns: bool = True,
 ) -> Tuple[bool, str]:
     """Strict security validation of capture target URLs.
 
@@ -99,16 +111,14 @@ def validate_capture_url(
     hostname_lower = hostname.lower()
 
     if mode == "LOCAL_WEB_APP":
-        # Local web app mode strictly allows localhost / 127.0.0.1 only
-        if hostname_lower not in ("localhost", "127.0.0.1"):
+        # Local web app mode strictly allows localhost / 127.0.0.1 / ::1 only
+        clean_ip = hostname_lower.strip("[]")
+        if clean_ip not in ("localhost", "127.0.0.1", "::1"):
             return False, f"DISALLOWED_LOCAL_HOST: Local app capture only allows localhost/127.0.0.1, got '{hostname}'."
         return True, "VALID_LOCAL_URL"
 
-    # EVIDENCE mode: Must be public external URL
-    if _is_private_ip(hostname_lower):
-        return False, f"PRIVATE_IP_BLOCKED: Evidence capture rejects private IP or loopback address '{hostname}'."
-
-    # If trusted_urls list is provided, target URL must originate from a verified source
+    # EVIDENCE mode:
+    # 2. If trusted_urls list is provided, target URL must originate from a verified source
     if trusted_urls is not None:
         normalized_target = raw_url.lower()
         matched = False
@@ -126,6 +136,28 @@ def validate_capture_url(
                 break
         if not matched:
             return False, f"UNTRUSTED_SOURCE_URL: URL '{raw_url}' does not originate from verified ResearchDossier sources."
+
+    # 3. Reject private IP / loopback / link-local / metadata addresses
+    if _is_private_ip(hostname_lower):
+        return False, f"PRIVATE_IP_BLOCKED: Evidence capture rejects private IP or loopback address '{hostname}'."
+
+    # 4. Check DNS resolution fail-closed for non-numeric domain names
+    if check_dns:
+        clean_ip = hostname_lower.strip("[]")
+        is_numeric_ip = False
+        try:
+            ipaddress.ip_address(clean_ip)
+            is_numeric_ip = True
+        except ValueError:
+            pass
+
+        if not is_numeric_ip:
+            try:
+                addrinfos = socket.getaddrinfo(clean_ip, None)
+                if not addrinfos:
+                    return False, f"DNS_RESOLUTION_FAILED: Hostname '{hostname}' could not be resolved."
+            except socket.gaierror:
+                return False, f"DNS_RESOLUTION_FAILED: Hostname '{hostname}' could not be resolved via DNS."
 
     return True, "VALID_EVIDENCE_URL"
 
@@ -272,55 +304,129 @@ class WebCaptureService:
                 page = context.new_page()
                 page.set_default_timeout(timeout)
 
+                initial_parsed = urlparse(url)
+                initial_origin = f"{initial_parsed.scheme}://{initial_parsed.netloc}".lower()
+
+                # Intercept network requests to block private/loopback/metadata subresources and unauthorized redirects
+                def handle_route(route):
+                    req = route.request
+                    req_url = req.url
+                    parsed_req = urlparse(req_url)
+                    scheme = parsed_req.scheme.lower()
+                    if scheme in ("data", "blob"):
+                        route.continue_()
+                        return
+                    if scheme not in ("http", "https"):
+                        route.abort("blockedbyclient")
+                        return
+
+                    sub_host = (parsed_req.hostname or "").lower()
+                    req_origin = f"{parsed_req.scheme}://{parsed_req.netloc}".lower()
+                    is_initial_nav = (
+                        req.is_navigation_request()
+                        and req.frame == page.main_frame
+                        and req_origin == initial_origin
+                    )
+
+                    if not is_initial_nav and _is_private_ip(sub_host):
+                        route.abort("blockedbyclient")
+                        return
+                    route.continue_()
+
+                page.route("**/*", handle_route)
+
                 response = page.goto(url, wait_until="domcontentloaded")
                 if not response or response.status >= 400:
                     status_code = response.status if response else "NO_RESPONSE"
                     browser.close()
                     return None, [f"HTTP_ERROR: Target page returned status {status_code}"]
 
-                parsed_url = urlparse(url)
+                # Post-navigation redirect revalidation
+                final_url = page.url
+                final_valid, final_reason = validate_capture_url(
+                    final_url, mode="EVIDENCE", trusted_urls=trusted_urls, check_dns=False
+                )
+                if not final_valid:
+                    browser.close()
+                    return None, [f"SECURITY_VIOLATION: Navigation redirected to disallowed target '{final_url}': {final_reason}"]
+
+                parsed_url = urlparse(final_url or url)
                 domain = parsed_url.hostname or "source"
                 title = source_title or page.title() or domain
 
                 # 2. Excerpt locator and highlight
                 if source_excerpt and source_excerpt.strip():
                     clean_excerpt = source_excerpt.strip()
-                    # Locate element containing excerpt
-                    # First try text match via Playwright text locator
-                    escaped_text = re.sub(r'["\\]', r"\\\g<0>", clean_excerpt[:80])
-                    loc = page.locator(f"text={escaped_text}").first
-                    found = False
+                    locator_script = """
+                    (targetExcerpt) => {
+                        function normalize(text) {
+                            return (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                        }
+                        function stripPunct(text) {
+                            return text.replace(/[^\\w\\s]/g, '');
+                        }
 
+                        const rawNorm = normalize(targetExcerpt);
+                        const punctNorm = stripPunct(rawNorm);
+                        const words = punctNorm.split(/\\s+/).filter(w => w.length > 0);
+
+                        const elements = Array.from(document.querySelectorAll(
+                            'p, div, span, h1, h2, h3, h4, h5, h6, li, td, pre, code, blockquote, article, section, em, strong'
+                        ));
+
+                        let bestEl = null;
+                        let minLen = Infinity;
+
+                        // 1. Exact or punctuation-stripped normalized substring containment
+                        for (const el of elements) {
+                            const elText = normalize(el.innerText || el.textContent);
+                            if (elText.includes(rawNorm) || (punctNorm.length > 10 && stripPunct(elText).includes(punctNorm))) {
+                                if (elText.length < minLen) {
+                                    minLen = elText.length;
+                                    bestEl = el;
+                                }
+                            }
+                        }
+
+                        // 2. Substantial normalized continuous subphrase (>= 60% of words, min 6 words)
+                        if (!bestEl && words.length >= 6) {
+                            const reqCount = Math.max(6, Math.ceil(words.length * 0.60));
+                            const candidateSlices = [];
+                            for (let i = 0; i <= words.length - reqCount; i++) {
+                                candidateSlices.push(words.slice(i, i + reqCount).join(' '));
+                            }
+
+                            for (const el of elements) {
+                                const elTextClean = stripPunct(normalize(el.innerText || el.textContent));
+                                for (const slice of candidateSlices) {
+                                    if (elTextClean.includes(slice)) {
+                                        if (elTextClean.length < minLen) {
+                                            minLen = elTextClean.length;
+                                            bestEl = el;
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (bestEl) {
+                            bestEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+                            bestEl.style.outline = '3px solid #3b82f6';
+                            bestEl.style.backgroundColor = 'rgba(59, 130, 246, 0.15)';
+                            bestEl.style.borderRadius = '6px';
+                            bestEl.style.padding = '4px';
+                            return true;
+                        }
+                        return false;
+                    }
+                    """
                     try:
-                        if loc.count() > 0:
-                            loc.scroll_into_view_if_needed(timeout=2000)
-                            # Apply temporary highlight style safely via evaluate on the specific found handle
-                            loc.evaluate(
-                                "el => { el.style.outline = '3px solid #3b82f6'; el.style.backgroundColor = 'rgba(59, 130, 246, 0.15)'; el.style.borderRadius = '6px'; el.style.padding = '4px'; }"
-                            )
-                            found = True
+                        found = page.evaluate(locator_script, clean_excerpt)
                     except Exception:
                         found = False
 
                     if not found:
-                        # Try normalized keyword substring match across paragraphs / code / headings
-                        words = clean_excerpt.lower().split()
-                        if len(words) >= 3:
-                            key_phrase = " ".join(words[:4])
-                            esc_phrase = re.sub(r'["\\]', r"\\\g<0>", key_phrase)
-                            loc_sub = page.locator(f"text={esc_phrase}").first
-                            try:
-                                if loc_sub.count() > 0:
-                                    loc_sub.scroll_into_view_if_needed(timeout=2000)
-                                    loc_sub.evaluate(
-                                        "el => { el.style.outline = '3px solid #3b82f6'; el.style.backgroundColor = 'rgba(59, 130, 246, 0.15)'; el.style.borderRadius = '6px'; el.style.padding = '4px'; }"
-                                    )
-                                    found = True
-                            except Exception:
-                                found = False
-
-                    if not found:
-                        # Excerpt not found: DO NOT FABRICATE SCREENSHOT!
                         browser.close()
                         return None, [f"EVIDENCE_TEXT_NOT_FOUND: Excerpt '{clean_excerpt[:50]}' was not found on '{url}'"]
 
@@ -348,7 +454,7 @@ class WebCaptureService:
                 source_type=VisualSourceType.RESEARCH_SOURCE,
                 file_path=comp_path,
                 source_url=url,
-                license_type="Document Citation",
+                license_type=None,
                 attribution=domain,
                 content_sha256=comp_sha,
                 width=1080,
@@ -359,7 +465,11 @@ class WebCaptureService:
             return candidate, []
 
         except Exception as e:
-            failures.append(f"CAPTURE_FAILED: {type(e).__name__}: {str(e)}")
+            err_msg = str(e)
+            if "ERR_BLOCKED_BY_CLIENT" in err_msg or "blockedbyclient" in err_msg:
+                failures.append(f"SECURITY_VIOLATION: Navigation or subresource blocked by security policy: {err_msg}")
+            else:
+                failures.append(f"CAPTURE_FAILED: {type(e).__name__}: {err_msg}")
             return None, failures
 
     def capture_local_ui(

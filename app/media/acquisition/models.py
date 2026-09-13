@@ -98,6 +98,7 @@ class VisualAcquisitionResult(BaseModel):
     request: VisualAcquisitionRequest = Field(description="Input acquisition request")
     candidates: List[VisualAssetCandidate] = Field(default_factory=list, description="Acquired candidate assets")
     selected_candidate_id: Optional[str] = Field(default=None, description="ID of winning selected candidate")
+    actual_modality: Optional[VisualModality] = Field(default=None, description="Actual visual modality resolved after acquisition/fallback")
     failure_reasons: List[str] = Field(default_factory=list, description="Reasons for failures during acquisition")
 
     @property

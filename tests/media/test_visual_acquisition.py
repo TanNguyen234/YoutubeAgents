@@ -89,8 +89,10 @@ def test_document_evidence_prefers_verified_source():
     assert win_score.evidence_affinity == 1.0
     assert win_score.source_preference == 1.0
 
-    # Ensure AI generated candidate is penalized heavily on REAL_REQUIRED modality
-    gen_score = next(s for c, s in ranked if c.candidate_id == "cand_ai_db")
+    # Ensure AI generated candidate is strictly discarded by REAL_REQUIRED hard gate
+    assert not any(c.candidate_id == "cand_ai_db" for c, _ in ranked)
+    # Direct candidate scoring reflects the heavy penalty
+    gen_score = ranker.score_candidate(gen_cand, req)
     assert any("SYNTHETIC_ON_REAL_REQUIRED" in p for p in gen_score.penalties)
     assert gen_score.total_score < win_score.total_score
 
@@ -372,7 +374,152 @@ def test_critical_anti_slop_acceptance():
     # Grounded diagram should outrank stock & AI slop
     assert second.candidate_id == "cand_wal_diagram"
 
-    # AI slop and stock server racks must be at bottom
+    # AI slop candidate was discarded entirely by REAL_REQUIRED hard gate
+    assert not any(c.candidate_id == "cand_ai_glowing_database" for c, _ in ranked)
+    # Generic stock server rack is at the bottom
     bottom_ids = [c.candidate_id for c, _ in ranked[2:]]
     assert "cand_stock_server_rack" in bottom_ids
-    assert "cand_ai_glowing_database" in bottom_ids
+
+
+def test_real_required_policy_is_hard_gate_not_only_score_penalty():
+    """Verify that for REAL_REQUIRED modalities, synthetic candidates are completely excluded from ranking."""
+    ranker = CandidateRanker()
+
+    for modality in [VisualModality.DOCUMENT_EVIDENCE, VisualModality.SCREENSHOT, VisualModality.SCREEN_CAPTURE]:
+        req = VisualAcquisitionRequest(
+            project_id="proj_hard_gate",
+            shot_id=f"shot_{modality.value}",
+            modality=modality,
+            visual_intent=VisualIntent.SHOW_EVIDENCE,
+            subject="Strict Reality Requirement",
+        )
+
+        synth_candidate = VisualAssetCandidate(
+            candidate_id="cand_synth_ai",
+            source_type=VisualSourceType.GENERATED,
+            file_path="/tmp/synth.png",
+            content_sha256="sha_synth",
+            acquisition_method="gflow_imagen",
+            is_synthetic=True,
+        )
+
+        real_candidate = VisualAssetCandidate(
+            candidate_id="cand_real_doc",
+            source_type=VisualSourceType.RESEARCH_SOURCE if modality != VisualModality.SCREEN_CAPTURE else VisualSourceType.LOCAL_WEB_APP,
+            file_path="/tmp/real.png",
+            content_sha256="sha_real",
+            acquisition_method="playwright",
+            is_synthetic=False,
+        )
+
+        # Ranked list must completely filter out synthetic candidate
+        ranked = ranker.rank_candidates([synth_candidate, real_candidate], req)
+        assert len(ranked) == 1
+        assert ranked[0][0].candidate_id == "cand_real_doc"
+        assert not any(c.candidate_id == "cand_synth_ai" for c, _ in ranked)
+
+        # If only synthetic candidates were supplied, ranker must return empty list (triggering router fallback)
+        synth_only_ranked = ranker.rank_candidates([synth_candidate], req)
+        assert synth_only_ranked == []
+
+
+def test_evidence_excerpt_partial_prefix_is_not_enough(tmp_path, monkeypatch):
+    """Verify that a weak 4-word prefix match is rejected when the rest of the excerpt is missing/fabricated."""
+    html_content = b"""<html><body>
+        <h1>SQLite WAL</h1>
+        <p>SQLite version 3.7.0 introduces a new feature called write-ahead logging.</p>
+    </body></html>"""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html_content)
+
+        def log_message(self, *args):
+            pass
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    # Allow local test server URL through validation for this isolated browser test
+    monkeypatch.setattr(
+        "app.media.acquisition.web_capture.validate_capture_url",
+        lambda url, **kw: (True, "VALID_FOR_TEST"),
+    )
+
+    try:
+        service = WebCaptureService()
+        out_file = tmp_path / "prefix_test.png"
+
+        # Excerpt shares first 4 words ('SQLite version 3.7.0 introduces') but diverges into false claim
+        fabricated_excerpt = "SQLite version 3.7.0 introduces revolutionary high-speed quantum storage technology."
+
+        cand, errs = service.capture_evidence(
+            url=f"http://127.0.0.1:{port}/wal",
+            output_path=out_file,
+            source_excerpt=fabricated_excerpt,
+        )
+
+        assert cand is None
+        assert any("EVIDENCE_TEXT_NOT_FOUND" in e for e in errs)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_evidence_excerpt_normalized_match_succeeds(tmp_path, monkeypatch):
+    """Verify that normalized excerpt matching succeeds despite whitespace, case, or line-break differences."""
+    html_content = b"""<html><body>
+        <h1>SQLite Documentation</h1>
+        <div id="quote" style="padding: 20px;">
+            Readers
+            do not block
+            writers in WAL mode.
+        </div>
+    </body></html>"""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html_content)
+
+        def log_message(self, *args):
+            pass
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    monkeypatch.setattr(
+        "app.media.acquisition.web_capture.validate_capture_url",
+        lambda url, **kw: (True, "VALID_FOR_TEST"),
+    )
+
+    try:
+        service = WebCaptureService()
+        out_file = tmp_path / "norm_test.png"
+
+        # Search with flattened single-line normalized text
+        clean_excerpt = "readers do not block writers in wal mode."
+
+        cand, errs = service.capture_evidence(
+            url=f"http://127.0.0.1:{port}/doc",
+            output_path=out_file,
+            source_excerpt=clean_excerpt,
+        )
+
+        assert cand is not None, f"Capture failed: {errs}"
+        assert out_file.exists()
+        assert cand.content_sha256
+        assert cand.license_type is None
+        assert cand.attribution == "127.0.0.1"
+    finally:
+        server.shutdown()
+        server.server_close()

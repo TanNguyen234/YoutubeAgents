@@ -220,9 +220,17 @@ class CandidateRanker:
         candidates: List[VisualAssetCandidate],
         request: VisualAcquisitionRequest,
     ) -> List[Tuple[VisualAssetCandidate, VisualCandidateScore]]:
-        """Score and sort candidates from highest to lowest deterministic score."""
+        """Score and sort candidates from highest to lowest deterministic score.
+
+        Enforces REAL_REQUIRED hard gate: synthetic candidates are strictly discarded
+        (not merely penalized) for DOCUMENT_EVIDENCE, SCREENSHOT, and SCREEN_CAPTURE.
+        """
         scored = []
         for c in candidates:
+            # REAL_REQUIRED Hard Gate: completely exclude synthetic/generated candidates
+            if request.modality in ModalityRealityPolicy.REAL_REQUIRED:
+                if c.is_synthetic or c.source_type == VisualSourceType.GENERATED:
+                    continue
             score = self.score_candidate(c, request)
             scored.append((c, score))
 

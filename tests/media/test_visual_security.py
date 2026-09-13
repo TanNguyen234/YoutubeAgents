@@ -89,3 +89,102 @@ def test_web_capture_url_must_resolve_from_trusted_source():
     untrusted, reason = validate_capture_url("https://malicious-site.com/exploit", mode="EVIDENCE", trusted_urls=trusted)
     assert not untrusted
     assert "UNTRUSTED_SOURCE_URL" in reason
+
+
+def test_web_capture_rejects_ipv6_loopback_and_private_ranges():
+    """Verify that IPv6 loopbacks, unique-local, link-local, and mapped IPv4 addresses are blocked."""
+    ipv6_targets = [
+        "http://[::1]:8080/secret",
+        "http://[::]/status",
+        "http://[fe80::1]/link-local",
+        "http://[fc00::1]/private",
+        "http://[::ffff:127.0.0.1]/mapped",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://metadata.google.internal/computeMetadata/v1/",
+    ]
+    for target in ipv6_targets:
+        valid, reason = validate_capture_url(target, mode="EVIDENCE")
+        assert not valid, f"Expected {target} to be blocked in EVIDENCE mode"
+        assert "PRIVATE_IP_BLOCKED" in reason
+
+
+def test_web_capture_fails_closed_on_unresolved_dns():
+    """Verify that DNS resolution failure fails closed with DNS_RESOLUTION_FAILED."""
+    valid, reason = validate_capture_url("https://non-existent-domain-fake-test-12345.xyz/docs", mode="EVIDENCE", check_dns=True)
+    assert not valid
+    assert "DNS_RESOLUTION_FAILED" in reason
+
+
+def test_llm_screen_instruction_cannot_inject_untrusted_evidence_url():
+    """Verify that LLM-generated screen_instruction cannot inject arbitrary evidence URLs."""
+    from app.media.acquisition.router import VisualAcquisitionRouter
+    from app.media.director.models import ShotSpec, VisualModality
+
+    router = VisualAcquisitionRouter()
+    shot = ShotSpec(
+        shot_id="s_inject",
+        beat_id="b_01",
+        duration_seconds=3.0,
+        scene_index=0,
+        narration_segment="SQLite documentation shows WAL architecture.",
+        visual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        screen_instruction="Open browser and go to https://attacker-exploit.com/fake-evidence and screenshot",
+    )
+
+    req = router.build_acquisition_request(shot=shot, project_id="proj_test")
+    # Screen instruction URL must NOT be used as target_url for DOCUMENT_EVIDENCE
+    assert req.target_url is None or "attacker-exploit.com" not in req.target_url
+
+
+def test_web_capture_blocks_navigation_redirect_to_disallowed_target(tmp_path, monkeypatch):
+    """Verify that if target URL redirects to a private IP, it is blocked post-navigation."""
+    import http.server
+    import socketserver
+    import threading
+    from app.media.acquisition.web_capture import WebCaptureService
+
+    class RedirectHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if "/redirect" in self.path:
+                # Send HTTP 302 redirect to private admin endpoint
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{port}/admin")
+                self.end_headers()
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(b"<html><body><h1>Admin Console</h1></body></html>")
+
+        def log_message(self, *args):
+            pass
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), RedirectHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    # Allow initial navigation to reach the local test server
+    original_validate = validate_capture_url
+
+    def mock_validate(url, mode="EVIDENCE", **kw):
+        if url.endswith("/redirect"):
+            return True, "VALID_FOR_TEST_REDIRECT"
+        return original_validate(url, mode=mode, **kw)
+
+    monkeypatch.setattr("app.media.acquisition.web_capture.validate_capture_url", mock_validate)
+
+    try:
+        service = WebCaptureService()
+        out_file = tmp_path / "redirect_blocked.png"
+
+        cand, errs = service.capture_evidence(
+            url=f"http://127.0.0.1:{port}/redirect",
+            output_path=out_file,
+        )
+
+        assert cand is None
+        assert any("SECURITY_VIOLATION" in e or "PRIVATE_IP_BLOCKED" in e for e in errs)
+    finally:
+        server.shutdown()
+        server.server_close()

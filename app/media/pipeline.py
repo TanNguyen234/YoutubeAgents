@@ -242,9 +242,14 @@ class MediaProductionPipeline:
             ).hexdigest()
             for idx, s in enumerate(project.script.scenes)
         ]
+        dossier_source_hashes = [
+            str(getattr(s, "content_sha256", None) or s.url or s.title or "")
+            for s in (project.dossier.sources if getattr(project, "dossier", None) and project.dossier.sources else [])
+        ]
         visual_plan_raw = (
             f"{expected_narration_hash}|{content_format_str}|{creative_profile_name}|"
             f"{CREATIVE_PIPELINE_VERSION}|{active_fallback_policy.value}|"
+            f"{'|'.join(dossier_source_hashes)}|"
             + "|".join(
                 f"{getattr(s, 'scene_index', getattr(s, 'index', idx))}:{s.narration.strip()}:{(getattr(s, 'hook', '') or '').strip()}"
                 for idx, s in enumerate(project.script.scenes)
@@ -326,6 +331,26 @@ class MediaProductionPipeline:
                         can_reuse = False
                     if cached_fallback_pol != active_fallback_policy.value:
                         can_reuse = False
+
+                # Verify cached visual assets exist on disk with matching SHA256
+                if can_reuse and getattr(cached_manifest, "visual_assets", None):
+                    for v in cached_manifest.visual_assets:
+                        v_file = getattr(v, "path", None) or getattr(v, "file_path", None) or (v.get("path") if isinstance(v, dict) else (v.get("file_path") if isinstance(v, dict) else None))
+                        v_sha = getattr(v, "sha256", None) or (v.get("sha256") if isinstance(v, dict) else None)
+                        if v_file:
+                            v_path = Path(v_file)
+                            if not v_path.exists():
+                                can_reuse = False
+                                break
+                            if v_sha:
+                                try:
+                                    actual_v_sha = hashlib.sha256(v_path.read_bytes()).hexdigest()
+                                    if actual_v_sha != v_sha:
+                                        can_reuse = False
+                                        break
+                                except Exception:
+                                    can_reuse = False
+                                    break
 
                 if can_reuse:
                     # Re-inspect to verify physical file hasn't been altered

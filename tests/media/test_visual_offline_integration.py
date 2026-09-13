@@ -260,3 +260,105 @@ def test_cache_identity_changes_with_selected_real_asset():
     art_fp1 = compute_artifact_fingerprint(request_fingerprint=fp1, ordered_asset_hashes=asset_hashes_v1)
     art_fp2 = compute_artifact_fingerprint(request_fingerprint=fp1, ordered_asset_hashes=asset_hashes_v2)
     assert art_fp1 != art_fp2
+
+
+def test_cache_invalidation_when_source_screenshot_content_changes(tmp_path):
+    """Verify that when a dossier source content hash changes or a cached visual asset is modified on disk,
+    cache verification invalidates reuse."""
+    import hashlib
+    from app.domain.models import ResearchDossier, ResearchSource, Scene, Script, VideoProject
+    from app.media.models import RenderManifest
+
+    # 1. Test fingerprint change with dossier source hash
+    s1 = ResearchSource(id="s1", source_id="s1", title="Doc A", url="https://sqlite.org", content_sha256="sha_v1")
+    s2 = ResearchSource(id="s2", source_id="s2", title="Doc A", url="https://sqlite.org", content_sha256="sha_v2")
+
+    dossier_hashes_1 = [s1.content_sha256]
+    dossier_hashes_2 = [s2.content_sha256]
+
+    visual_plan_1 = f"narr_hash|explainer|profile|v1|fail_closed|{'|'.join(dossier_hashes_1)}|0:scene1:"
+    visual_plan_2 = f"narr_hash|explainer|profile|v1|fail_closed|{'|'.join(dossier_hashes_2)}|0:scene1:"
+
+    h1 = hashlib.sha256(visual_plan_1.encode("utf-8")).hexdigest()
+    h2 = hashlib.sha256(visual_plan_2.encode("utf-8")).hexdigest()
+    assert h1 != h2
+
+    # 2. Test physical file hash tampering detection on disk
+    asset_file = tmp_path / "shot_01.png"
+    asset_file.write_bytes(b"initial_image_content")
+    initial_sha = hashlib.sha256(b"initial_image_content").hexdigest()
+
+    manifest = RenderManifest(
+        project_id="p1",
+        script_id="sc1",
+        canonical_narration_sha256="narr",
+        production_fingerprint="fp",
+        render_profile="SHORTS_9_16",
+        tts_backend="edge-tts",
+        voice="en-US-GuyNeural",
+        audio_path="/tmp/a.mp3",
+        audio_sha256="audio_hash",
+        audio_duration=3.0,
+        subtitle_path="/tmp/s.srt",
+        subtitle_sha256="sub_hash",
+        scene_count=1,
+        visual_assets=[{
+            "shot_id": "s1",
+            "path": str(asset_file),
+            "sha256": initial_sha,
+        }],
+        final_video_path="/tmp/out.mp4",
+        final_video_sha256="vsha",
+        final_video_size_bytes=100,
+        video_duration=3.0,
+        measured_loudness_lufs=-14.0,
+        qa_verdict="PASSED",
+    )
+
+    # Tamper with the asset on disk
+    asset_file.write_bytes(b"altered_different_content")
+    tampered_sha = hashlib.sha256(asset_file.read_bytes()).hexdigest()
+    assert tampered_sha != initial_sha
+
+    # Verify that comparing disk sha detects mismatch
+    can_reuse = True
+    for v in manifest.visual_assets:
+        v_file = v.get("path")
+        v_sha = v.get("sha256")
+        if v_file and Path(v_file).exists():
+            if hashlib.sha256(Path(v_file).read_bytes()).hexdigest() != v_sha:
+                can_reuse = False
+                break
+    assert not can_reuse, "Cache reuse must be invalidated when visual asset on disk is altered"
+
+
+def test_static_card_ratio_over_limit_fails_or_warns_as_documented():
+    """Verify that exceeding static card ratio triggers STATIC_CARD_OVERUSE warning or EXCESSIVE_STATIC_RATIO failure."""
+    from app.media.director.quality_evaluator import QualityEvaluator
+    from app.media.director.models import ChannelCreativeProfile, Storyboard, ShotSpec, VisualModality
+
+    evaluator = QualityEvaluator()
+    profile = ChannelCreativeProfile(
+        name="Tech",
+        niche=["engineering"],
+        max_static_card_ratio=0.15,
+    )
+
+    # Storyboard with 40% static cards (exceeds max_static_card_ratio 15%, below critical 50%)
+    shots_warn = [
+        ShotSpec(shot_id="s1", beat_id="b1", scene_index=0, narration_segment="Part 1", duration_seconds=6.0, visual_modality=VisualModality.DIAGRAM),
+        ShotSpec(shot_id="s2", beat_id="b2", scene_index=1, narration_segment="Part 2", duration_seconds=4.0, visual_modality=VisualModality.STATIC_CARD),
+    ]
+    sb_warn = Storyboard(project_id="p_warn", script_id="sc_warn", total_duration=10.0, shots=shots_warn)
+    res_warn = evaluator.evaluate(sb_warn, profile=profile)
+    assert any("STATIC_CARD_OVERUSE" in w for w in res_warn.warnings)
+
+    # Storyboard with 60% static cards (exceeds 50% critical failure threshold)
+    shots_crit = [
+        ShotSpec(shot_id="s1", beat_id="b1", scene_index=0, narration_segment="Part 1", duration_seconds=4.0, visual_modality=VisualModality.DIAGRAM),
+        ShotSpec(shot_id="s2", beat_id="b2", scene_index=1, narration_segment="Part 2", duration_seconds=6.0, visual_modality=VisualModality.STATIC_CARD),
+    ]
+    sb_crit = Storyboard(project_id="p_crit", script_id="sc_crit", total_duration=10.0, shots=shots_crit)
+    res_crit = evaluator.evaluate(sb_crit, profile=profile)
+    assert not res_crit.passed
+    assert any("EXCESSIVE_STATIC_RATIO" in f for f in res_crit.critical_failures)

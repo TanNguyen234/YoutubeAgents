@@ -415,6 +415,11 @@ class VideoQualityReport(BaseModel):
     warnings: List[str] = Field(default_factory=list, description="Non-blocking warnings")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    @property
+    def passed(self) -> bool:
+        """Return True if no critical failures and creative QA status is not FAIL."""
+        return len(self.critical_failures) == 0 and self.creative_status != "FAIL"
+
 
 class ChannelCreativeProfile(BaseModel):
     """Configurable channel-level visual style and anti-AI-slop creative policy."""
@@ -454,3 +459,4 @@ class ChannelCreativeProfile(BaseModel):
     music_mood: str = Field(default="anime_lofi", description="BGM musical mood / aesthetic")
     music_bpm: int = Field(default=85, ge=40, le=180, description="Target tempo for background music")
     sfx_intensity: float = Field(default=1.0, ge=0.0, le=2.0, description="Relative sound effect mixing intensity")
+    max_static_card_ratio: float = Field(default=0.15, ge=0.0, le=1.0, description="Maximum allowable ratio of static cards before warning")

@@ -78,15 +78,34 @@ class VisualAcquisitionRouter:
         else:
             preferred = [VisualSourceType.RENDERED, VisualSourceType.FALLBACK_CARD]
 
-        # Extract target url if present in screen_instruction or evidence binding
+        # Extract target url:
+        # For DOCUMENT_EVIDENCE and SCREENSHOT: strictly enforce server-side binding from evidence_binding or dossier!
+        # LLM screen_instruction text MUST NOT become a trusted evidence URL!
         target_url = None
-        if shot.evidence_binding and shot.evidence_binding.source_url:
-            target_url = shot.evidence_binding.source_url
-        elif shot.screen_instruction and ("http://" in shot.screen_instruction or "https://" in shot.screen_instruction):
-            import re
-            m = re.search(r"https?://[^\s]+", shot.screen_instruction)
-            if m:
-                target_url = m.group(0).rstrip(".,;\"'")
+        if mod in (VisualModality.DOCUMENT_EVIDENCE, VisualModality.SCREENSHOT):
+            if shot.evidence_binding and shot.evidence_binding.source_url:
+                target_url = shot.evidence_binding.source_url
+            elif shot.evidence_binding and shot.evidence_binding.source_ref and dossier:
+                for s in dossier.sources:
+                    if s.source_id == shot.evidence_binding.source_ref and s.url:
+                        target_url = s.url
+                        break
+            elif shot.source_refs and dossier:
+                for s_ref in shot.source_refs:
+                    for s in dossier.sources:
+                        if s.source_id == s_ref and s.url:
+                            target_url = s.url
+                            break
+                    if target_url:
+                        break
+        elif mod == VisualModality.SCREEN_CAPTURE:
+            if shot.screen_instruction and ("http://" in shot.screen_instruction or "https://" in shot.screen_instruction):
+                import re
+                m = re.search(r"https?://[^\s]+", shot.screen_instruction)
+                if m:
+                    target_url = m.group(0).rstrip(".,;\"'")
+            elif shot.evidence_binding and shot.evidence_binding.source_url:
+                target_url = shot.evidence_binding.source_url
 
         return VisualAcquisitionRequest(
             project_id=project_id,
@@ -129,10 +148,27 @@ class VisualAcquisitionRouter:
         if modality in (VisualModality.DOCUMENT_EVIDENCE, VisualModality.SCREENSHOT):
             binding = request.evidence_binding
             target_url = request.target_url or (binding.source_url if binding else None)
+            trusted_urls = [s.url for s in (dossier.sources if dossier else []) if s.url]
+
+            # Server-side dossier verification: if dossier is provided, target_url must originate from verified sources
+            if target_url and trusted_urls:
+                from urllib.parse import urlparse
+                target_host = (urlparse(target_url).hostname or "").lower()
+                is_trusted = False
+                for t in trusted_urls:
+                    t_host = (urlparse(t).hostname or "").lower()
+                    if t_host and t_host == target_host:
+                        is_trusted = True
+                        break
+                    if target_url.lower().startswith(t.lower()):
+                        is_trusted = True
+                        break
+                if not is_trusted:
+                    failures.append(f"UNTRUSTED_SOURCE_URL: Evidence URL '{target_url}' is not in ResearchDossier verified sources")
+                    target_url = None
 
             if target_url and binding:
                 target_path = output_dir / f"{shot_id}_evidence_capture.png"
-                trusted_urls = [s.url for s in (dossier.sources if dossier else []) if s.url]
 
                 cand, errs = self.web_capture.capture_evidence(
                     url=target_url,
@@ -299,17 +335,29 @@ class VisualAcquisitionRouter:
 
         # Rank candidates deterministically
         selected_id = None
+        actual_modality = None
         if candidates:
             ranked = self.ranker.rank_candidates(candidates, request)
             if ranked:
                 winner, winning_score = ranked[0]
                 selected_id = winner.candidate_id
                 self.ranker.record_selection(winner, request.modality)
+                if winner.source_type in (VisualSourceType.RESEARCH_SOURCE, VisualSourceType.DOCUMENT, VisualSourceType.WEB_PAGE):
+                    actual_modality = VisualModality.DOCUMENT_EVIDENCE
+                elif winner.source_type == VisualSourceType.LOCAL_WEB_APP:
+                    actual_modality = VisualModality.SCREEN_CAPTURE
+                elif winner.source_type == VisualSourceType.RENDERED:
+                    actual_modality = VisualModality.DIAGRAM
+                elif winner.source_type == VisualSourceType.FALLBACK_CARD:
+                    actual_modality = VisualModality.STATIC_CARD
+                else:
+                    actual_modality = request.modality
 
         return VisualAcquisitionResult(
             request=request,
             candidates=candidates,
             selected_candidate_id=selected_id,
+            actual_modality=actual_modality,
             failure_reasons=failures,
         )
 
