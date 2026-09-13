@@ -54,6 +54,7 @@ class AutoDirectorService:
         gflow_provider: Optional[Any] = None,
         evaluator: Optional[VisualShotEvaluator] = None,
         reasoning_backend: Optional[ReasoningBackend] = None,
+        acquisition_router: Optional[Any] = None,
     ):
         self.profile = profile or ChannelCreativeProfile()
         self.backend = reasoning_backend
@@ -69,6 +70,16 @@ class AutoDirectorService:
         self.chart_renderer = ChartRenderer()
         self.motion_renderer = MotionGraphicsRenderer()
         self.evidence_renderer = EvidenceRenderer()
+
+        # Visual Acquisition Router
+        from app.media.acquisition.router import VisualAcquisitionRouter
+        self.acquisition_router = acquisition_router or VisualAcquisitionRouter(
+            gflow_provider=self.gflow_provider,
+            diagram_renderer=self.diagram_renderer,
+            chart_renderer=self.chart_renderer,
+            motion_renderer=self.motion_renderer,
+            visual_factory=self.visual_factory,
+        )
 
         # Audit logs & QA tracking
         self.asset_attempts: List[AssetGenerationAttempt] = []
@@ -245,6 +256,12 @@ class AutoDirectorService:
                 is_animated=is_anim,
                 transition_in="impact" if shot_idx == 0 else "fade",
                 transition_out="fade",
+                asset_source_type=getattr(asset_res, "source_type", None),
+                asset_source_url=getattr(asset_res, "source_url", None),
+                asset_license=getattr(asset_res, "license_type", None),
+                asset_attribution=getattr(asset_res, "attribution", None),
+                asset_acquisition_method=getattr(asset_res, "acquisition_method", None),
+                asset_is_synthetic=getattr(asset_res, "is_synthetic", False),
             )
             timeline_shots.append(t_shot)
 
@@ -530,6 +547,71 @@ class AutoDirectorService:
                     )
                 )
 
+        # Modality: SCREEN_CAPTURE
+        elif modality == VisualModality.SCREEN_CAPTURE:
+            try:
+                acq_req = self.acquisition_router.build_acquisition_request(
+                    shot=shot,
+                    project_id=dossier.topic_id if dossier else "proj",
+                    dossier=dossier,
+                    fact_report=fact_report,
+                )
+                acq_res = self.acquisition_router.acquire_visual(
+                    request=acq_req,
+                    output_dir=output_dir,
+                    script_title=script_title,
+                    channel_name=channel_name,
+                    dossier=dossier,
+                    fact_report=fact_report,
+                )
+                selected = acq_res.selected_candidate
+                if selected and selected.source_type != VisualSourceType.FALLBACK_CARD:
+                    actual_mod = VisualModality.SCREEN_CAPTURE if selected.source_type in (VisualSourceType.LOCAL_WEB_APP, VisualSourceType.WEB_PAGE, VisualSourceType.RESEARCH_SOURCE) else VisualModality.DIAGRAM
+                    self.asset_attempts.append(
+                        AssetGenerationAttempt(
+                            shot_id=shot_id,
+                            provider=selected.acquisition_method,
+                            modality=actual_mod.value,
+                            success=True,
+                            output_path=selected.file_path,
+                            latency_ms=int((time.time() - t0) * 1000),
+                        )
+                    )
+                    return ShotAssetResult(
+                        path=selected.file_path,
+                        sha256=selected.content_sha256,
+                        requested_modality=requested_modality,
+                        actual_modality=actual_mod,
+                        provider=selected.acquisition_method,
+                        source_type=selected.source_type.value,
+                        source_url=selected.source_url,
+                        license_type=selected.license_type,
+                        attribution=selected.attribution,
+                        acquisition_method=selected.acquisition_method,
+                        is_synthetic=selected.is_synthetic,
+                        fallback_reason=fallback_reason,
+                    )
+            except Exception as e:
+                logger.warning(f"Screen capture acquisition failed for {shot_id}: {e}")
+
+            # Fallback to diagram
+            target_path = output_dir / f"{shot_id}_screencap_fallback.png"
+            p, h = self.diagram_renderer.render_from_instruction(
+                instruction=shot.narration_segment,
+                output_path=target_path,
+                title=shot.subject or script_title,
+            )
+            return ShotAssetResult(
+                path=str(p),
+                sha256=h,
+                requested_modality=requested_modality,
+                actual_modality=VisualModality.DIAGRAM,
+                provider="diagram_renderer",
+                source_type="RENDERED",
+                acquisition_method="diagram_screencap_fallback",
+                fallback_reason="SCREEN_CAPTURE unavailable or failed, fell back to diagram",
+            )
+
         # Modality E: DOCUMENT_EVIDENCE / SCREENSHOT
         elif modality in (VisualModality.DOCUMENT_EVIDENCE, VisualModality.SCREENSHOT):
             target_path = output_dir / f"{shot_id}_evidence.png"
@@ -568,9 +650,59 @@ class AutoDirectorService:
                     requested_modality=requested_modality,
                     actual_modality=VisualModality.DIAGRAM,
                     provider="diagram_renderer",
+                    source_type="RENDERED",
                     fallback_reason="Ungrounded evidence binding, fell back to diagram",
                 )
 
+            # Attempt Visual Acquisition via acquisition_router (Playwright web evidence capture)
+            try:
+                acq_req = self.acquisition_router.build_acquisition_request(
+                    shot=shot,
+                    project_id=dossier.topic_id if dossier else "proj",
+                    dossier=dossier,
+                    fact_report=fact_report,
+                )
+                acq_res = self.acquisition_router.acquire_visual(
+                    request=acq_req,
+                    output_dir=output_dir,
+                    script_title=script_title,
+                    channel_name=channel_name,
+                    dossier=dossier,
+                    fact_report=fact_report,
+                )
+                selected = acq_res.selected_candidate
+                if selected and selected.source_type != VisualSourceType.FALLBACK_CARD:
+                    provider_name = selected.acquisition_method
+                    actual_mod = VisualModality.DOCUMENT_EVIDENCE if selected.source_type in (VisualSourceType.RESEARCH_SOURCE, VisualSourceType.DOCUMENT, VisualSourceType.WEB_PAGE) else VisualModality.DIAGRAM
+                    self.asset_attempts.append(
+                        AssetGenerationAttempt(
+                            shot_id=shot_id,
+                            provider=provider_name,
+                            modality=actual_mod.value,
+                            success=True,
+                            output_path=selected.file_path,
+                            latency_ms=int((time.time() - t0) * 1000),
+                        )
+                    )
+                    return ShotAssetResult(
+                        path=selected.file_path,
+                        sha256=selected.content_sha256,
+                        requested_modality=requested_modality,
+                        actual_modality=actual_mod,
+                        provider=provider_name,
+                        source_type=selected.source_type.value,
+                        source_url=selected.source_url or binding.source_url,
+                        license_type=selected.license_type,
+                        attribution=selected.attribution,
+                        acquisition_method=selected.acquisition_method,
+                        is_synthetic=selected.is_synthetic,
+                        evidence_claim_ids=selected.evidence_claim_ids or ([binding.claim_id] if binding.claim_id else []),
+                        fallback_reason=fallback_reason,
+                    )
+            except Exception as e:
+                logger.warning(f"Acquisition router evidence capture failed: {e}")
+
+            # Fallback to EvidenceRenderer card
             try:
                 is_verbatim = bool(binding.source_excerpt and binding.excerpt_is_verbatim)
                 display_text = binding.source_excerpt if is_verbatim else (binding.claim_text or shot.narration_segment)
@@ -600,6 +732,13 @@ class AutoDirectorService:
                     requested_modality=requested_modality,
                     actual_modality=VisualModality.DOCUMENT_EVIDENCE,
                     provider="evidence_renderer",
+                    source_type="DOCUMENT",
+                    source_url=binding.source_url,
+                    license_type="Document Citation",
+                    attribution=binding.source_title,
+                    acquisition_method="evidence_renderer_card",
+                    is_synthetic=False,
+                    evidence_claim_ids=[binding.claim_id] if binding.claim_id else [],
                     fallback_reason=fallback_reason,
                 )
             except Exception as e:

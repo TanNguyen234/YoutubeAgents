@@ -305,11 +305,47 @@ class VisualShotEvaluator:
             if continuity_issues:
                 critical_failures.extend(continuity_issues)
 
-            # 2. Missing assets
+            # 2. Missing assets & visual acquisition QA checks
+            seen_hashes: Dict[str, str] = {}
             for shot in timeline.shots:
                 p = Path(shot.asset_path)
                 if not p.exists() or p.stat().st_size == 0:
                     critical_failures.append(f"MISSING_ASSET: Shot '{shot.shot_id}' asset is missing or empty at {shot.asset_path}")
+                    if shot.modality == VisualModality.DOCUMENT_EVIDENCE:
+                        critical_failures.append(f"EVIDENCE_VISUAL_MISSING: Shot '{shot.shot_id}' evidence visual asset is missing.")
+                else:
+                    if (
+                        shot.modality in (VisualModality.SCREENSHOT, VisualModality.SCREEN_CAPTURE, VisualModality.DOCUMENT_EVIDENCE)
+                        and p.stat().st_size < 100
+                        and (getattr(shot, "asset_acquisition_method", None) in ("web_capture", "local_browser") or "screenshot" in str(shot.asset_path).lower())
+                    ):
+                        critical_failures.append(
+                            f"SOURCE_SCREENSHOT_UNREADABLE: Shot '{shot.shot_id}' capture file is too small to be readable ({p.stat().st_size} bytes)."
+                        )
+
+                # Check: REAL_REQUIRED modality used synthetic asset
+                if shot.modality in (VisualModality.DOCUMENT_EVIDENCE, VisualModality.SCREENSHOT, VisualModality.SCREEN_CAPTURE):
+                    if getattr(shot, "asset_is_synthetic", False):
+                        critical_failures.append(
+                            f"REAL_REQUIRED_MODALITY_USED_SYNTHETIC_ASSET: Shot '{shot.shot_id}' requires real capture but received synthetic asset."
+                        )
+                    if shot.modality == VisualModality.DOCUMENT_EVIDENCE and not getattr(shot, "asset_source_url", None):
+                        warnings.append(
+                            f"MISSING_ASSET_PROVENANCE: Shot '{shot.shot_id}' evidence visual lacks source_url provenance."
+                        )
+
+                # Check duplicate asset overuse unless intentional callback
+                if shot.asset_sha256:
+                    prev_shot_id = seen_hashes.get(shot.asset_sha256)
+                    if prev_shot_id:
+                        # Check if intentional callback was requested in storyboard
+                        spec = next((s for s in (storyboard.shots if storyboard else []) if s.shot_id == shot.shot_id), None)
+                        if not getattr(spec, "intentional_callback", False):
+                            warnings.append(
+                                f"DUPLICATE_VISUAL_OVERUSE: Shot '{shot.shot_id}' reuses asset from '{prev_shot_id}' without intentional callback."
+                            )
+                    else:
+                        seen_hashes[shot.asset_sha256] = shot.shot_id
 
         # 3. Grounding violations
         if storyboard and storyboard.shots:

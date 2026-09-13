@@ -244,6 +244,7 @@ class ShotSpec(BaseModel):
         default=VisualizationDataMode.GROUNDED, description="Grounding data mode: GROUNDED vs CONCEPTUAL"
     )
     motion_cues: List[MotionCue] = Field(default_factory=list, description="Explicit temporal animation cues for true motion graphics")
+    intentional_callback: bool = Field(default=False, description="Whether shot deliberately repeats an earlier visual for continuity")
 
 
 class ShotAssetResult(BaseModel):
@@ -255,6 +256,13 @@ class ShotAssetResult(BaseModel):
     actual_modality: VisualModality = Field(description="Actual modality produced after fallback resolution")
     provider: str = Field(description="Name of provider or renderer that generated the asset")
     fallback_reason: Optional[str] = Field(default=None, description="Reason for modality fallback if applicable")
+    source_type: Optional[str] = Field(default=None, description="Visual source type (e.g. RESEARCH_SOURCE, DOCUMENT, RENDERED)")
+    source_url: Optional[str] = Field(default=None, description="Source provenance URL")
+    license_type: Optional[str] = Field(default=None, description="Asset license terms")
+    attribution: Optional[str] = Field(default=None, description="Author or source attribution")
+    acquisition_method: Optional[str] = Field(default=None, description="Acquisition service or renderer method")
+    is_synthetic: bool = Field(default=False, description="Whether asset is AI-generated synthetic media")
+    evidence_claim_ids: List[str] = Field(default_factory=list, description="Linked verified claim IDs")
 
     def __iter__(self):
         """Allow tuple unpacking (path, sha256) for backward compatibility."""
@@ -288,6 +296,13 @@ class TimelineShot(BaseModel):
     transition_in: Optional[str] = Field(default=None, description="Incoming transition effect")
     transition_out: Optional[str] = Field(default=None, description="Outgoing transition effect")
     overlays: List[OverlaySpec] = Field(default_factory=list, description="Overlays active during this shot")
+    asset_source_type: Optional[str] = Field(default=None, description="Visual source type")
+    asset_source_url: Optional[str] = Field(default=None, description="Provenance source URL")
+    asset_license: Optional[str] = Field(default=None, description="Asset license terms")
+    asset_attribution: Optional[str] = Field(default=None, description="Author or source attribution")
+    asset_acquisition_method: Optional[str] = Field(default=None, description="Acquisition method or renderer")
+    asset_is_synthetic: bool = Field(default=False, description="Whether asset is AI-generated synthetic media")
+
 
 
 class ShotTimeline(BaseModel):

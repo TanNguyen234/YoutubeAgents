@@ -782,11 +782,13 @@ class MediaProductionPipeline:
             if visual_report and visual_report.creative_status == "FAIL":
                 creative_failed = True
                 creative_fail_reasons = visual_report.critical_failures
-                quality_domain.status = QualityStatus.FAILED
-                quality_domain.issues.extend(creative_fail_reasons)
+                if quality_domain is not None:
+                    quality_domain.status = QualityStatus.FAILED
+                    quality_domain.issues.extend(creative_fail_reasons)
 
             # Persist QualityResult directly and via project to DB
-            self.repo.save_quality_result(quality_domain)
+            if quality_domain is not None:
+                self.repo.save_quality_result(quality_domain)
             project.quality = quality_domain
             project.assets = created_assets
             self.repo.save_video_project(project)
@@ -803,12 +805,15 @@ class MediaProductionPipeline:
             all_qa_issues = list(qa_res.issues) + creative_fail_reasons
             qa_passed = qa_res.passed and not creative_failed
 
-            # Derive contains_synthetic_media: True ONLY if photorealistic AI generated images/videos are used
+            # Derive contains_synthetic_media: True ONLY if photorealistic AI generated images/videos are used in FINAL selected assets
             contains_synthetic = False
             if used_director and timeline:
                 for s in timeline.shots:
                     modality_val = s.modality.value if hasattr(s.modality, "value") else str(s.modality)
                     if modality_val in ("GENERATED_IMAGE", "GENERATED_VIDEO", "IMAGE_TO_VIDEO"):
+                        contains_synthetic = True
+                        break
+                    if getattr(s, "asset_is_synthetic", False):
                         contains_synthetic = True
                         break
                     if getattr(s, "provider", None) == "gflow":
@@ -817,11 +822,6 @@ class MediaProductionPipeline:
                     if getattr(s, "asset_path", "") and ("gflow" in str(s.asset_path).lower() or "synthetic" in str(s.asset_path).lower()):
                         contains_synthetic = True
                         break
-                if not contains_synthetic and hasattr(self.director, "asset_attempts"):
-                    for attempt in self.director.asset_attempts:
-                        if getattr(attempt, "success", False) and getattr(attempt, "provider", "") == "gflow":
-                            contains_synthetic = True
-                            break
             else:
                 for a in created_assets:
                     url = (a.source_url or "").lower()
@@ -867,7 +867,20 @@ class MediaProductionPipeline:
                 subtitle_cue_count=sub_track.cue_count,
                 scene_count=len(timeline.shots) if (used_director and timeline) else len(scene_plans),
                 visual_assets=(
-                    [{"path": s.asset_path, "sha256": s.asset_sha256} for s in timeline.shots]
+                    [
+                        {
+                            "shot_id": s.shot_id,
+                            "path": s.asset_path,
+                            "sha256": s.asset_sha256,
+                            "source_type": getattr(s, "asset_source_type", None) or "RENDERED",
+                            "source_url": getattr(s, "asset_source_url", None),
+                            "license_type": getattr(s, "asset_license", None),
+                            "attribution": getattr(s, "asset_attribution", None),
+                            "acquisition_method": getattr(s, "asset_acquisition_method", None) or "director",
+                            "synthetic": getattr(s, "asset_is_synthetic", False),
+                        }
+                        for s in timeline.shots
+                    ]
                     if (used_director and timeline)
                     else [{"path": p.visual_asset_path, "sha256": p.visual_asset_sha256} for p in scene_plans]
                 ),
