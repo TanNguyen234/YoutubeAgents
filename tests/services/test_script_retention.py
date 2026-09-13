@@ -281,9 +281,9 @@ def test_fact_rewrite_runs_final_retention_qa(monkeypatch, tmp_path):
     eval_calls = []
     original_eval = ScriptRetentionEvaluator.evaluate
 
-    def mock_eval(self, script, blueprint=None):
+    def mock_eval(self, script, blueprint=None, *args, **kwargs):
         eval_calls.append(script.id)
-        return original_eval(self, script, blueprint=blueprint)
+        return original_eval(self, script, blueprint=blueprint, *args, **kwargs)
 
     monkeypatch.setattr(ScriptRetentionEvaluator, "evaluate", mock_eval)
 
@@ -658,27 +658,29 @@ def test_final_retention_qa_consumed_and_observable_in_pipeline(tmp_path, monkey
         {"volume_source": "seed"},
     ))
 
+    sample_hook = HookCandidate(
+        text="There is a subtle lock in SQLite that silently freezes concurrent readers.",
+        angle=HookAngle.CURIOSITY_GAP,
+        promise="Unpack how WAL mode eliminates reader blocking.",
+    )
     mock_scenes = [
-        Scene(index=0, hook="SQLite concurrency is misunderstood.", narration="WAL mode changes locking.", target_duration_seconds=15.0),
-        Scene(index=1, hook="Payoff.", narration="WAL readers never block writers in production.", target_duration_seconds=15.0),
+        Scene(index=0, narration="In default rollback journal mode, writing acquires an exclusive table lock.", target_duration_seconds=10.0),
+        Scene(index=1, narration="Think of it like a shared single-lane bridge where all cars must stop for a truck.", target_duration_seconds=10.0),
+        Scene(index=2, narration="Switching to WAL mode writes new pages to a separate log file instead.", target_duration_seconds=10.0),
+        Scene(index=3, narration="This eliminates reader blocking entirely, unlocking massive concurrent read throughput.", target_duration_seconds=10.0),
     ]
     mock_sections = ScriptSections(
-        hook="SQLite concurrency is misunderstood.",
-        intro="Let's unpack how WAL mode changes locking.",
+        hook=sample_hook.text,
+        intro="In default rollback journal mode, writing acquires an exclusive table lock.",
         segments=mock_scenes,
         cta="WAL fixes reader-writer blocking, but checkpointing creates the next bottleneck — that's the next breakdown.",
-        estimated_duration=30.0,
+        estimated_duration=40.0,
     )
     brain.generator.generate_script_sections = MagicMock(return_value=mock_sections)
     brain.extractor.extract_from_script = MagicMock(return_value=[
-        Claim(id="c1", statement="WAL readers never block writers in production.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True, source_id="s1")
+        Claim(id="c1", statement="Switching to WAL mode writes new pages to a separate log file instead.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True, source_id="s1")
     ])
 
-    sample_hook = HookCandidate(
-        text="SQLite concurrency is misunderstood.",
-        angle=HookAngle.CURIOSITY_GAP,
-        promise="Unpack WAL concurrency.",
-    )
     monkeypatch.setattr(
         "app.services.pipeline_brain.HookTournamentService.generate_hook_candidates",
         lambda *args, **kwargs: [sample_hook],
@@ -693,7 +695,7 @@ def test_final_retention_qa_consumed_and_observable_in_pipeline(tmp_path, monkey
         project_id="proj_ret_obs",
         audit_summary="All claims verified.",
         claims=[
-            Claim(id="c1", statement="WAL readers never block writers in production.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True)
+            Claim(id="c1", statement="Switching to WAL mode writes new pages to a separate log file instead.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True)
         ],
         verified_count=1,
         failed_count=0,
@@ -773,20 +775,26 @@ def test_final_retention_defect_triggers_bounded_rewrite_and_refactcheck(tmp_pat
     )
     brain.generator.generate_script_sections = MagicMock(return_value=mock_sections)
 
-    revised_sections = ScriptSections(
-        hook="SQLite concurrency is misunderstood.",
-        intro="Let's unpack how WAL mode changes locking.",
-        segments=mock_scenes,
-        cta="WAL fixes reader-writer blocking, but checkpointing creates the next bottleneck — that's the next breakdown.",
-        estimated_duration=30.0,
-    )
-    brain.generator.rewrite_for_retention = MagicMock(return_value=revised_sections)
-
     sample_hook = HookCandidate(
-        text="SQLite concurrency is misunderstood.",
+        text="There is a subtle lock in SQLite that silently freezes concurrent readers.",
         angle=HookAngle.CURIOSITY_GAP,
-        promise="Unpack WAL concurrency.",
+        promise="Unpack how WAL mode eliminates reader blocking.",
     )
+    passing_scenes = [
+        Scene(index=0, narration="In default rollback journal mode, writing acquires an exclusive table lock.", target_duration_seconds=10.0),
+        Scene(index=1, narration="Think of it like a shared single-lane bridge where all cars must stop for a truck.", target_duration_seconds=10.0),
+        Scene(index=2, narration="Switching to WAL mode writes new pages to a separate log file instead.", target_duration_seconds=10.0),
+        Scene(index=3, narration="This eliminates reader blocking entirely, unlocking massive concurrent read throughput.", target_duration_seconds=10.0),
+    ]
+    revised_sections = ScriptSections(
+        hook=sample_hook.text,
+        intro="In default rollback journal mode, writing acquires an exclusive table lock.",
+        segments=passing_scenes,
+        cta="WAL fixes reader-writer blocking, but checkpointing creates the next bottleneck — that's the next breakdown.",
+        estimated_duration=40.0,
+    )
+    brain.generator.rewrite_for_retention = MagicMock(side_effect=[mock_sections, revised_sections])
+
     monkeypatch.setattr(
         "app.services.pipeline_brain.HookTournamentService.generate_hook_candidates",
         lambda *args, **kwargs: [sample_hook],
@@ -797,7 +805,7 @@ def test_final_retention_defect_triggers_bounded_rewrite_and_refactcheck(tmp_pat
     )
 
     brain.extractor.extract_from_script = MagicMock(return_value=[
-        Claim(id="c1", statement="WAL readers never block writers in production.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True, source_id="s1")
+        Claim(id="c1", statement="Switching to WAL mode writes new pages to a separate log file instead.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True, source_id="s1")
     ])
 
     verify_calls = []
@@ -808,7 +816,7 @@ def test_final_retention_defect_triggers_bounded_rewrite_and_refactcheck(tmp_pat
             project_id="proj_ret_rewrite",
             audit_summary="Claims verified.",
             claims=[
-                Claim(id="c1", statement="WAL readers never block writers in production.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True)
+                Claim(id="c1", statement="Switching to WAL mode writes new pages to a separate log file instead.", verdict=ClaimVerificationVerdict.VERIFIED, verified=True)
             ],
             verified_count=1,
             failed_count=0,
