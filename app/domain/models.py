@@ -23,6 +23,7 @@ from app.domain.enums import (
     TonePreset,
     VideoLifecycleState,
 )
+from app.domain.retention import ScriptRetentionReport
 
 
 class Channel(BaseModel):
@@ -340,7 +341,7 @@ class ScriptSections(BaseModel):
     retention_blueprint: Optional[RetentionBlueprint] = Field(
         default=None, description="Format-aware narrative retention blueprint"
     )
-    retention_report: Optional[Any] = Field(
+    retention_report: Optional[ScriptRetentionReport] = Field(
         default=None, description="Format-aware script retention evaluation report"
     )
 
@@ -353,6 +354,16 @@ class ScriptSections(BaseModel):
                     data["estimated_duration"] = data["duration_seconds"]
                 elif "duration" in data:
                     data["estimated_duration"] = data["duration"]
+            if "retention_blueprint" in data and isinstance(data["retention_blueprint"], dict):
+                try:
+                    RetentionBlueprint.model_validate(data["retention_blueprint"])
+                except Exception:
+                    data.pop("retention_blueprint", None)
+            if "retention_report" in data and isinstance(data["retention_report"], dict):
+                try:
+                    ScriptRetentionReport.model_validate(data["retention_report"])
+                except Exception:
+                    data.pop("retention_report", None)
         return data
 
     @model_validator(mode="after")
@@ -380,10 +391,26 @@ class Script(BaseModel):
     retention_blueprint: Optional[RetentionBlueprint] = Field(
         default=None, description="Format-aware narrative retention blueprint"
     )
-    retention_report: Optional[Any] = Field(
+    retention_report: Optional[ScriptRetentionReport] = Field(
         default=None, description="Format-aware script retention evaluation report"
     )
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_script_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "retention_blueprint" in data and isinstance(data["retention_blueprint"], dict):
+                try:
+                    RetentionBlueprint.model_validate(data["retention_blueprint"])
+                except Exception:
+                    data.pop("retention_blueprint", None)
+            if "retention_report" in data and isinstance(data["retention_report"], dict):
+                try:
+                    ScriptRetentionReport.model_validate(data["retention_report"])
+                except Exception:
+                    data.pop("retention_report", None)
+        return data
 
     def get_canonical_narration(self) -> str:
         """Get the single authoritative canonical spoken voiceover narration."""

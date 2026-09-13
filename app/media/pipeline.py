@@ -49,6 +49,8 @@ from app.media.subtitles import SubtitleGenerator
 from app.media.tts.base import TTSBackend
 from app.media.tts.edge_tts_backend import EdgeTTSBackend, TTSBlockerError
 
+logger = logging.getLogger(__name__)
+
 
 class MediaProductionError(RuntimeError):
     """Raised when media production pipeline encounters an unrecoverable failure."""
@@ -481,7 +483,10 @@ class MediaProductionPipeline:
                             )
                             self.repo.save_video_project(project)
                     except Exception:
-                        pass
+                        logger.warning(
+                            "RETENTION_TIMESTAMP_MAPPING_FAILED: Failed to populate real TTS timestamps on retention report",
+                            exc_info=True,
+                        )
 
                 timeline, storyboard = self.director.plan_and_render_timeline(
                     project_id=project_id,
