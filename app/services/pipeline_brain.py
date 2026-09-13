@@ -263,7 +263,7 @@ class BrainPipeline:
 
             # Initial Script Retention QA
             retention_evaluator = ScriptRetentionEvaluator()
-            ret_report = retention_evaluator.evaluate(script, blueprint=blueprint)
+            ret_report = retention_evaluator.evaluate(script, blueprint=blueprint, dossier=dossier)
 
             # Bounded retention rewrite if severe retention drop risk detected
             if not ret_report.passed and len(ret_report.rewrite_instructions) > 0:
@@ -342,7 +342,9 @@ class BrainPipeline:
                     break
 
             # 7b. Post-Fact-Check Final Retention QA (fact-check rewrite can alter pacing)
-            final_ret_report = retention_evaluator.evaluate(project.script, blueprint=blueprint)
+            final_ret_report = retention_evaluator.evaluate(
+                project.script, blueprint=blueprint, dossier=dossier, fact_report=report
+            )
 
             # Option (a): If FactCheck passed, but retention QA failed for non-factual creative defects:
             # Perform at most ONE bounded retention rewrite, then RE-RUN claim extraction + fact checking, then retention QA again.
@@ -384,7 +386,9 @@ class BrainPipeline:
                     self.repo.save_fact_check_report(report)
 
                     # Re-evaluate final retention report after re-verification
-                    final_ret_report = retention_evaluator.evaluate(project.script, blueprint=blueprint)
+                    final_ret_report = retention_evaluator.evaluate(
+                        project.script, blueprint=blueprint, dossier=dossier, fact_report=report
+                    )
 
             # Persist final retention report onto script and pipeline instance
             if project.script:
@@ -405,8 +409,8 @@ class BrainPipeline:
                 else:
                     self.repo.update_project_state(
                         project_id=project_id,
-                        to_state=VideoLifecycleState.VERIFIED,
-                        reason=f"All {report.verified_count} factual claims verified against source evidence (retention warning: {len(final_ret_report.issues)} issue(s))",
+                        to_state=VideoLifecycleState.BLOCKED,
+                        reason="RETENTION_QA_FAILED_AFTER_BOUNDED_REPAIR",
                     )
             else:
                 self.repo.update_project_state(
