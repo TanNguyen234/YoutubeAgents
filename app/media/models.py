@@ -130,6 +130,48 @@ CREATIVE_PIPELINE_VERSION: str = "director-v3"
 DIRECTOR_PIPELINE_VERSION: str = "director-v3"
 GROUNDING_POLICY_VERSION: str = "grounding-v2"
 CREATIVE_QA_POLICY_VERSION: str = "creative-qa-v2"
+RETENTION_POLICY_VERSION: str = "retention-v2"
+
+
+def compute_retention_plan_hash(blueprint: Optional[Any]) -> str:
+    """Compute deterministic SHA-256 hash of semantically relevant retention planning data."""
+    import hashlib
+    import json
+
+    if not blueprint:
+        return ""
+
+    content_fmt = getattr(blueprint, "content_format", None)
+    content_fmt_str = content_fmt.value if hasattr(content_fmt, "value") else str(content_fmt or "")
+
+    hook = getattr(blueprint, "hook", None)
+    hook_text = (getattr(hook, "text", "") or "").strip() if hook else ""
+    hook_promise = (getattr(hook, "promise", "") or "").strip() if hook else ""
+
+    cues_data = []
+    for c in getattr(blueprint, "cues", []) or []:
+        c_type = getattr(c, "cue_type", None)
+        c_type_str = c_type.value if hasattr(c_type, "value") else str(c_type or "")
+        cues_data.append({
+            "cue_id": str(getattr(c, "cue_id", "") or "").strip(),
+            "cue_type": c_type_str,
+            "target_position_ratio": round(float(getattr(c, "target_position_ratio", 0.0)), 4),
+            "purpose": str(getattr(c, "purpose", "") or "").strip(),
+            "anchor_text": str(getattr(c, "anchor_text", "") or "").strip(),
+            "linked_hook_promise": str(getattr(c, "linked_hook_promise", "") or "").strip(),
+        })
+
+    payload = {
+        "content_format": content_fmt_str,
+        "target_duration_seconds": round(float(getattr(blueprint, "target_duration_seconds", 0.0)), 2),
+        "core_question": str(getattr(blueprint, "core_question", "") or "").strip(),
+        "promised_payoff": str(getattr(blueprint, "promised_payoff", "") or "").strip(),
+        "hook_text": hook_text,
+        "hook_promise": hook_promise,
+        "cues": cues_data,
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 class RenderManifest(BaseModel):
@@ -146,6 +188,8 @@ class RenderManifest(BaseModel):
     director_pipeline_version: str = Field(default=DIRECTOR_PIPELINE_VERSION, description="Director pipeline version")
     grounding_policy_version: str = Field(default=GROUNDING_POLICY_VERSION, description="Grounding policy version")
     creative_qa_policy_version: str = Field(default=CREATIVE_QA_POLICY_VERSION, description="Creative QA policy version")
+    retention_policy_version: Optional[str] = Field(default=RETENTION_POLICY_VERSION, description="Retention policy version")
+    retention_plan_hash: Optional[str] = Field(default=None, description="Deterministic hash of retention plan blueprint")
     fallback_policy: Optional[str] = Field(default=None, description="Active fallback policy used during production")
     creative_profile: Optional[str] = Field(default=None, description="Active creative profile name")
     content_format: Optional[str] = Field(default=None, description="Content format used for generation")
@@ -161,6 +205,8 @@ class RenderManifest(BaseModel):
     audio_path: str = Field(description="Audio track file path")
     audio_sha256: str = Field(description="Audio track SHA-256")
     audio_duration: float = Field(description="Audio duration in seconds")
+    audio_duration_seconds: Optional[float] = Field(default=None, description="Measured audio duration in seconds")
+    tts_timing_events: Optional[List[Dict[str, Any]]] = Field(default=None, description="Persisted TTS timing events for retention mapping")
     subtitle_path: str = Field(description="Subtitle file path")
     subtitle_sha256: str = Field(description="Subtitle track SHA-256")
     subtitle_format: str = Field(default="srt")
@@ -216,6 +262,8 @@ def compute_production_fingerprint(
     director_pipeline_version: str = DIRECTOR_PIPELINE_VERSION,
     grounding_policy_version: str = GROUNDING_POLICY_VERSION,
     creative_qa_policy_version: str = CREATIVE_QA_POLICY_VERSION,
+    retention_policy_version: str = RETENTION_POLICY_VERSION,
+    retention_plan_hash: Optional[str] = None,
 ) -> str:
     """Compute a deterministic SHA-256 fingerprint uniquely identifying a production combination."""
     import hashlib
@@ -224,7 +272,8 @@ def compute_production_fingerprint(
         f"{tts_rate}|{tts_pitch}|{subtitle_format}|{','.join(ordered_scene_asset_hashes or [])}|"
         f"{audio_mode}|{creative_pipeline_version}|{content_format}|{creative_profile_name}|"
         f"{storyboard_hash or ''}|{visual_plan_hash or ''}|{provider_config_id}|{renderer_config_hash or ''}|"
-        f"{fallback_policy}|{director_pipeline_version}|{grounding_policy_version}|{creative_qa_policy_version}"
+        f"{fallback_policy}|{director_pipeline_version}|{grounding_policy_version}|{creative_qa_policy_version}|"
+        f"{retention_policy_version}|{retention_plan_hash or ''}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 

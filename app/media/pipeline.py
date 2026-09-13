@@ -31,8 +31,10 @@ from app.media.models import (
     CREATIVE_QA_POLICY_VERSION,
     DIRECTOR_PIPELINE_VERSION,
     GROUNDING_POLICY_VERSION,
+    RETENTION_POLICY_VERSION,
     compute_artifact_fingerprint,
     compute_production_fingerprint,
+    compute_retention_plan_hash,
     get_render_manifest_path,
     MediaQAResult,
     RenderManifest,
@@ -231,6 +233,9 @@ class MediaProductionPipeline:
         content_format_str = content_format_obj.value
 
         # 5. Compute Requested Fingerprint BEFORE any reuse decision
+        retention_blueprint = getattr(project.script, "retention_blueprint", None)
+        current_retention_plan_hash = compute_retention_plan_hash(retention_blueprint)
+
         scene_hashes = [
             hashlib.sha256(
                 f"{getattr(s, 'scene_index', getattr(s, 'index', idx))}|{s.narration.strip()}|{(getattr(s, 'hook', '') or '').strip()}|{project.script.title.strip()}|{render_prof.width}x{render_prof.height}".encode("utf-8")
@@ -265,6 +270,8 @@ class MediaProductionPipeline:
             director_pipeline_version=DIRECTOR_PIPELINE_VERSION,
             grounding_policy_version=GROUNDING_POLICY_VERSION,
             creative_qa_policy_version=CREATIVE_QA_POLICY_VERSION,
+            retention_policy_version=RETENTION_POLICY_VERSION,
+            retention_plan_hash=current_retention_plan_hash,
         )
 
         if not force_rebuild and manifest_path.exists():
@@ -274,6 +281,8 @@ class MediaProductionPipeline:
                 cached_director_ver = getattr(cached_manifest, "director_pipeline_version", None)
                 cached_grounding_ver = getattr(cached_manifest, "grounding_policy_version", None)
                 cached_creative_qa_ver = getattr(cached_manifest, "creative_qa_policy_version", None)
+                cached_retention_policy_ver = getattr(cached_manifest, "retention_policy_version", None)
+                cached_retention_plan_h = getattr(cached_manifest, "retention_plan_hash", None)
                 cached_fallback_pol = getattr(cached_manifest, "fallback_policy", None)
                 cached_profile = getattr(cached_manifest, "creative_profile", None)
                 cached_format = getattr(cached_manifest, "content_format", None)
@@ -286,6 +295,8 @@ class MediaProductionPipeline:
                     and (cached_director_ver is None or cached_director_ver == DIRECTOR_PIPELINE_VERSION)
                     and (cached_grounding_ver is None or cached_grounding_ver == GROUNDING_POLICY_VERSION)
                     and (cached_creative_qa_ver is None or cached_creative_qa_ver == CREATIVE_QA_POLICY_VERSION)
+                    and cached_retention_policy_ver == RETENTION_POLICY_VERSION
+                    and cached_retention_plan_h == current_retention_plan_hash
                     and (cached_fallback_pol is None or cached_fallback_pol == active_fallback_policy.value)
                     and (cached_profile is None or cached_profile == creative_profile_name)
                     and (cached_format is None or cached_format == content_format_str)
@@ -309,6 +320,10 @@ class MediaProductionPipeline:
                         can_reuse = False
                     if cached_creative_qa_ver != CREATIVE_QA_POLICY_VERSION:
                         can_reuse = False
+                    if cached_retention_policy_ver != RETENTION_POLICY_VERSION:
+                        can_reuse = False
+                    if cached_retention_plan_h != current_retention_plan_hash:
+                        can_reuse = False
                     if cached_fallback_pol != active_fallback_policy.value:
                         can_reuse = False
 
@@ -325,6 +340,36 @@ class MediaProductionPipeline:
                         render_input_hash=cached_manifest.render_input_narration_sha256,
                     )
                     if qa_res.passed:
+                        # P1-2: Enrich retention timestamps if missing on cache hit
+                        if project.script and getattr(project.script, "retention_report", None):
+                            ret_rep = project.script.retention_report
+                            strongest = getattr(ret_rep, "strongest_moments", [])
+                            if any(getattr(m, "timestamp_seconds", None) is None for m in strongest):
+                                try:
+                                    cached_timing_events = getattr(cached_manifest, "tts_timing_events", None)
+                                    cached_duration = (
+                                        getattr(cached_manifest, "audio_duration_seconds", None)
+                                        or getattr(cached_manifest, "audio_duration", None)
+                                        or getattr(qa_res, "audio_duration", None)
+                                        or getattr(qa_res, "video_duration", None)
+                                    )
+                                    if cached_timing_events or (cached_duration and cached_duration > 0):
+                                        ret_rep.populate_timestamps(
+                                            total_duration_seconds=float(cached_duration or 0.0),
+                                            timing_events=cached_timing_events,
+                                            canonical_narration=canonical_narration,
+                                        )
+                                        self.repo.save_video_project(project)
+                                    else:
+                                        logger.warning(
+                                            "RETENTION_TIMESTAMP_MAPPING_FAILED: Cached render has no timing events or duration for timestamp enrichment"
+                                        )
+                                except Exception:
+                                    logger.warning(
+                                        "RETENTION_TIMESTAMP_MAPPING_FAILED: Failed to enrich retention timestamps from cached manifest",
+                                        exc_info=True,
+                                    )
+
                         # Ensure project state is synchronized
                         curr_p = self.repo.get_video_project(project_id)
                         if curr_p and curr_p.state == VideoLifecycleState.VERIFIED:
@@ -585,6 +630,8 @@ class MediaProductionPipeline:
                 director_pipeline_version=DIRECTOR_PIPELINE_VERSION,
                 grounding_policy_version=GROUNDING_POLICY_VERSION,
                 creative_qa_policy_version=CREATIVE_QA_POLICY_VERSION,
+                retention_policy_version=RETENTION_POLICY_VERSION,
+                retention_plan_hash=current_retention_plan_hash,
             )
 
             # 9b. AI Background Music Generation
@@ -795,6 +842,8 @@ class MediaProductionPipeline:
                 director_pipeline_version=DIRECTOR_PIPELINE_VERSION,
                 grounding_policy_version=GROUNDING_POLICY_VERSION,
                 creative_qa_policy_version=CREATIVE_QA_POLICY_VERSION,
+                retention_policy_version=RETENTION_POLICY_VERSION,
+                retention_plan_hash=current_retention_plan_hash,
                 fallback_policy=active_fallback_policy.value,
                 creative_profile=creative_profile_name,
                 content_format=content_format_str,
@@ -810,6 +859,8 @@ class MediaProductionPipeline:
                 audio_path=tts_res.audio_path,
                 audio_sha256=tts_res.audio_sha256,
                 audio_duration=tts_res.duration_seconds,
+                audio_duration_seconds=tts_res.duration_seconds,
+                tts_timing_events=tts_res.timing_events,
                 subtitle_path=sub_track.file_path,
                 subtitle_sha256=sub_track.content_sha256,
                 subtitle_format="srt",

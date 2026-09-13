@@ -3,8 +3,14 @@
 from pathlib import Path
 import pytest
 
-from app.domain.enums import VideoLifecycleState
-from app.domain.models import Script, VideoProject
+from app.domain.enums import HookAngle, RetentionCueType, VideoLifecycleState
+from app.domain.models import (
+    HookCandidate,
+    RetentionBlueprint,
+    RetentionCue,
+    Script,
+    VideoProject,
+)
 from app.media.director.models import ContentFormat
 from app.media.director.profiles import (
     BENCHMARK_ANALYSIS_PROFILE,
@@ -13,9 +19,11 @@ from app.media.director.profiles import (
 )
 from app.media.models import (
     CREATIVE_PIPELINE_VERSION,
+    RETENTION_POLICY_VERSION,
     RenderManifest,
     compute_artifact_fingerprint,
     compute_production_fingerprint,
+    compute_retention_plan_hash,
 )
 from app.media.pipeline import MediaProductionPipeline
 from tests.media.test_media_pipeline import MockTTSBackend, repo_with_verified_project
@@ -441,5 +449,194 @@ def test_director_pipeline_version_change_invalidates_request_fingerprint():
     fp_v2 = compute_production_fingerprint(**base_params, director_pipeline_version="director-v3")
 
     assert fp_v1 != fp_v2
+
+
+def _make_sample_blueprint(cue_pos: float = 0.5, cue_type: RetentionCueType = RetentionCueType.PATTERN_INTERRUPT, core_q: str = "Core question") -> RetentionBlueprint:
+    hook = HookCandidate(text="Why SQLite concurrency blocks readers", angle=HookAngle.CURIOSITY_GAP, promise="How WAL mode fixes it")
+    cues = [
+        RetentionCue(
+            cue_id="c1",
+            cue_type=cue_type,
+            target_position_ratio=cue_pos,
+            purpose="Contrast with default locking",
+            anchor_text="WAL mode eliminates reader blocking",
+            linked_hook_promise="How WAL mode fixes it",
+        )
+    ]
+    return RetentionBlueprint(
+        hook=hook,
+        cues=cues,
+        core_question=core_q,
+        promised_payoff="How WAL mode fixes it",
+        content_format=ContentFormat.EXPLAINER,
+        target_duration_seconds=30.0,
+    )
+
+
+def test_retention_blueprint_change_invalidates_render_cache(repo_with_verified_project, tmp_path: Path):
+    """Changing retention blueprint invalidates the render cache and forces rebuild."""
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_ret_bp_inval",
+    )
+
+    project = repo.get_video_project(project_id)
+    project.script.retention_blueprint = _make_sample_blueprint(core_q="Question A")
+    repo.save_video_project(project)
+
+    # First run
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+    assert manifest_1.retention_policy_version == RETENTION_POLICY_VERSION
+    assert manifest_1.retention_plan_hash is not None
+
+    # Change retention blueprint
+    project = repo.get_video_project(project_id)
+    project.script.retention_blueprint = _make_sample_blueprint(core_q="Question B (Modified)")
+    project.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(project)
+
+    # Second run: must invalidate cache and rebuild
+    _, _, manifest_2 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 2
+    assert manifest_2.retention_plan_hash != manifest_1.retention_plan_hash
+    assert manifest_2.production_fingerprint != manifest_1.production_fingerprint
+
+
+def test_retention_cue_position_change_invalidates_render_cache(repo_with_verified_project, tmp_path: Path):
+    """Altering a retention cue's position ratio invalidates cache and triggers re-render."""
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_ret_pos_inval",
+    )
+
+    project = repo.get_video_project(project_id)
+    project.script.retention_blueprint = _make_sample_blueprint(cue_pos=0.30)
+    repo.save_video_project(project)
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+
+    # Shift cue position
+    project = repo.get_video_project(project_id)
+    project.script.retention_blueprint = _make_sample_blueprint(cue_pos=0.75)
+    project.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(project)
+
+    _, _, manifest_2 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 2
+    assert manifest_2.retention_plan_hash != manifest_1.retention_plan_hash
+    assert manifest_2.production_fingerprint != manifest_1.production_fingerprint
+
+
+def test_retention_cue_type_change_invalidates_render_cache(repo_with_verified_project, tmp_path: Path):
+    """Altering a retention cue's type invalidates cache and triggers re-render."""
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_ret_type_inval",
+    )
+
+    project = repo.get_video_project(project_id)
+    project.script.retention_blueprint = _make_sample_blueprint(cue_type=RetentionCueType.PATTERN_INTERRUPT)
+    repo.save_video_project(project)
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+
+    # Switch cue type to CLIMAX
+    project = repo.get_video_project(project_id)
+    project.script.retention_blueprint = _make_sample_blueprint(cue_type=RetentionCueType.CLIMAX)
+    project.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(project)
+
+    _, _, manifest_2 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 2
+    assert manifest_2.retention_plan_hash != manifest_1.retention_plan_hash
+    assert manifest_2.production_fingerprint != manifest_1.production_fingerprint
+
+
+def test_same_retention_plan_has_stable_hash():
+    """Identical retention blueprints produce the exact same deterministic hash."""
+    bp_1 = _make_sample_blueprint(cue_pos=0.45, cue_type=RetentionCueType.REVEAL)
+    bp_2 = _make_sample_blueprint(cue_pos=0.45, cue_type=RetentionCueType.REVEAL)
+
+    h1 = compute_retention_plan_hash(bp_1)
+    h2 = compute_retention_plan_hash(bp_2)
+    assert h1 == h2
+    assert len(h1) == 64
+
+
+def test_old_manifest_without_retention_policy_version_is_not_reused(repo_with_verified_project, tmp_path: Path):
+    """A cached manifest without retention_policy_version must strictly not be reused."""
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_old_ret_pol_ver",
+    )
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+
+    # Tamper with manifest to remove retention_policy_version
+    manifest_path = tmp_path / "out_old_ret_pol_ver" / project_id / "manifests" / "render_manifest.json"
+    manifest_obj = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    manifest_dict = manifest_obj.model_dump()
+    manifest_dict["retention_policy_version"] = None
+    manifest_path.write_text(RenderManifest(**manifest_dict).model_dump_json(indent=2), encoding="utf-8")
+
+    project = repo.get_video_project(project_id)
+    project.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(project)
+
+    # Must rebuild once
+    _, _, manifest_2 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 2
+    assert manifest_2.retention_policy_version == RETENTION_POLICY_VERSION
+
+
+def test_old_manifest_without_retention_plan_hash_is_not_reused(repo_with_verified_project, tmp_path: Path):
+    """A cached manifest with missing retention_plan_hash when blueprint is present cannot be reused."""
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_old_ret_plan_h",
+    )
+
+    project = repo.get_video_project(project_id)
+    project.script.retention_blueprint = _make_sample_blueprint()
+    repo.save_video_project(project)
+
+    _, _, manifest_1 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+
+    # Tamper with manifest to remove retention_plan_hash
+    manifest_path = tmp_path / "out_old_ret_plan_h" / project_id / "manifests" / "render_manifest.json"
+    manifest_obj = RenderManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    manifest_dict = manifest_obj.model_dump()
+    manifest_dict["retention_plan_hash"] = None
+    manifest_path.write_text(RenderManifest(**manifest_dict).model_dump_json(indent=2), encoding="utf-8")
+
+    project = repo.get_video_project(project_id)
+    project.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(project)
+
+    # Must rebuild once
+    _, _, manifest_2 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 2
+    assert manifest_2.retention_plan_hash is not None
+
 
 

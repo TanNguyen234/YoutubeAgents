@@ -203,14 +203,28 @@ class SQLiteRepository:
 
             # Persist nested Script if present
             if project.script:
-                if project.script.sections:
-                    if project.script.retention_report and not project.script.sections.retention_report:
+                if project.script.sections is None and (
+                    project.script.retention_report is not None
+                    or project.script.retention_blueprint is not None
+                ):
+                    project.script.sections = ScriptSections(
+                        hook=project.script.hook,
+                        intro="",
+                        segments=project.script.scenes,
+                        cta="",
+                        estimated_duration=project.script.estimated_duration_seconds or 30.0,
+                        retention_report=project.script.retention_report,
+                        retention_blueprint=project.script.retention_blueprint,
+                    )
+                elif project.script.sections:
+                    if project.script.retention_report is not None:
                         project.script.sections.retention_report = project.script.retention_report
-                    elif project.script.sections.retention_report and not project.script.retention_report:
+                    elif project.script.sections.retention_report is not None:
                         project.script.retention_report = project.script.sections.retention_report
-                    if project.script.retention_blueprint and not project.script.sections.retention_blueprint:
+
+                    if project.script.retention_blueprint is not None:
                         project.script.sections.retention_blueprint = project.script.retention_blueprint
-                    elif project.script.sections.retention_blueprint and not project.script.retention_blueprint:
+                    elif project.script.sections.retention_blueprint is not None:
                         project.script.retention_blueprint = project.script.sections.retention_blueprint
 
                 scenes_json = json.dumps([s.model_dump() for s in project.script.scenes])
