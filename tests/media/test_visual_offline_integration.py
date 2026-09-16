@@ -30,6 +30,7 @@ from app.media.director.models import (
 from app.media.models import compute_artifact_fingerprint, compute_production_fingerprint
 from app.media.renderers.diagram_renderer import DiagramRenderer
 from app.media.renderers.motion_graphics import MotionGraphicsRenderer
+from tests.media.test_media_pipeline import MockTTSBackend, repo_with_verified_project
 
 
 @pytest.fixture(scope="module")
@@ -362,3 +363,148 @@ def test_static_card_ratio_over_limit_fails_or_warns_as_documented():
     res_crit = evaluator.evaluate(sb_crit, profile=profile)
     assert not res_crit.passed
     assert any("EXCESSIVE_STATIC_RATIO" in f for f in res_crit.critical_failures)
+
+
+def test_pipeline_cache_invalidation_on_dossier_content_change(repo_with_verified_project, tmp_path: Path):
+    """Verify that MediaProductionPipeline.run_production() invalidates cache when ResearchDossier source content changes."""
+    from app.domain.enums import VideoLifecycleState
+    from app.domain.models import ResearchDossier, ResearchSource
+    from app.media.pipeline import MediaProductionPipeline
+    from tests.media.test_media_pipeline import MockTTSBackend
+
+    repo, project_id = repo_with_verified_project
+    dossier = ResearchDossier(
+        id="dossier_test",
+        topic_id="topic_test",
+        summary="Test topic dossier",
+        sources=[
+            ResearchSource(
+                id="src_01",
+                url="https://sqlite.org/wal.html",
+                title="SQLite WAL Documentation",
+                content_sha256="initial_content_sha256_v1",
+            )
+        ],
+    )
+    repo.save_research_dossier(project_id, dossier)
+
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_dossier_cache",
+    )
+
+    # Run 1: Cold production run
+    proj_1, qa_1, manifest_1 = pipeline.run_production(project_id=project_id)
+    assert proj_1.state == VideoLifecycleState.READY_FOR_REVIEW
+    assert tts.call_count == 1
+    fp1 = manifest_1.production_fingerprint
+    req_fp1 = manifest_1.request_fingerprint
+
+    # Run 1b: Idempotent cache hit with same dossier and script
+    proj_hit, qa_hit, manifest_hit = pipeline.run_production(project_id=project_id)
+    assert proj_hit.state == VideoLifecycleState.READY_FOR_REVIEW
+    assert tts.call_count == 1  # TTS must NOT be invoked on cache hit
+    assert manifest_hit.production_fingerprint == fp1
+
+    # Mutate dossier source content hash in repository
+    dossier_v2 = ResearchDossier(
+        id="dossier_test",
+        topic_id="topic_test",
+        summary="Test topic dossier",
+        sources=[
+            ResearchSource(
+                id="src_01",
+                url="https://sqlite.org/wal.html",
+                title="SQLite WAL Documentation",
+                content_sha256="altered_content_sha256_v2",
+            )
+        ],
+    )
+    repo.save_research_dossier(project_id, dossier_v2)
+    project = repo.get_video_project(project_id)
+    project.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(project)
+
+    # Run 2: Modified dossier source forces full cache invalidation and re-run
+    proj_2, qa_2, manifest_2 = pipeline.run_production(project_id=project_id)
+    assert proj_2.state == VideoLifecycleState.READY_FOR_REVIEW
+    assert tts.call_count == 2  # Rebuild was forced!
+    assert manifest_2.production_fingerprint != fp1
+    assert manifest_2.request_fingerprint != req_fp1
+
+
+def test_pipeline_cache_invalidation_on_disk_tamper(repo_with_verified_project, tmp_path: Path):
+    """Verify that MediaProductionPipeline.run_production() detects disk asset modification and invalidates cache."""
+    from app.domain.enums import VideoLifecycleState
+    from app.media.pipeline import MediaProductionPipeline
+    from tests.media.test_media_pipeline import MockTTSBackend
+
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_disk_tamper",
+    )
+
+    # Run 1: Production run
+    proj_1, qa_1, manifest_1 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 1
+    assert manifest_1.visual_assets, "Must have visual assets recorded"
+
+    # Pick a visual asset and tamper with its content on disk
+    target_v_asset = manifest_1.visual_assets[0]
+    v_path = Path(target_v_asset["path"])
+    assert v_path.exists(), "Asset file must exist on disk"
+    v_path.write_bytes(b"corrupted_tampered_image_payload")
+
+    # Reset project state to VERIFIED
+    project = repo.get_video_project(project_id)
+    project.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(project)
+
+    # Run 2: Cache check must detect that asset hash does not match disk bytes, triggering rebuild
+    proj_2, qa_2, manifest_2 = pipeline.run_production(project_id=project_id)
+    assert tts.call_count == 2  # Rebuild executed
+    assert proj_2.state == VideoLifecycleState.READY_FOR_REVIEW
+
+
+def test_synthetic_disclosure_uses_only_final_selected_assets(repo_with_verified_project, tmp_path: Path):
+    """Verify that synthetic disclosure flag in RenderManifest evaluates only final selected timeline assets."""
+    from app.domain.enums import VideoLifecycleState
+    from app.media.pipeline import MediaProductionPipeline
+    from tests.media.test_media_pipeline import MockTTSBackend
+
+    repo, project_id = repo_with_verified_project
+    tts = MockTTSBackend(duration_seconds=3.0)
+    pipeline = MediaProductionPipeline(
+        repository=repo,
+        tts_backend=tts,
+        base_output_dir=tmp_path / "out_synthetic_disclosure",
+    )
+
+    # Run standard pipeline (renders diagram / motion graphics, all non-synthetic)
+    proj, qa, manifest = pipeline.run_production(project_id=project_id)
+    assert manifest.contains_synthetic_media is False
+
+    # Check each final asset has synthetic=False
+    for v in manifest.visual_assets:
+        assert v.get("synthetic") is False
+
+    # Now verify that if a synthetic asset is in the final timeline, it is disclosed
+    real_plan = pipeline.director.plan_and_render_timeline
+
+    def mock_plan(*args, **kwargs):
+        timeline, sb = real_plan(*args, **kwargs)
+        timeline.shots[0].asset_is_synthetic = True
+        return timeline, sb
+
+    pipeline.director.plan_and_render_timeline = mock_plan
+    project = repo.get_video_project(project_id)
+    project.state = VideoLifecycleState.VERIFIED
+    repo.save_video_project(project)
+
+    proj_syn, qa_syn, manifest_syn = pipeline.run_production(project_id=project_id, force_rebuild=True)
+    assert manifest_syn.contains_synthetic_media is True

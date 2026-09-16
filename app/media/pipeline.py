@@ -242,9 +242,18 @@ class MediaProductionPipeline:
             ).hexdigest()
             for idx, s in enumerate(project.script.scenes)
         ]
+        persisted_dossier = None
+        if hasattr(self.repo, "get_research_dossier"):
+            try:
+                persisted_dossier = self.repo.get_research_dossier(project_id)
+            except Exception:
+                pass
+        if not persisted_dossier:
+            persisted_dossier = getattr(project, "dossier", None)
+
         dossier_source_hashes = [
             str(getattr(s, "content_sha256", None) or s.url or s.title or "")
-            for s in (project.dossier.sources if getattr(project, "dossier", None) and project.dossier.sources else [])
+            for s in (persisted_dossier.sources if persisted_dossier and persisted_dossier.sources else [])
         ]
         visual_plan_raw = (
             f"{expected_narration_hash}|{content_format_str}|{creative_profile_name}|"
@@ -844,14 +853,16 @@ class MediaProductionPipeline:
                     if getattr(s, "provider", None) == "gflow":
                         contains_synthetic = True
                         break
-                    if getattr(s, "asset_path", "") and ("gflow" in str(s.asset_path).lower() or "synthetic" in str(s.asset_path).lower()):
-                        contains_synthetic = True
-                        break
+                    if getattr(s, "asset_path", ""):
+                        a_name = Path(str(s.asset_path)).name.lower()
+                        if "gflow" in a_name or "synthetic" in a_name:
+                            contains_synthetic = True
+                            break
             else:
                 for a in created_assets:
                     url = (a.source_url or "").lower()
-                    fp = (str(a.file_path) or "").lower()
-                    if "gflow" in url or "synthetic" in url or "gflow" in fp or "synthetic" in fp:
+                    fp_name = Path(str(a.file_path)).name.lower() if a.file_path else ""
+                    if "gflow" in url or "synthetic" in url or "gflow" in fp_name or "synthetic" in fp_name:
                         contains_synthetic = True
                         break
 
