@@ -261,6 +261,31 @@ class WebCaptureService:
         sha = hashlib.sha256(content_bytes).hexdigest()
         return str(output_path), sha
 
+    def _create_route_handler(self):
+        """Create a route handler enforcing SSRF defense, private IP blocks, and protocol restrictions."""
+        def handle_route(route):
+            req = route.request
+            req_url = req.url
+            parsed_req = urlparse(req_url)
+            scheme = parsed_req.scheme.lower()
+            if scheme in ("data", "blob"):
+                route.continue_()
+                return
+            if scheme not in ("http", "https"):
+                route.abort("blockedbyclient")
+                return
+
+            sub_host = (parsed_req.hostname or "").lower()
+            # Never permit requests to private/internal/metadata IPs or hostnames,
+            # even for initial navigation (DNS rebinding / TOCTOU defense).
+            if _is_private_ip(sub_host):
+                route.abort("blockedbyclient")
+                return
+
+            route.continue_()
+
+        return handle_route
+
     def capture_evidence(
         self,
         url: str,
@@ -297,39 +322,16 @@ class WebCaptureService:
                     accept_downloads=False,
                     permissions=[],
                 )
+
+                # Attach network routing at context boundary to intercept all pages, frames, and popups
+                handle_route = self._create_route_handler()
+                context.route("**/*", handle_route)
+
                 page = context.new_page()
                 page.set_default_timeout(timeout)
 
-                initial_parsed = urlparse(url)
-                initial_origin = f"{initial_parsed.scheme}://{initial_parsed.netloc}".lower()
-
-                # Intercept network requests to block private/loopback/metadata subresources and unauthorized redirects
-                def handle_route(route):
-                    req = route.request
-                    req_url = req.url
-                    parsed_req = urlparse(req_url)
-                    scheme = parsed_req.scheme.lower()
-                    if scheme in ("data", "blob"):
-                        route.continue_()
-                        return
-                    if scheme not in ("http", "https"):
-                        route.abort("blockedbyclient")
-                        return
-
-                    sub_host = (parsed_req.hostname or "").lower()
-                    req_origin = f"{parsed_req.scheme}://{parsed_req.netloc}".lower()
-                    is_initial_nav = (
-                        req.is_navigation_request()
-                        and req.frame == page.main_frame
-                        and req_origin == initial_origin
-                    )
-
-                    if not is_initial_nav and _is_private_ip(sub_host):
-                        route.abort("blockedbyclient")
-                        return
-                    route.continue_()
-
-                page.route("**/*", handle_route)
+                # Automatically terminate unexpected popup windows or secondary pages
+                context.on("page", lambda new_page: new_page.close() if new_page != page else None)
 
                 response = page.goto(url, wait_until="domcontentloaded")
                 if not response or response.status >= 400:
@@ -340,7 +342,7 @@ class WebCaptureService:
                 # Post-navigation redirect revalidation
                 final_url = page.url
                 final_valid, final_reason = validate_capture_url(
-                    final_url, mode="EVIDENCE", trusted_urls=trusted_urls, check_dns=False
+                    final_url, mode="EVIDENCE", trusted_urls=trusted_urls, check_dns=True
                 )
                 if not final_valid:
                     browser.close()

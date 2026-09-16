@@ -190,3 +190,121 @@ def test_web_capture_blocks_navigation_redirect_to_disallowed_target(tmp_path, m
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_public_page_private_subresource_is_blocked():
+    """Verify that subresource requests to private IPs embedded in a page are aborted by route handler."""
+    from unittest.mock import MagicMock
+    from app.media.acquisition.web_capture import WebCaptureService
+
+    service = WebCaptureService()
+    handler = service._create_route_handler()
+
+    private_subresources = [
+        "http://127.0.0.1:8080/secret.png",
+        "http://192.168.1.100/admin.js",
+        "http://10.0.0.5/api/data",
+        "http://172.16.0.1/style.css",
+        "http://[::1]:9000/data.json",
+    ]
+    for sub_url in private_subresources:
+        route = MagicMock()
+        route.request.url = sub_url
+        handler(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+        route.continue_.assert_not_called()
+
+    # Valid external subresource continues
+    valid_route = MagicMock()
+    valid_route.request.url = "https://sqlite.org/images/sqlite.gif"
+    handler(valid_route)
+    valid_route.continue_.assert_called_once()
+    valid_route.abort.assert_not_called()
+
+
+def test_popup_to_private_ip_is_blocked_or_closed():
+    """Verify that popups targeting private IPs are blocked at route boundary and closed."""
+    from unittest.mock import MagicMock
+    from app.media.acquisition.web_capture import WebCaptureService
+
+    service = WebCaptureService()
+    handler = service._create_route_handler()
+
+    popup_route = MagicMock()
+    popup_route.request.url = "http://192.168.1.1/router-login"
+    handler(popup_route)
+    popup_route.abort.assert_called_once_with("blockedbyclient")
+    popup_route.continue_.assert_not_called()
+
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        context.route("**/*", handler)
+        main_page = context.new_page()
+        context.on("page", lambda new_p: new_p.close() if new_p != main_page else None)
+
+        main_page.set_content("<script>window.open('about:blank')</script>")
+        main_page.wait_for_timeout(200)
+        assert len(context.pages) == 1
+        browser.close()
+
+
+def test_main_navigation_is_revalidated_at_route_time():
+    """Verify that initial main navigation is never exempted if host resolves to private IP (DNS rebinding / TOCTOU)."""
+    from unittest.mock import MagicMock
+    from app.media.acquisition.web_capture import WebCaptureService
+
+    service = WebCaptureService()
+    handler = service._create_route_handler()
+
+    nav_route = MagicMock()
+    nav_route.request.url = "http://127.0.0.1:8080/dashboard"
+    nav_route.request.is_navigation_request.return_value = True
+    handler(nav_route)
+    nav_route.abort.assert_called_once_with("blockedbyclient")
+    nav_route.continue_.assert_not_called()
+
+
+def test_redirect_to_private_ip_remains_blocked():
+    """Verify that redirects pointing to private or loopback IPs are aborted at route time."""
+    from unittest.mock import MagicMock
+    from app.media.acquisition.web_capture import WebCaptureService
+
+    service = WebCaptureService()
+    handler = service._create_route_handler()
+
+    redirect_targets = [
+        "http://127.0.0.1:5000/internal",
+        "http://10.10.10.10/private",
+        "http://192.168.0.1/admin",
+    ]
+    for target in redirect_targets:
+        route = MagicMock()
+        route.request.url = target
+        handler(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+        route.continue_.assert_not_called()
+
+
+def test_metadata_subresource_is_blocked():
+    """Verify that cloud metadata endpoints are strictly blocked at route boundary."""
+    from unittest.mock import MagicMock
+    from app.media.acquisition.web_capture import WebCaptureService
+
+    service = WebCaptureService()
+    handler = service._create_route_handler()
+
+    metadata_targets = [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://169.254.169.254/latest/user-data/",
+        "http://metadata.google.internal/computeMetadata/v1/",
+        "http://metadata.local/metadata",
+        "http://instance-data/latest/meta-data/",
+    ]
+    for meta_url in metadata_targets:
+        route = MagicMock()
+        route.request.url = meta_url
+        handler(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+        route.continue_.assert_not_called()
