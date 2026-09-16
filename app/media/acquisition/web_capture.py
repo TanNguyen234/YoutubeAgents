@@ -358,6 +358,7 @@ class WebCaptureService:
                     ignore_https_errors=False,
                     accept_downloads=False,
                     permissions=[],
+                    service_workers="block",
                 )
 
                 # Attach network routing at context boundary to intercept all pages, frames, and popups
@@ -541,6 +542,7 @@ class WebCaptureService:
                 context = browser.new_context(
                     viewport={"width": self.viewport_width, "height": self.viewport_height},
                     ignore_https_errors=True,
+                    service_workers="block",
                 )
                 page = context.new_page()
                 page.set_default_timeout(timeout)

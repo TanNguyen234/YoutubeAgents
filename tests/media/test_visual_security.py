@@ -308,3 +308,74 @@ def test_metadata_subresource_is_blocked():
         handler(route)
         route.abort.assert_called_once_with("blockedbyclient")
         route.continue_.assert_not_called()
+
+
+def test_evidence_and_local_browser_context_blocks_service_workers(monkeypatch, tmp_path):
+    """Verify that browser contexts for evidence capture and local UI explicitly configure service_workers='block'."""
+    from unittest.mock import MagicMock
+    from app.media.acquisition.web_capture import WebCaptureService
+
+    service = WebCaptureService()
+
+    recorded_context_kwargs = []
+
+    class MockBrowser:
+        def new_context(self, **kwargs):
+            recorded_context_kwargs.append(kwargs)
+            ctx = MagicMock()
+            page = MagicMock()
+            page.goto.return_value = MagicMock(status=200)
+            page.url = "https://example.com/page"
+            page.title.return_value = "Page Title"
+            ctx.new_page.return_value = page
+            return ctx
+
+        def close(self):
+            pass
+
+    class MockChromium:
+        def launch(self, **kwargs):
+            return MockBrowser()
+
+    class MockPlaywright:
+        def __init__(self):
+            self.chromium = MockChromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr("app.media.acquisition.web_capture.is_playwright_available", lambda: True)
+    monkeypatch.setattr("app.media.acquisition.web_capture.is_chromium_available", lambda: True)
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: MockPlaywright())
+    monkeypatch.setattr("app.media.acquisition.web_capture.validate_capture_url", lambda url, **kw: (True, "OK"))
+    monkeypatch.setattr(
+        service,
+        "composite_evidence_shot",
+        lambda raw_screenshot_path, output_path, source_domain, document_title: (str(output_path), "fake_sha"),
+    )
+
+    # 1. Test capture_evidence
+    service.capture_evidence(
+        url="https://example.com/page",
+        output_path=tmp_path / "out_ev.png",
+    )
+
+    assert len(recorded_context_kwargs) >= 1
+    ev_kwargs = recorded_context_kwargs[0]
+    assert ev_kwargs.get("service_workers") == "block"
+    assert ev_kwargs.get("accept_downloads") is False
+    assert ev_kwargs.get("permissions") == []
+    assert ev_kwargs.get("ignore_https_errors") is False
+
+    # 2. Test capture_local_ui
+    service.capture_local_ui(
+        url="http://127.0.0.1:8000/app",
+        output_path=tmp_path / "out_local.png",
+    )
+
+    assert len(recorded_context_kwargs) >= 2
+    local_kwargs = recorded_context_kwargs[1]
+    assert local_kwargs.get("service_workers") == "block"
