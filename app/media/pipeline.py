@@ -536,7 +536,9 @@ class MediaProductionPipeline:
                     except ValueError:
                         content_fmt = ContentFormat.EXPLAINER
 
-                research_dossier = self.repo.get_research_dossier(project_id)
+                research_dossier = persisted_dossier if persisted_dossier is not None else (
+                    self.repo.get_research_dossier(project_id) if hasattr(self.repo, "get_research_dossier") else None
+                )
                 fact_report = self.repo.get_fact_check_report(project_id)
 
                 timed_retention_cues = []
