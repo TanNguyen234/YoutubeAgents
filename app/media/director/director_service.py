@@ -258,10 +258,12 @@ class AutoDirectorService:
                 transition_out="fade",
                 asset_source_type=getattr(asset_res, "source_type", None),
                 asset_source_url=getattr(asset_res, "source_url", None),
+                asset_source_ref=getattr(asset_res, "source_ref", None),
                 asset_license=getattr(asset_res, "license_type", None),
                 asset_attribution=getattr(asset_res, "attribution", None),
                 asset_acquisition_method=getattr(asset_res, "acquisition_method", None),
                 asset_is_synthetic=getattr(asset_res, "is_synthetic", False),
+                asset_evidence_claim_ids=list(getattr(asset_res, "evidence_claim_ids", []) or []),
             )
             timeline_shots.append(t_shot)
 
@@ -585,10 +587,12 @@ class AutoDirectorService:
                         provider=selected.acquisition_method,
                         source_type=selected.source_type.value,
                         source_url=selected.source_url,
+                        source_ref=selected.source_ref,
                         license_type=selected.license_type,
                         attribution=selected.attribution,
                         acquisition_method=selected.acquisition_method,
                         is_synthetic=selected.is_synthetic,
+                        evidence_claim_ids=selected.evidence_claim_ids or [],
                         fallback_reason=fallback_reason,
                     )
             except Exception as e:
@@ -692,6 +696,7 @@ class AutoDirectorService:
                         provider=provider_name,
                         source_type=selected.source_type.value,
                         source_url=selected.source_url or binding.source_url,
+                        source_ref=selected.source_ref or (binding.source_ref if binding else None),
                         license_type=selected.license_type,
                         attribution=selected.attribution,
                         acquisition_method=selected.acquisition_method,

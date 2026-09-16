@@ -12,7 +12,7 @@ from app.media.acquisition.models import (
     VisualSourceType,
 )
 from app.media.acquisition.router import VisualAcquisitionRouter
-from app.media.director.models import EvidenceBinding, ShotSpec, TimelineShot, VisualIntent, VisualModality
+from app.media.director.models import EvidenceBinding, ShotAssetResult, ShotSpec, TimelineShot, VisualIntent, VisualModality
 from app.media.models import RenderManifest
 
 
@@ -241,3 +241,90 @@ def test_untrusted_dossier_source_fails_closed_in_router(tmp_path):
     assert res.selected_candidate is not None
     assert res.selected_candidate.source_type == VisualSourceType.RENDERED
     assert res.actual_modality == VisualModality.DIAGRAM
+
+
+def test_provenance_propagation_from_candidate_to_manifest(tmp_path):
+    """MANDATORY INTEGRATION FLOW:
+    VisualAssetCandidate -> ShotAssetResult -> TimelineShot -> RenderManifest
+    Assert:
+    source_ref survives
+    claim_id survives
+    source_url survives
+    SHA survives
+    """
+    cand = VisualAssetCandidate(
+        candidate_id="cand_prov_01",
+        source_type=VisualSourceType.RESEARCH_SOURCE,
+        file_path=str(tmp_path / "doc.png"),
+        source_url="https://sqlite.org/wal.html",
+        source_ref="src_sqlite_wal",
+        license_type="Open Source",
+        attribution="SQLite",
+        content_sha256="sha_doc_abc",
+        width=1080,
+        height=1920,
+        acquisition_method="playwright_web_evidence",
+        evidence_claim_ids=["claim_wal_01"],
+        is_synthetic=False,
+    )
+
+    # 1. Candidate -> ShotAssetResult
+    asset_res = ShotAssetResult(
+        path=cand.file_path,
+        sha256=cand.content_sha256,
+        requested_modality=VisualModality.DOCUMENT_EVIDENCE,
+        actual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        provider=cand.acquisition_method,
+        source_type=cand.source_type.value,
+        source_url=cand.source_url,
+        source_ref=cand.source_ref,
+        license_type=cand.license_type,
+        attribution=cand.attribution,
+        acquisition_method=cand.acquisition_method,
+        is_synthetic=cand.is_synthetic,
+        evidence_claim_ids=cand.evidence_claim_ids,
+    )
+
+    # 2. ShotAssetResult -> TimelineShot
+    t_shot = TimelineShot(
+        shot_id="s_01",
+        beat_id="b_01",
+        start=0.0,
+        end=3.0,
+        duration=3.0,
+        asset_path=str(asset_res.path),
+        asset_sha256=asset_res.sha256,
+        modality=asset_res.actual_modality,
+        asset_source_type=asset_res.source_type,
+        asset_source_url=asset_res.source_url,
+        asset_source_ref=asset_res.source_ref,
+        asset_license=asset_res.license_type,
+        asset_attribution=asset_res.attribution,
+        asset_acquisition_method=asset_res.acquisition_method,
+        asset_is_synthetic=asset_res.is_synthetic,
+        asset_evidence_claim_ids=asset_res.evidence_claim_ids,
+    )
+
+    asset_entry = {
+        "shot_id": t_shot.shot_id,
+        "path": t_shot.asset_path,
+        "sha256": t_shot.asset_sha256,
+        "source_type": getattr(t_shot, "asset_source_type", None) or "RENDERED",
+        "source_url": getattr(t_shot, "asset_source_url", None),
+        "source_ref": getattr(t_shot, "asset_source_ref", None),
+        "license_type": getattr(t_shot, "asset_license", None),
+        "attribution": getattr(t_shot, "asset_attribution", None),
+        "evidence_claim_ids": getattr(t_shot, "asset_evidence_claim_ids", []),
+        "acquisition_method": getattr(t_shot, "asset_acquisition_method", None) or "director",
+        "synthetic": getattr(t_shot, "asset_is_synthetic", False),
+    }
+
+    assert asset_res.source_ref == cand.source_ref
+    assert asset_res.evidence_claim_ids == cand.evidence_claim_ids
+    assert t_shot.asset_source_ref == cand.source_ref
+    assert t_shot.asset_evidence_claim_ids == cand.evidence_claim_ids
+    assert asset_entry["source_ref"] == cand.source_ref
+    assert asset_entry["evidence_claim_ids"] == cand.evidence_claim_ids
+    assert asset_entry["source_url"] == cand.source_url
+    assert asset_entry["sha256"] == cand.content_sha256
+

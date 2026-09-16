@@ -258,6 +258,7 @@ class ShotAssetResult(BaseModel):
     fallback_reason: Optional[str] = Field(default=None, description="Reason for modality fallback if applicable")
     source_type: Optional[str] = Field(default=None, description="Visual source type (e.g. RESEARCH_SOURCE, DOCUMENT, RENDERED)")
     source_url: Optional[str] = Field(default=None, description="Source provenance URL")
+    source_ref: Optional[str] = Field(default=None, description="Canonical source reference key")
     license_type: Optional[str] = Field(default=None, description="Asset license terms")
     attribution: Optional[str] = Field(default=None, description="Author or source attribution")
     acquisition_method: Optional[str] = Field(default=None, description="Acquisition service or renderer method")
@@ -298,10 +299,12 @@ class TimelineShot(BaseModel):
     overlays: List[OverlaySpec] = Field(default_factory=list, description="Overlays active during this shot")
     asset_source_type: Optional[str] = Field(default=None, description="Visual source type")
     asset_source_url: Optional[str] = Field(default=None, description="Provenance source URL")
+    asset_source_ref: Optional[str] = Field(default=None, description="Canonical source reference key")
     asset_license: Optional[str] = Field(default=None, description="Asset license terms")
     asset_attribution: Optional[str] = Field(default=None, description="Author or source attribution")
     asset_acquisition_method: Optional[str] = Field(default=None, description="Acquisition method or renderer")
     asset_is_synthetic: bool = Field(default=False, description="Whether asset is AI-generated synthetic media")
+    asset_evidence_claim_ids: List[str] = Field(default_factory=list, description="Linked verified claim IDs")
 
 
 

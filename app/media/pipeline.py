@@ -899,8 +899,10 @@ class MediaProductionPipeline:
                             "sha256": s.asset_sha256,
                             "source_type": getattr(s, "asset_source_type", None) or "RENDERED",
                             "source_url": getattr(s, "asset_source_url", None),
+                            "source_ref": getattr(s, "asset_source_ref", None),
                             "license_type": getattr(s, "asset_license", None),
                             "attribution": getattr(s, "asset_attribution", None),
+                            "evidence_claim_ids": list(getattr(s, "asset_evidence_claim_ids", []) or []),
                             "acquisition_method": getattr(s, "asset_acquisition_method", None) or "director",
                             "synthetic": getattr(s, "asset_is_synthetic", False),
                         }
