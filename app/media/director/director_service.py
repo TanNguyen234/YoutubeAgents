@@ -17,6 +17,7 @@ from app.media.director.modality_router import VisualModalityRouter
 from app.media.director.models import (
     ChannelCreativeProfile,
     ContentFormat,
+    CreativeFallbackPolicy,
     NarrativeBeat,
     ShotAssetResult,
     ShotSpec,
@@ -29,6 +30,7 @@ from app.media.director.models import (
     VisualModality,
     VisualizationDataMode,
 )
+from app.media.semantic_qa.models import VisualSemanticQAError, VisualSemanticQAMode
 from app.media.director.quality_evaluator import VisualShotEvaluator
 from app.media.director.storyboard_planner import StoryboardPlanner
 from app.media.gflow_provider import AssetGenerationAttempt
@@ -84,6 +86,18 @@ class AutoDirectorService:
             visual_factory=self.visual_factory,
         )
 
+        if getattr(self.acquisition_router, "semantic_judge", None) is None:
+            from app.media.semantic_qa.backend import AntigravityVisualBackend
+            from app.media.semantic_qa.evaluator import VisualSemanticEvaluator
+            from app.media.semantic_qa.judge import VisualCandidateJudge
+
+            if hasattr(self.backend, "evaluate_visual"):
+                v_backend = self.backend
+            else:
+                v_backend = AntigravityVisualBackend()
+            v_evaluator = VisualSemanticEvaluator(backend=v_backend)
+            self.acquisition_router.semantic_judge = VisualCandidateJudge(evaluator=v_evaluator)
+
         # Audit logs & QA tracking
         self.asset_attempts: List[AssetGenerationAttempt] = []
         self.shot_evaluations: Dict[str, VisualEvaluation] = {}
@@ -100,6 +114,15 @@ class AutoDirectorService:
                 self.planner.router.profile = profile
         if hasattr(self, "evaluator") and self.evaluator:
             self.evaluator.profile = profile
+        if hasattr(self, "acquisition_router") and self.acquisition_router:
+            mode_val = getattr(profile, "semantic_qa_mode", "ADVISORY")
+            if isinstance(mode_val, VisualSemanticQAMode):
+                self.acquisition_router.qa_mode = mode_val
+            elif isinstance(mode_val, str):
+                try:
+                    self.acquisition_router.qa_mode = VisualSemanticQAMode(mode_val.upper())
+                except Exception:
+                    self.acquisition_router.qa_mode = VisualSemanticQAMode.ADVISORY
 
     def plan_and_render_timeline(
         self,
@@ -568,8 +591,15 @@ class AutoDirectorService:
                     channel_name=channel_name,
                     dossier=dossier,
                     fact_report=fact_report,
+                    shot=shot,
                 )
                 selected = acq_res.selected_candidate
+                if not selected and "SEMANTIC_QA_REJECTED_ALL" in acq_res.failure_reasons:
+                    active_fallback = getattr(self.profile, "fallback_policy", CreativeFallbackPolicy.FAIL_CLOSED)
+                    if active_fallback != CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW:
+                        raise VisualSemanticQAError(
+                            f"Visual Semantic QA rejected all candidates for shot '{shot_id}'. FAIL_CLOSED active."
+                        )
                 if selected and selected.source_type != VisualSourceType.FALLBACK_CARD:
                     actual_mod = VisualModality.SCREEN_CAPTURE if selected.source_type in (VisualSourceType.LOCAL_WEB_APP, VisualSourceType.WEB_PAGE, VisualSourceType.RESEARCH_SOURCE) else VisualModality.DIAGRAM
                     self.asset_attempts.append(
@@ -599,6 +629,9 @@ class AutoDirectorService:
                         fallback_reason=fallback_reason,
                     )
             except Exception as e:
+                active_fallback = getattr(self.profile, "fallback_policy", CreativeFallbackPolicy.FAIL_CLOSED)
+                if isinstance(e, VisualSemanticQAError) and active_fallback != CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW:
+                    raise
                 logger.warning(f"Screen capture acquisition failed for {shot_id}: {e}")
 
             # Fallback to diagram
@@ -676,8 +709,15 @@ class AutoDirectorService:
                     channel_name=channel_name,
                     dossier=dossier,
                     fact_report=fact_report,
+                    shot=shot,
                 )
                 selected = acq_res.selected_candidate
+                if not selected and "SEMANTIC_QA_REJECTED_ALL" in acq_res.failure_reasons:
+                    active_fallback = getattr(self.profile, "fallback_policy", CreativeFallbackPolicy.FAIL_CLOSED)
+                    if active_fallback != CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW:
+                        raise VisualSemanticQAError(
+                            f"Visual Semantic QA rejected all candidates for shot '{shot_id}'. FAIL_CLOSED active."
+                        )
                 if selected and selected.source_type != VisualSourceType.FALLBACK_CARD:
                     provider_name = selected.acquisition_method
                     actual_mod = VisualModality.DOCUMENT_EVIDENCE if selected.source_type in (VisualSourceType.RESEARCH_SOURCE, VisualSourceType.DOCUMENT, VisualSourceType.WEB_PAGE) else VisualModality.DIAGRAM
@@ -708,6 +748,9 @@ class AutoDirectorService:
                         fallback_reason=fallback_reason,
                     )
             except Exception as e:
+                active_fallback = getattr(self.profile, "fallback_policy", CreativeFallbackPolicy.FAIL_CLOSED)
+                if isinstance(e, VisualSemanticQAError) and active_fallback != CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW:
+                    raise
                 logger.warning(f"Acquisition router evidence capture failed: {e}")
 
             # Fallback to EvidenceRenderer card

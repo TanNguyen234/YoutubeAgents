@@ -100,6 +100,7 @@ class VisualAcquisitionResult(BaseModel):
     selected_candidate_id: Optional[str] = Field(default=None, description="ID of winning selected candidate")
     actual_modality: Optional[VisualModality] = Field(default=None, description="Actual visual modality resolved after acquisition/fallback")
     failure_reasons: List[str] = Field(default_factory=list, description="Reasons for failures during acquisition")
+    semantic_audit: Dict[str, Any] = Field(default_factory=dict, description="Audit metadata from semantic QA candidate judging")
 
     @property
     def selected_candidate(self) -> Optional[VisualAssetCandidate]:

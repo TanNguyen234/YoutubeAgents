@@ -24,6 +24,12 @@ from app.media.director.models import (
     VisualIntent,
     VisualModality,
 )
+from app.media.semantic_qa.judge import VisualCandidateJudge
+from app.media.semantic_qa.models import (
+    VisualSemanticQAError,
+    VisualSemanticQAMode,
+    VisualSemanticVerdict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +139,8 @@ class VisualAcquisitionRouter:
         motion_renderer: Optional[any] = None,
         visual_factory: Optional[any] = None,
         ranker: Optional[CandidateRanker] = None,
+        semantic_judge: Optional[VisualCandidateJudge] = None,
+        qa_mode: VisualSemanticQAMode = VisualSemanticQAMode.ADVISORY,
     ):
         self.web_capture = web_capture or WebCaptureService()
         self.stock_provider = stock_provider or PexelsStockProvider()
@@ -142,6 +150,8 @@ class VisualAcquisitionRouter:
         self.motion_renderer = motion_renderer
         self.visual_factory = visual_factory
         self.ranker = ranker or CandidateRanker()
+        self.semantic_judge = semantic_judge
+        self.qa_mode = qa_mode
 
     def build_acquisition_request(
         self,
@@ -240,6 +250,8 @@ class VisualAcquisitionRouter:
         channel_name: str = "Tech Channel",
         dossier: Optional[ResearchDossier] = None,
         fact_report: Optional[FactCheckReport] = None,
+        shot: Optional[ShotSpec] = None,
+        qa_mode: Optional[VisualSemanticQAMode] = None,
     ) -> VisualAcquisitionResult:
         """Execute source-aware visual acquisition, candidate ranking, and fallback resolution."""
         output_dir = Path(output_dir)
@@ -474,22 +486,88 @@ class VisualAcquisitionRouter:
         # Rank candidates deterministically
         selected_id = None
         actual_modality = None
+        semantic_audit: Dict[str, Any] = {}
+
         if candidates:
             ranked = self.ranker.rank_candidates(candidates, request)
-            if ranked:
-                winner, winning_score = ranked[0]
-                selected_id = winner.candidate_id
-                self.ranker.record_selection(winner, request.modality)
-                if winner.source_type in (VisualSourceType.RESEARCH_SOURCE, VisualSourceType.DOCUMENT, VisualSourceType.WEB_PAGE):
-                    actual_modality = VisualModality.DOCUMENT_EVIDENCE
-                elif winner.source_type == VisualSourceType.LOCAL_WEB_APP:
-                    actual_modality = VisualModality.SCREEN_CAPTURE
-                elif winner.source_type == VisualSourceType.RENDERED:
-                    actual_modality = VisualModality.DIAGRAM
-                elif winner.source_type == VisualSourceType.FALLBACK_CARD:
-                    actual_modality = VisualModality.STATIC_CARD
-                else:
-                    actual_modality = request.modality
+            det_scores = {c.candidate_id: score for c, score in ranked}
+            active_qa_mode = qa_mode or self.qa_mode
+
+            if active_qa_mode == VisualSemanticQAMode.DISABLED or not self.semantic_judge:
+                if ranked:
+                    winner, winning_score = ranked[0]
+                    selected_id = winner.candidate_id
+                    self.ranker.record_selection(winner, request.modality)
+            else:
+                try:
+                    judging_shot = shot
+                    if not judging_shot:
+                        judging_shot = ShotSpec(
+                            shot_id=request.shot_id,
+                            beat_id=f"beat_{request.shot_id}",
+                            duration_seconds=request.duration_seconds or 3.0,
+                            visual_modality=request.modality,
+                            visual_intent=request.visual_intent,
+                            subject=request.subject,
+                            action=request.action,
+                            environment=request.environment,
+                            narration_segment=request.subject or "",
+                            evidence_binding=request.evidence_binding,
+                        )
+
+                    judge_res = self.semantic_judge.judge_candidates(
+                        candidates=[c for c, _ in ranked],
+                        request=request,
+                        shot=judging_shot,
+                        deterministic_scores=det_scores,
+                    )
+                    semantic_audit = judge_res.audit_metadata
+
+                    if judge_res.selected_candidate_id:
+                        selected_id = judge_res.selected_candidate_id
+                        winner = judge_res.winning_candidate
+                        self.ranker.record_selection(winner, request.modality)
+                    else:
+                        failures.extend(judge_res.failure_reasons)
+                        if active_qa_mode == VisualSemanticQAMode.REQUIRED:
+                            selected_id = None
+                        elif active_qa_mode == VisualSemanticQAMode.ADVISORY:
+                            logger.warning(
+                                "SEMANTIC_QA_UNAVAILABLE: All candidates rejected by semantic QA, advisory fallback to deterministic winner"
+                            )
+                            if ranked:
+                                winner, winning_score = ranked[0]
+                                selected_id = winner.candidate_id
+                                self.ranker.record_selection(winner, request.modality)
+                except Exception as e:
+                    if active_qa_mode == VisualSemanticQAMode.REQUIRED:
+                        failures.append(f"SEMANTIC_QA_FAILED: {e}")
+                        raise VisualSemanticQAError(f"Visual Semantic QA failed in REQUIRED mode: {e}") from e
+                    else:
+                        logger.warning("SEMANTIC_QA_UNAVAILABLE: %s", e)
+                        failures.append(f"SEMANTIC_QA_UNAVAILABLE: {e}")
+                        if ranked:
+                            winner, winning_score = ranked[0]
+                            selected_id = winner.candidate_id
+                            self.ranker.record_selection(winner, request.modality)
+
+            if selected_id:
+                winner = None
+                for c in candidates:
+                    if c.candidate_id == selected_id:
+                        winner = c
+                        break
+                if winner:
+                    if winner.source_type in (VisualSourceType.RESEARCH_SOURCE, VisualSourceType.DOCUMENT, VisualSourceType.WEB_PAGE):
+                        actual_modality = VisualModality.DOCUMENT_EVIDENCE
+                    elif winner.source_type == VisualSourceType.LOCAL_WEB_APP:
+                        actual_modality = VisualModality.SCREEN_CAPTURE
+                    elif winner.source_type == VisualSourceType.RENDERED:
+                        actual_modality = VisualModality.DIAGRAM
+                    elif winner.source_type == VisualSourceType.FALLBACK_CARD:
+                        actual_modality = VisualModality.STATIC_CARD
+                    else:
+                        actual_modality = request.modality
 
         return VisualAcquisitionResult(
             request=request,
@@ -497,6 +575,7 @@ class VisualAcquisitionRouter:
             selected_candidate_id=selected_id,
             actual_modality=actual_modality,
             failure_reasons=failures,
+            semantic_audit=semantic_audit,
         )
 
     def to_provenance(
