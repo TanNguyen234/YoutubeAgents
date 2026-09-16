@@ -379,3 +379,51 @@ def test_evidence_and_local_browser_context_blocks_service_workers(monkeypatch, 
     assert len(recorded_context_kwargs) >= 2
     local_kwargs = recorded_context_kwargs[1]
     assert local_kwargs.get("service_workers") == "block"
+
+
+def test_evidence_rejects_rfc6598_lower_bound():
+    """Verify that RFC 6598 lower bound 100.64.0.1 is rejected as a private/shared address."""
+    from app.media.acquisition.web_capture import validate_capture_url, _is_private_ip
+
+    assert _is_private_ip("100.64.0.1") is True
+    valid, reason = validate_capture_url("http://100.64.0.1/doc", mode="EVIDENCE")
+    assert not valid
+    assert "PRIVATE_IP_BLOCKED" in reason
+
+
+def test_evidence_rejects_rfc6598_upper_bound():
+    """Verify that RFC 6598 upper bound 100.127.255.254 is rejected as a private/shared address."""
+    from app.media.acquisition.web_capture import validate_capture_url, _is_private_ip
+
+    assert _is_private_ip("100.127.255.254") is True
+    valid, reason = validate_capture_url("http://100.127.255.254/doc", mode="EVIDENCE")
+    assert not valid
+    assert "PRIVATE_IP_BLOCKED" in reason
+
+
+def test_route_handler_blocks_rfc6598():
+    """Verify that context route handler blocks subresources and navigations to RFC 6598 addresses."""
+    from unittest.mock import MagicMock
+    from app.media.acquisition.web_capture import WebCaptureService, _is_private_ip
+
+    service = WebCaptureService()
+    handler = service._create_route_handler()
+
+    # Shared CGNAT targets
+    shared_targets = [
+        "http://100.64.0.1/subresource.png",
+        "http://100.127.255.254/api/data",
+    ]
+    for target in shared_targets:
+        route = MagicMock()
+        route.request.url = target
+        handler(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+        route.continue_.assert_not_called()
+
+    # Nearby non-shared public addresses must NOT be blocked by RFC 6598 check
+    # 100.63.255.255 is just below 100.64.0.0/10
+    assert _is_private_ip("100.63.255.255") is False
+    # 100.128.0.1 is just above 100.127.255.255
+    assert _is_private_ip("100.128.0.1") is False
+

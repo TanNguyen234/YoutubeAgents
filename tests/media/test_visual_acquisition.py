@@ -1161,3 +1161,262 @@ def test_remote_screen_capture_without_dossier_is_rejected(tmp_path):
     res = router.acquire_visual(req, output_dir=tmp_path, dossier=None)
     assert any("UNTRUSTED_VISUAL_SOURCE" in err for err in res.failure_reasons)
 
+
+def test_unknown_explicit_source_ref_is_rejected_even_if_url_matches_dossier(tmp_path):
+    """Verify that an invalid explicit source_ref fails closed even if binding.source_url matches a dossier source."""
+    from app.domain.models import ResearchDossier, ResearchSource
+    from app.media.acquisition.models import VisualAcquisitionRequest
+    from app.media.acquisition.router import VisualAcquisitionRouter, resolve_canonical_research_source
+    from app.media.director.models import EvidenceBinding, VisualIntent, VisualModality
+
+    canonical_url = "https://docs.example.com/sqlite"
+    src = ResearchSource(
+        id="src_sqlite",
+        title="SQLite Docs",
+        url=canonical_url,
+        content_sha256="sha_sqlite",
+    )
+    dossier = ResearchDossier(id="d1", topic_id="t1", summary="Test", sources=[src])
+
+    # binding has unknown source_ref="unknown_src_ref", but valid source_url=canonical_url
+    binding = EvidenceBinding(
+        claim_id="c1",
+        source_ref="unknown_src_ref",
+        source_title="SQLite Docs",
+        source_url=canonical_url,
+        claim_text="WAL",
+        claim_verified=True,
+    )
+
+    # Must fail resolution directly
+    resolved = resolve_canonical_research_source(binding=binding, dossier=dossier)
+    assert resolved is None
+
+    router = VisualAcquisitionRouter()
+    req = VisualAcquisitionRequest(
+        project_id="p1",
+        shot_id="s1",
+        modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE,
+        subject="SQLite WAL",
+        target_url=canonical_url,
+        evidence_binding=binding,
+    )
+
+    res = router.acquire_visual(req, output_dir=tmp_path, dossier=dossier)
+    assert any("UNTRUSTED_VISUAL_SOURCE" in err for err in res.failure_reasons)
+
+
+def test_unknown_explicit_source_ref_does_not_fall_back_to_shot_source_refs(tmp_path):
+    """Verify that an invalid explicit source_ref does not fall back to shot.source_refs to repair itself."""
+    from app.domain.models import ResearchDossier, ResearchSource
+    from app.media.acquisition.models import VisualAcquisitionRequest
+    from app.media.acquisition.router import VisualAcquisitionRouter, resolve_canonical_research_source
+    from app.media.director.models import EvidenceBinding, VisualIntent, VisualModality
+
+    src = ResearchSource(
+        id="src_valid",
+        title="Valid Source",
+        url="https://docs.example.com/sqlite",
+        content_sha256="sha_sqlite",
+    )
+    dossier = ResearchDossier(id="d1", topic_id="t1", summary="Test", sources=[src])
+
+    binding = EvidenceBinding(
+        claim_id="c1",
+        source_ref="invalid_explicit_ref",
+        source_title="Valid Source",
+        source_url="https://docs.example.com/sqlite",
+        claim_text="WAL",
+        claim_verified=True,
+    )
+
+    # Must not fall back to source_refs=["src_valid"]
+    resolved = resolve_canonical_research_source(binding=binding, source_refs=["src_valid"], dossier=dossier)
+    assert resolved is None
+
+    router = VisualAcquisitionRouter()
+    req = VisualAcquisitionRequest(
+        project_id="p1",
+        shot_id="s1",
+        modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE,
+        subject="SQLite WAL",
+        target_url="https://docs.example.com/sqlite",
+        evidence_binding=binding,
+        source_refs=["src_valid"],
+    )
+
+    res = router.acquire_visual(req, output_dir=tmp_path, dossier=dossier)
+    assert any("UNTRUSTED_VISUAL_SOURCE" in err for err in res.failure_reasons)
+
+
+def test_resolved_source_ref_with_mismatched_source_url_is_rejected(tmp_path):
+    """Verify that if source_ref resolves to A, but binding.source_url is outside CANONICAL_URL_SCOPE(A), it is rejected."""
+    from app.domain.models import ResearchDossier, ResearchSource
+    from app.media.acquisition.models import VisualAcquisitionRequest
+    from app.media.acquisition.router import VisualAcquisitionRouter, resolve_canonical_research_source
+    from app.media.director.models import EvidenceBinding, VisualIntent, VisualModality
+
+    src = ResearchSource(
+        id="src_sqlite",
+        title="SQLite Docs",
+        url="https://docs.example.com/sqlite",
+        content_sha256="sha_sqlite",
+    )
+    dossier = ResearchDossier(id="d1", topic_id="t1", summary="Test", sources=[src])
+
+    binding = EvidenceBinding(
+        claim_id="c1",
+        source_ref="src_sqlite",
+        source_title="SQLite Docs",
+        source_url="https://evil.example/proof",
+        claim_text="Evil claim",
+        claim_verified=True,
+    )
+
+    resolved = resolve_canonical_research_source(binding=binding, dossier=dossier)
+    assert resolved is None
+
+    router = VisualAcquisitionRouter()
+    req = VisualAcquisitionRequest(
+        project_id="p1",
+        shot_id="s1",
+        modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE,
+        subject="Proof",
+        target_url="https://docs.example.com/sqlite",
+        evidence_binding=binding,
+    )
+
+    res = router.acquire_visual(req, output_dir=tmp_path, dossier=dossier)
+    assert any("UNTRUSTED_VISUAL_SOURCE" in err for err in res.failure_reasons)
+
+
+def test_resolved_source_ref_with_matching_canonical_url_passes(tmp_path, monkeypatch):
+    """Verify that resolved source_ref with matching canonical source_url passes validation."""
+    from app.domain.models import ResearchDossier, ResearchSource
+    from app.media.acquisition.models import VisualAcquisitionRequest, VisualAssetCandidate
+    from app.media.acquisition.router import VisualAcquisitionRouter, resolve_canonical_research_source
+    from app.media.director.models import EvidenceBinding, VisualIntent, VisualModality
+
+    canonical_url = "https://docs.example.com/sqlite"
+    src = ResearchSource(
+        id="src_sqlite",
+        title="SQLite Docs",
+        url=canonical_url,
+        content_sha256="sha_sqlite",
+    )
+    dossier = ResearchDossier(id="d1", topic_id="t1", summary="Test", sources=[src])
+
+    binding = EvidenceBinding(
+        claim_id="c1",
+        source_ref="src_sqlite",
+        source_title="SQLite Docs",
+        source_url=canonical_url,
+        claim_text="WAL",
+        claim_verified=True,
+    )
+
+    resolved = resolve_canonical_research_source(binding=binding, dossier=dossier)
+    assert resolved is not None
+    assert resolved.id == "src_sqlite"
+
+    router = VisualAcquisitionRouter()
+    req = VisualAcquisitionRequest(
+        project_id="p1",
+        shot_id="s1",
+        modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE,
+        subject="SQLite WAL",
+        target_url=canonical_url,
+        evidence_binding=binding,
+    )
+
+    monkeypatch.setattr(
+        router.web_capture,
+        "capture_evidence",
+        lambda url, output_path, **kw: (
+            VisualAssetCandidate(
+                candidate_id="c_match",
+                source_type=VisualSourceType.RESEARCH_SOURCE,
+                file_path=str(output_path),
+                content_sha256="fake_sha",
+                width=1080,
+                height=1920,
+                acquisition_method="playwright_web_evidence",
+            ),
+            [],
+        ),
+    )
+
+    res = router.acquire_visual(req, output_dir=tmp_path, dossier=dossier)
+    assert not any("UNTRUSTED_VISUAL_SOURCE" in err for err in res.failure_reasons)
+    assert res.selected_candidate is not None
+    assert res.selected_candidate.source_type == VisualSourceType.RESEARCH_SOURCE
+
+
+def test_resolved_source_ref_with_allowed_descendant_url_passes(tmp_path, monkeypatch):
+    """Verify that resolved source_ref with permitted descendant path in source_url passes validation."""
+    from app.domain.models import ResearchDossier, ResearchSource
+    from app.media.acquisition.models import VisualAcquisitionRequest, VisualAssetCandidate
+    from app.media.acquisition.router import VisualAcquisitionRouter, resolve_canonical_research_source
+    from app.media.director.models import EvidenceBinding, VisualIntent, VisualModality
+
+    canonical_url = "https://docs.example.com/sqlite"
+    descendant_url = "https://docs.example.com/sqlite/wal"
+    src = ResearchSource(
+        id="src_sqlite",
+        title="SQLite Docs",
+        url=canonical_url,
+        content_sha256="sha_sqlite",
+    )
+    dossier = ResearchDossier(id="d1", topic_id="t1", summary="Test", sources=[src])
+
+    binding = EvidenceBinding(
+        claim_id="c1",
+        source_ref="src_sqlite",
+        source_title="SQLite Docs",
+        source_url=descendant_url,
+        claim_text="WAL",
+        claim_verified=True,
+    )
+
+    resolved = resolve_canonical_research_source(binding=binding, dossier=dossier)
+    assert resolved is not None
+    assert resolved.id == "src_sqlite"
+
+    router = VisualAcquisitionRouter()
+    req = VisualAcquisitionRequest(
+        project_id="p1",
+        shot_id="s1",
+        modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE,
+        subject="SQLite WAL",
+        target_url=descendant_url,
+        evidence_binding=binding,
+    )
+
+    monkeypatch.setattr(
+        router.web_capture,
+        "capture_evidence",
+        lambda url, output_path, **kw: (
+            VisualAssetCandidate(
+                candidate_id="c_desc",
+                source_type=VisualSourceType.RESEARCH_SOURCE,
+                file_path=str(output_path),
+                content_sha256="fake_sha",
+                width=1080,
+                height=1920,
+                acquisition_method="playwright_web_evidence",
+            ),
+            [],
+        ),
+    )
+
+    res = router.acquire_visual(req, output_dir=tmp_path, dossier=dossier)
+    assert not any("UNTRUSTED_VISUAL_SOURCE" in err for err in res.failure_reasons)
+    assert res.selected_candidate is not None
+    assert res.selected_candidate.source_type == VisualSourceType.RESEARCH_SOURCE
+
+

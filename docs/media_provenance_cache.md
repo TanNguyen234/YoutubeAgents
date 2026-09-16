@@ -23,7 +23,7 @@ When an evidence shot requires document evidence (`VisualModality.DOCUMENT_EVIDE
 - `source_type`: Typed origin (`RESEARCH_SOURCE`, `FALLBACK_CARD`, `STOCK_MEDIA`, `RENDERED`, `LOCAL_WEB_APP`).
 - `source_url`: Real resolved URL of the captured or cited source.
 - `source_ref`: Dossier source reference linking back to verified research evidence.
-- `license_type`: Real verified license (e.g. `PEXELS`, or `None` for fair-use citation cards; never fabricated).
+- `license_type`: Real verified license (e.g. `PEXELS`, or `None` for citation/summary cards; never fabricated).
 - `attribution`: Real author/publisher attribution string.
 - `evidence_claim_ids`: List of verified claim IDs grounded by this asset.
 - `acquisition_method`: Mechanism used (`playwright_web_evidence`, `evidence_summary_card`, `diagram_renderer`, `playwright_local_ui`, etc.).
@@ -46,8 +46,8 @@ To prevent synthetic or misleading provenance claims:
 Web capture uses headless Playwright with strict network boundary constraints:
 - **Service Worker Blocking**: Playwright browser contexts are created with `service_workers="block"`, preventing service workers from bypassing or interfering with context-level routing security checks.
 - **Context-Level Routing**: Network routing is attached at the browser context boundary (`context.route("**/*", ...)`), ensuring all pages, iframes, and popups are intercepted.
-- **Strict SSRF / Private IP Defense**: All requests targeting private, link-local, loopback, or cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`, `127.0.0.1`, `[::1]`, `10.0.0.0/8`, `192.168.0.0/16`, `172.16.0.0/12`) are aborted with `blockedbyclient`.
-- **No Initial Navigation Exemption**: Route validation evaluates the destination host at request time, mitigating DNS rebinding and TOCTOU attacks.
+- **Strict SSRF / Private & Shared IP Defense**: All requests targeting private, link-local, loopback, RFC 6598 shared address space (`100.64.0.0/10`), or cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`, `127.0.0.1`, `[::1]`, `10.0.0.0/8`, `192.168.0.0/16`, `172.16.0.0/12`) are aborted with `blockedbyclient`.
+- **Context-Time Revalidation**: Context-time hostname/IP revalidation plus private/shared-address blocking mitigates DNS-rebinding and TOCTOU attempts.
 - **Popup Neutralization**: Any unexpected popups or secondary pages opened by target sites are terminated immediately via `context.on("page", ...)`.
 - **Download Cancellation**: Unsolicited file downloads are cancelled automatically (`accept_downloads=False`).
 

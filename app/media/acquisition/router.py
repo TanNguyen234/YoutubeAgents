@@ -35,13 +35,22 @@ def resolve_canonical_research_source(
 ) -> Optional[Any]:
     """Resolve an authorized canonical ResearchSource from ResearchDossier.
 
-    Resolution priority:
-    1. binding.source_ref exact ResearchSource id or source_id
-    2. shot / request source_refs exact ResearchSource id or source_id
-    3. binding.source_url exact canonical ResearchSource URL (or final_url)
+    Strict rules:
+    1. If EvidenceBinding.source_ref is present:
+       - It MUST resolve to ResearchDossier.sources by exact ResearchSource.id or source_id.
+       - If it does not resolve: FAIL (return None). Do NOT fall through to shot.source_refs or binding.source_url!
+       - If it resolves to source A and binding.source_url is also present:
+         binding.source_url MUST be within CANONICAL_URL_SCOPE(A).
+         If not: FAIL (return None). Do NOT silently replace inconsistent source_url with A.url.
+    2. If EvidenceBinding.source_ref is absent:
+       - Fall back to shot / request source_refs exact id or source_id match.
+       - If resolved, and binding.source_url is present, verify consistency with canonical scope.
+    3. If source_ref and source_refs are absent:
+       - Only allow binding.source_url resolution when URL matches an existing canonical
+         ResearchSource inside ResearchDossier (exact match or within CANONICAL_URL_SCOPE).
+       - Never creates authority; only matches an already-existing canonical source.
 
-    Returns None if dossier is missing, empty, or no source matches.
-    Never creates or synthesizes a canonical source from unverified binding URLs.
+    Returns None if dossier is missing, empty, or no source matches / consistency fails.
     """
     if not dossier or not getattr(dossier, "sources", None):
         return None
@@ -59,28 +68,53 @@ def resolve_canonical_research_source(
             return True
         return False
 
-    # 1. binding.source_ref exact id / source_id
-    if binding and getattr(binding, "source_ref", None):
-        b_ref = binding.source_ref
+    has_explicit_source_ref = bool(
+        binding and getattr(binding, "source_ref", None) and str(binding.source_ref).strip()
+    )
+
+    # 1. Strict source_ref semantics: if present, MUST resolve to a source in dossier
+    if has_explicit_source_ref:
+        b_ref = str(binding.source_ref).strip()
+        matched_source = None
         for s in sources:
             if _matches_id(s, b_ref):
-                return s
+                matched_source = s
+                break
 
-    # 2. source_refs list exact id / source_id
+        if not matched_source:
+            # Do NOT fall through to shot.source_refs or binding.source_url!
+            return None
+
+        # Source_ref + source_url consistency check:
+        # If source_ref resolves to ResearchSource A and binding.source_url is also present:
+        # source_url MUST be within CANONICAL_URL_SCOPE(A).
+        b_url = getattr(binding, "source_url", None)
+        if b_url and str(b_url).strip():
+            s_url = getattr(matched_source, "url", None) or getattr(matched_source, "final_url", None)
+            if not s_url or not is_within_canonical_url_scope(str(b_url).strip(), str(s_url).strip()):
+                return None
+
+        return matched_source
+
+    # 2. source_refs fallback: ONLY when EvidenceBinding.source_ref is absent
     if source_refs:
         for s_ref in source_refs:
             for s in sources:
                 if _matches_id(s, s_ref):
+                    b_url = getattr(binding, "source_url", None) if binding else None
+                    if b_url and str(b_url).strip():
+                        s_url = getattr(s, "url", None) or getattr(s, "final_url", None)
+                        if not s_url or not is_within_canonical_url_scope(str(b_url).strip(), str(s_url).strip()):
+                            continue
                     return s
 
-    # 3. binding.source_url exact canonical ResearchSource URL
+    # 3. URL fallback: ONLY when source_ref is absent AND URL matches existing canonical ResearchSource
     if binding and getattr(binding, "source_url", None):
-        b_url = (binding.source_url or "").strip().rstrip("/").lower()
+        b_url = (binding.source_url or "").strip()
         if b_url:
             for s in sources:
-                s_url = (getattr(s, "url", None) or "").strip().rstrip("/").lower()
-                s_final = (getattr(s, "final_url", None) or "").strip().rstrip("/").lower()
-                if (s_url and s_url == b_url) or (s_final and s_final == b_url):
+                s_url = (getattr(s, "url", None) or getattr(s, "final_url", None) or "").strip()
+                if s_url and is_within_canonical_url_scope(b_url, s_url):
                     return s
 
     return None
@@ -149,8 +183,11 @@ class VisualAcquisitionRouter:
             if canonical_source:
                 canonical_url = getattr(canonical_source, "url", None) or getattr(canonical_source, "final_url", None)
                 adv_url = shot.evidence_binding.source_url if shot.evidence_binding else None
-                if adv_url and is_within_canonical_url_scope(adv_url, canonical_url):
-                    target_url = adv_url
+                if adv_url:
+                    if is_within_canonical_url_scope(adv_url, canonical_url):
+                        target_url = adv_url
+                    else:
+                        target_url = None
                 else:
                     target_url = canonical_url
             else:
@@ -230,13 +267,19 @@ class VisualAcquisitionRouter:
                 )
             else:
                 canonical_url = getattr(canonical_source, "url", None) or getattr(canonical_source, "final_url", None)
+                if binding and getattr(binding, "source_url", None):
+                    if not is_within_canonical_url_scope(binding.source_url, canonical_url):
+                        failures.append(
+                            f"UNTRUSTED_VISUAL_SOURCE: UNTRUSTED_SOURCE_URL: EvidenceBinding.source_url '{binding.source_url}' "
+                            f"is outside CANONICAL_URL_SCOPE for resolved canonical source '{canonical_url}'"
+                        )
                 candidate_target = request.target_url or (binding.source_url if binding else None) or canonical_url
                 if not is_within_canonical_url_scope(candidate_target, canonical_url):
                     failures.append(
                         f"UNTRUSTED_VISUAL_SOURCE: UNTRUSTED_SOURCE_URL: Target URL '{candidate_target}' "
                         f"is outside CANONICAL_URL_SCOPE for '{canonical_url}'"
                     )
-                else:
+                elif not failures:
                     target_url = candidate_target
 
             trusted_urls = [s.url for s in (dossier.sources if dossier else []) if getattr(s, "url", None)]

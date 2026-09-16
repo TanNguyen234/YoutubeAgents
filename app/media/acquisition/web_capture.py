@@ -43,8 +43,11 @@ def is_chromium_available() -> bool:
         return False
 
 
+SHARED_IPV4_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
+
 def _is_private_ip(hostname: str) -> bool:
-    """Check whether a hostname or IP string resolves to a private/loopback/link-local address."""
+    """Check whether a hostname or IP string resolves to a private/loopback/link-local/shared address."""
     clean_host = hostname.strip().lower()
     clean_ip_str = clean_host.strip("[]")
     if clean_ip_str in ("localhost", "0.0.0.0", "127.0.0.1", "::1", "169.254.169.254") or clean_host in ("localhost", "0.0.0.0", "127.0.0.1", "::1"):
@@ -52,14 +55,22 @@ def _is_private_ip(hostname: str) -> bool:
     if clean_host in ("metadata.google.internal", "metadata.local", "instance-data", "169.254.169.254"):
         return True
 
+    def _ip_blocked(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_unspecified or addr.is_reserved:
+            return True
+        if isinstance(addr, ipaddress.IPv4Address) and addr in SHARED_IPV4_NETWORK:
+            return True
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+            mapped = addr.ipv4_mapped
+            if mapped.is_private or mapped.is_loopback or mapped.is_link_local or mapped in SHARED_IPV4_NETWORK:
+                return True
+        return False
+
     # Check if host is direct IP address (IPv4 or IPv6)
     try:
         ip = ipaddress.ip_address(clean_ip_str)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_reserved:
+        if _ip_blocked(ip):
             return True
-        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-            if ip.ipv4_mapped.is_private or ip.ipv4_mapped.is_loopback or ip.ipv4_mapped.is_link_local:
-                return True
     except ValueError:
         pass
 
@@ -69,11 +80,8 @@ def _is_private_ip(hostname: str) -> bool:
         for addrinfo in addrinfos:
             sock_addr = addrinfo[4][0]
             ip = ipaddress.ip_address(sock_addr.strip("[]"))
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_reserved:
+            if _ip_blocked(ip):
                 return True
-            if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-                if ip.ipv4_mapped.is_private or ip.ipv4_mapped.is_loopback or ip.ipv4_mapped.is_link_local:
-                    return True
     except Exception:
         # If DNS resolution fails, allow downstream network handling or block if suspicious
         if clean_host.endswith(".internal") or clean_host.endswith(".local") or clean_host.endswith(".onion"):
@@ -611,7 +619,7 @@ class WebCaptureService:
                 source_type=VisualSourceType.LOCAL_WEB_APP,
                 file_path=comp_path,
                 source_url=url,
-                license_type="Local Demonstration",
+                license_type=None,
                 attribution="Local UI",
                 content_sha256=comp_sha,
                 width=1080,
