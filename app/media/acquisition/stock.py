@@ -189,7 +189,7 @@ class PexelsStockProvider:
                 source_type=VisualSourceType.STOCK_MEDIA,
                 file_path=str(output_path),
                 source_url=asset_metadata.get("url"),
-                license_type=asset_metadata.get("license", "Pexels License"),
+                license_type=asset_metadata.get("provider_license") or "PEXELS",
                 attribution=f"Video by {asset_metadata.get('user', 'Creator')} via Pexels",
                 content_sha256=sha,
                 width=asset_metadata.get("width"),
@@ -197,6 +197,12 @@ class PexelsStockProvider:
                 duration_seconds=asset_metadata.get("duration"),
                 acquisition_method="pexels_stock_video",
                 is_synthetic=False,
+                raw_metadata={
+                    "provider": "pexels",
+                    "provider_asset_id": asset_metadata.get("id"),
+                    "source_url": asset_metadata.get("url"),
+                    "creator": asset_metadata.get("user"),
+                },
             )
         except Exception:
             return None

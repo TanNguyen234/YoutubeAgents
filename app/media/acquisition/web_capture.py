@@ -120,18 +120,14 @@ def validate_capture_url(
     # EVIDENCE mode:
     # 2. If trusted_urls list is provided, target URL must originate from a verified source
     if trusted_urls is not None:
-        normalized_target = raw_url.lower()
+        normalized_target = raw_url.lower().rstrip("/")
         matched = False
         for t_url in trusted_urls:
-            t_clean = (t_url or "").strip().lower()
+            t_clean = (t_url or "").strip().lower().rstrip("/")
             if not t_clean:
                 continue
-            # Match exact, or target url starts with trusted prefix, or matching domains
-            t_parsed = urlparse(t_clean)
-            if t_parsed.hostname and t_parsed.hostname == hostname_lower:
-                matched = True
-                break
-            if normalized_target.startswith(t_clean):
+            # Match exact canonical URL or explicit sub-path prefix (do not allow arbitrary same-domain paths)
+            if normalized_target == t_clean or normalized_target.startswith(t_clean + "/"):
                 matched = True
                 break
         if not matched:
@@ -453,7 +449,7 @@ class WebCaptureService:
                 candidate_id=f"cand_{output_path.stem}",
                 source_type=VisualSourceType.RESEARCH_SOURCE,
                 file_path=comp_path,
-                source_url=url,
+                source_url=final_url or url,
                 license_type=None,
                 attribution=domain,
                 content_sha256=comp_sha,
@@ -461,6 +457,7 @@ class WebCaptureService:
                 height=1920,
                 acquisition_method="playwright_web_evidence",
                 is_synthetic=False,
+                raw_metadata={"requested_source_url": url},
             )
             return candidate, []
 

@@ -78,12 +78,14 @@ def test_web_capture_url_must_resolve_from_trusted_source():
         "https://docs.python.org/3/library/sqlite3.html",
     ]
 
-    # Matching domain or prefix passes
+    # Matching exact canonical URL passes
     valid_exact, _ = validate_capture_url("https://sqlite.org/wal.html", mode="EVIDENCE", trusted_urls=trusted)
     assert valid_exact
 
-    valid_subpage, _ = validate_capture_url("https://sqlite.org/pragma.html", mode="EVIDENCE", trusted_urls=trusted)
-    assert valid_subpage
+    # Same host with different path fails (no domain-only authority)
+    valid_subpage, reason = validate_capture_url("https://sqlite.org/pragma.html", mode="EVIDENCE", trusted_urls=trusted)
+    assert not valid_subpage
+    assert "UNTRUSTED_SOURCE_URL" in reason
 
     # Untrusted domain fails
     untrusted, reason = validate_capture_url("https://malicious-site.com/exploit", mode="EVIDENCE", trusted_urls=trusted)

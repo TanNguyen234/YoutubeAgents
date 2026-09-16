@@ -2,10 +2,13 @@
 
 import hashlib
 import inspect
+import logging
 from pathlib import Path
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from app.core.backend import ReasoningBackend
 from app.domain.models import FactCheckReport, ResearchDossier, Script
@@ -725,7 +728,7 @@ class AutoDirectorService:
                     AssetGenerationAttempt(
                         shot_id=shot_id,
                         provider="evidence_renderer",
-                        modality=modality.value,
+                        modality=VisualModality.STATIC_CARD.value,
                         success=True,
                         output_path=str(p),
                         latency_ms=int((time.time() - t0) * 1000),
@@ -735,16 +738,17 @@ class AutoDirectorService:
                     path=str(p),
                     sha256=h,
                     requested_modality=requested_modality,
-                    actual_modality=VisualModality.DOCUMENT_EVIDENCE,
+                    actual_modality=VisualModality.STATIC_CARD,
                     provider="evidence_renderer",
-                    source_type="DOCUMENT",
+                    source_type="FALLBACK_CARD",
                     source_url=binding.source_url,
-                    license_type="Document Citation",
+                    source_ref=binding.source_ref,
+                    license_type=None,
                     attribution=binding.source_title,
-                    acquisition_method="evidence_renderer_card",
+                    acquisition_method="evidence_summary_card",
                     is_synthetic=False,
                     evidence_claim_ids=[binding.claim_id] if binding.claim_id else [],
-                    fallback_reason=fallback_reason,
+                    fallback_reason="Browser document capture unavailable or failed; fell back to evidence summary card",
                 )
             except Exception as e:
                 self.asset_attempts.append(

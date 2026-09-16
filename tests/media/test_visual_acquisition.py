@@ -523,3 +523,323 @@ def test_evidence_excerpt_normalized_match_succeeds(tmp_path, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_evidence_renderer_card_is_not_document_evidence(tmp_path):
+    """Verify that programmatically rendered citation cards return STATIC_CARD, not DOCUMENT_EVIDENCE."""
+    from unittest.mock import MagicMock
+    from app.media.director.director_service import AutoDirectorService
+    from app.media.director.models import ShotSpec, VisualModality, EvidenceBinding
+
+    out_dir = tmp_path / "shots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    director = AutoDirectorService()
+    director.acquisition_router.acquire_visual = MagicMock(side_effect=Exception("Browser capture failed"))
+
+    shot = ShotSpec(
+        shot_id="s_fallback_test",
+        beat_id="b_01",
+        duration_seconds=3.0,
+        scene_index=0,
+        narration_segment="According to documentation, readers do not block writers.",
+        visual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        evidence_binding=EvidenceBinding(
+            claim_id="c_01",
+            source_ref="src_doc",
+            source_title="Doc Title",
+            source_url="https://sqlite.org/wal.html",
+            claim_text="Readers do not block writers.",
+            claim_verified=True,
+        ),
+    )
+
+    res = director._generate_shot_asset(shot=shot, shot_index=0, output_dir=out_dir, script_title="Test Script", channel_name="Test")
+    assert res.actual_modality == VisualModality.STATIC_CARD
+    assert res.actual_modality != VisualModality.DOCUMENT_EVIDENCE
+
+
+def test_document_capture_failure_changes_actual_modality(tmp_path):
+    """Verify that when browser document capture fails, actual_modality changes from DOCUMENT_EVIDENCE."""
+    from unittest.mock import MagicMock
+    from app.media.director.director_service import AutoDirectorService
+    from app.media.director.models import ShotSpec, VisualModality, EvidenceBinding
+
+    out_dir = tmp_path / "shots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    director = AutoDirectorService()
+    director.acquisition_router.acquire_visual = MagicMock(side_effect=Exception("Network error"))
+
+    shot = ShotSpec(
+        shot_id="s_change_mod",
+        beat_id="b_01",
+        duration_seconds=3.0,
+        scene_index=0,
+        narration_segment="SQLite WAL mode",
+        visual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        evidence_binding=EvidenceBinding(
+            claim_id="c_01",
+            source_ref="src_doc",
+            source_title="SQLite WAL",
+            source_url="https://sqlite.org/wal.html",
+            claim_text="WAL",
+            claim_verified=True,
+        ),
+    )
+
+    res = director._generate_shot_asset(shot=shot, shot_index=0, output_dir=out_dir, script_title="Test Script", channel_name="Test")
+    assert res.requested_modality == VisualModality.DOCUMENT_EVIDENCE
+    assert res.actual_modality != VisualModality.DOCUMENT_EVIDENCE
+    assert res.actual_modality in (VisualModality.DIAGRAM, VisualModality.STATIC_CARD)
+
+
+def test_document_fallback_does_not_claim_document_source_type(tmp_path):
+    """Verify that fallback citation cards do not claim source_type DOCUMENT."""
+    from unittest.mock import MagicMock
+    from app.media.director.director_service import AutoDirectorService
+    from app.media.director.models import ShotSpec, VisualModality, EvidenceBinding
+
+    out_dir = tmp_path / "shots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    director = AutoDirectorService()
+    director.acquisition_router.acquire_visual = MagicMock(side_effect=Exception("Browser capture failed"))
+
+    shot = ShotSpec(
+        shot_id="s_source_type",
+        beat_id="b_01",
+        duration_seconds=3.0,
+        scene_index=0,
+        narration_segment="SQLite WAL mode",
+        visual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        evidence_binding=EvidenceBinding(
+            claim_id="c_01",
+            source_ref="src_doc",
+            source_title="SQLite WAL",
+            source_url="https://sqlite.org/wal.html",
+            claim_text="WAL",
+            claim_verified=True,
+        ),
+    )
+
+    res = director._generate_shot_asset(shot=shot, shot_index=0, output_dir=out_dir, script_title="Test Script", channel_name="Test")
+    assert res.source_type != "DOCUMENT"
+    assert res.source_type in ("FALLBACK_CARD", "RENDERED")
+
+
+def test_document_fallback_does_not_invent_license(tmp_path):
+    """Verify that fallback citation cards do not fabricate 'Document Citation' license strings."""
+    from unittest.mock import MagicMock
+    from app.media.director.director_service import AutoDirectorService
+    from app.media.director.models import ShotSpec, VisualModality, EvidenceBinding
+
+    out_dir = tmp_path / "shots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    director = AutoDirectorService()
+    director.acquisition_router.acquire_visual = MagicMock(side_effect=Exception("Browser capture failed"))
+
+    shot = ShotSpec(
+        shot_id="s_license_test",
+        beat_id="b_01",
+        duration_seconds=3.0,
+        scene_index=0,
+        narration_segment="SQLite WAL mode",
+        visual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        evidence_binding=EvidenceBinding(
+            claim_id="c_01",
+            source_ref="src_doc",
+            source_title="SQLite WAL",
+            source_url="https://sqlite.org/wal.html",
+            claim_text="WAL",
+            claim_verified=True,
+        ),
+    )
+
+    res = director._generate_shot_asset(shot=shot, shot_index=0, output_dir=out_dir, script_title="Test Script", channel_name="Test")
+    assert res.license_type is None
+    assert res.license_type != "Document Citation"
+
+
+def test_request_target_url_cannot_override_binding_canonical_url(tmp_path):
+    """Verify that request.target_url differing from canonical source is rejected with UNTRUSTED_VISUAL_SOURCE."""
+    from app.domain.models import ResearchDossier, ResearchSource
+    from app.media.acquisition.router import VisualAcquisitionRouter
+
+    dossier = ResearchDossier(
+        id="d1",
+        topic_id="t1",
+        summary="Test",
+        sources=[
+            ResearchSource(
+                id="s1",
+                title="Official Doc",
+                url="https://sqlite.org/wal.html",
+                content_sha256="sha1",
+            )
+        ],
+    )
+
+    router = VisualAcquisitionRouter()
+    req = VisualAcquisitionRequest(
+        project_id="p1",
+        shot_id="s1",
+        modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE,
+        subject="SQLite WAL",
+        target_url="https://other-arbitrary-domain.com/wal.html",
+        evidence_binding=EvidenceBinding(
+            claim_id="c1",
+            source_ref="s1",
+            source_title="Official Doc",
+            source_url="https://sqlite.org/wal.html",
+            claim_text="WAL",
+            claim_verified=True,
+        ),
+    )
+
+    res = router.acquire_visual(req, output_dir=tmp_path, dossier=dossier)
+    assert any("UNTRUSTED_VISUAL_SOURCE" in err for err in res.failure_reasons)
+
+
+def test_same_domain_different_path_is_not_automatically_trusted(tmp_path):
+    """Verify that same domain with different path is NOT automatically authorized."""
+    from app.domain.models import ResearchDossier, ResearchSource
+    from app.media.acquisition.router import VisualAcquisitionRouter
+
+    dossier = ResearchDossier(
+        id="d1",
+        topic_id="t1",
+        summary="Test",
+        sources=[
+            ResearchSource(
+                id="s1",
+                title="Official Doc",
+                url="https://example.com/canonical/page.html",
+                content_sha256="sha1",
+            )
+        ],
+    )
+
+    router = VisualAcquisitionRouter()
+    req = VisualAcquisitionRequest(
+        project_id="p1",
+        shot_id="s1",
+        modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE,
+        subject="Example",
+        target_url="https://example.com/other-user/unrelated.html",
+        evidence_binding=EvidenceBinding(
+            claim_id="c1",
+            source_ref="s1",
+            source_title="Official Doc",
+            source_url="https://example.com/canonical/page.html",
+            claim_text="Example claim",
+            claim_verified=True,
+        ),
+    )
+
+    res = router.acquire_visual(req, output_dir=tmp_path, dossier=dossier)
+    assert any("UNTRUSTED_VISUAL_SOURCE" in err for err in res.failure_reasons)
+
+
+def test_same_host_different_github_resource_is_not_trusted(tmp_path):
+    """Verify that a dossier with org/project/docs does not authorize other-user/unrelated-page."""
+    from app.domain.models import ResearchDossier, ResearchSource
+    from app.media.acquisition.router import VisualAcquisitionRouter
+
+    dossier = ResearchDossier(
+        id="d1",
+        topic_id="t1",
+        summary="Test",
+        sources=[
+            ResearchSource(
+                id="src_gh",
+                title="Project Repo",
+                url="https://github.com/org/project/docs",
+                content_sha256="sha_gh",
+            )
+        ],
+    )
+
+    router = VisualAcquisitionRouter()
+    req = VisualAcquisitionRequest(
+        project_id="p1",
+        shot_id="s_gh",
+        modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE,
+        subject="GitHub Docs",
+        target_url="https://github.com/other-user/unrelated-page",
+        evidence_binding=EvidenceBinding(
+            claim_id="c1",
+            source_ref="src_gh",
+            source_title="Project Repo",
+            source_url="https://github.com/org/project/docs",
+            claim_text="GitHub doc claim",
+            claim_verified=True,
+        ),
+    )
+
+    res = router.acquire_visual(req, output_dir=tmp_path, dossier=dossier)
+    assert any("UNTRUSTED_VISUAL_SOURCE" in err for err in res.failure_reasons)
+
+
+def test_screen_instruction_remote_url_is_not_trusted():
+    """Verify that LLM-generated screen_instruction with an arbitrary remote URL is NOT trusted."""
+    from app.media.acquisition.router import VisualAcquisitionRouter
+    from app.media.director.models import ShotSpec, VisualModality
+
+    router = VisualAcquisitionRouter()
+    shot = ShotSpec(
+        shot_id="s_screen_remote",
+        beat_id="b_01",
+        duration_seconds=3.0,
+        scene_index=0,
+        narration_segment="Look at this external website demo.",
+        visual_modality=VisualModality.SCREEN_CAPTURE,
+        screen_instruction="Open browser and visit https://untrusted-arbitrary-site.com/dashboard and record",
+    )
+
+    req = router.build_acquisition_request(shot=shot, project_id="p1")
+    # Must NOT set arbitrary remote URL as target_url
+    assert req.target_url is None or "untrusted-arbitrary-site.com" not in req.target_url
+
+
+def test_source_ref_resolves_exact_canonical_url():
+    """Verify that EvidenceBinding.source_ref resolves to the exact canonical URL from ResearchDossier."""
+    from app.domain.models import ResearchDossier, ResearchSource
+    from app.media.acquisition.router import VisualAcquisitionRouter
+    from app.media.director.models import ShotSpec, VisualModality, EvidenceBinding
+
+    dossier = ResearchDossier(
+        id="d1",
+        topic_id="t1",
+        summary="Test",
+        sources=[
+            ResearchSource(
+                id="src_exact_ref",
+                title="Exact Doc",
+                url="https://sqlite.org/wal.html",
+                content_sha256="sha_exact",
+            )
+        ],
+    )
+
+    router = VisualAcquisitionRouter()
+    shot = ShotSpec(
+        shot_id="s_exact",
+        beat_id="b_01",
+        duration_seconds=3.0,
+        scene_index=0,
+        narration_segment="SQLite WAL mode",
+        visual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        evidence_binding=EvidenceBinding(
+            claim_id="c1",
+            source_ref="src_exact_ref",
+            source_title="Exact Doc",
+            source_url="https://sqlite.org/wal.html",
+            claim_text="WAL",
+            claim_verified=True,
+        ),
+    )
+
+    req = router.build_acquisition_request(shot=shot, project_id="p1", dossier=dossier)
+    assert req.target_url == "https://sqlite.org/wal.html"
+
