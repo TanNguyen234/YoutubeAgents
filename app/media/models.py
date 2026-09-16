@@ -131,6 +131,7 @@ DIRECTOR_PIPELINE_VERSION: str = "director-v3"
 GROUNDING_POLICY_VERSION: str = "grounding-v2"
 CREATIVE_QA_POLICY_VERSION: str = "creative-qa-v2"
 RETENTION_POLICY_VERSION: str = "retention-v2"
+VISUAL_SEMANTIC_QA_POLICY_VERSION: str = "semantic-qa-v1"
 
 
 def compute_retention_plan_hash(blueprint: Optional[Any]) -> str:
@@ -189,6 +190,7 @@ class RenderManifest(BaseModel):
     grounding_policy_version: str = Field(default=GROUNDING_POLICY_VERSION, description="Grounding policy version")
     creative_qa_policy_version: str = Field(default=CREATIVE_QA_POLICY_VERSION, description="Creative QA policy version")
     retention_policy_version: Optional[str] = Field(default=RETENTION_POLICY_VERSION, description="Retention policy version")
+    visual_semantic_qa_policy_version: Optional[str] = Field(default=VISUAL_SEMANTIC_QA_POLICY_VERSION, description="Visual semantic QA policy version")
     retention_plan_hash: Optional[str] = Field(default=None, description="Deterministic hash of retention plan blueprint")
     fallback_policy: Optional[str] = Field(default=None, description="Active fallback policy used during production")
     creative_profile: Optional[str] = Field(default=None, description="Active creative profile name")
@@ -264,6 +266,7 @@ def compute_production_fingerprint(
     creative_qa_policy_version: str = CREATIVE_QA_POLICY_VERSION,
     retention_policy_version: str = RETENTION_POLICY_VERSION,
     retention_plan_hash: Optional[str] = None,
+    visual_semantic_qa_policy_version: str = VISUAL_SEMANTIC_QA_POLICY_VERSION,
 ) -> str:
     """Compute a deterministic SHA-256 fingerprint uniquely identifying a production combination."""
     import hashlib
@@ -273,7 +276,7 @@ def compute_production_fingerprint(
         f"{audio_mode}|{creative_pipeline_version}|{content_format}|{creative_profile_name}|"
         f"{storyboard_hash or ''}|{visual_plan_hash or ''}|{provider_config_id}|{renderer_config_hash or ''}|"
         f"{fallback_policy}|{director_pipeline_version}|{grounding_policy_version}|{creative_qa_policy_version}|"
-        f"{retention_policy_version}|{retention_plan_hash or ''}"
+        f"{retention_policy_version}|{retention_plan_hash or ''}|{visual_semantic_qa_policy_version}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 

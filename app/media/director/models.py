@@ -219,6 +219,7 @@ class ShotSpec(BaseModel):
     action: Optional[str] = Field(default=None, description="Visible motion, state change, or progression")
     environment: Optional[str] = Field(default=None, description="Visual background or setting")
     visual_modality: VisualModality = Field(description="Selected visual modality")
+    visual_intent: Optional[VisualIntent] = Field(default=None, description="Semantic visual purpose")
     composition: Optional[str] = Field(default=None, description="Framing / layout composition")
     camera_motion: Optional[str] = Field(default=None, description="Camera movement instruction")
     asset_query: Optional[str] = Field(default=None, description="Stock footage query if applicable")
@@ -463,3 +464,11 @@ class ChannelCreativeProfile(BaseModel):
     music_bpm: int = Field(default=85, ge=40, le=180, description="Target tempo for background music")
     sfx_intensity: float = Field(default=1.0, ge=0.0, le=2.0, description="Relative sound effect mixing intensity")
     max_static_card_ratio: float = Field(default=0.15, ge=0.0, le=1.0, description="Maximum allowable ratio of static cards before warning")
+    fallback_policy: CreativeFallbackPolicy = Field(
+        default=CreativeFallbackPolicy.FAIL_CLOSED,
+        description="Fail-closed vs allow legacy preview fallback",
+    )
+    semantic_qa_mode: str = Field(
+        default="ADVISORY",
+        description="Visual Semantic QA mode: DISABLED, ADVISORY, or REQUIRED",
+    )

@@ -471,6 +471,7 @@ class StoryboardPlanner:
                 subject=", ".join(beat.key_entities) if beat.key_entities else script.title,
                 action=beat.visual_intent.value.lower().replace("_", " "),
                 visual_modality=selected_mod,
+                visual_intent=beat.visual_intent,
                 camera_motion=camera_motion_override or ("dynamic push-in" if beat.purpose.value == "HOOK" else "slow parallax push"),
                 composition=composition_override,
                 headline_text=punchline,
