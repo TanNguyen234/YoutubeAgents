@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from app.domain.models import FactCheckReport, ResearchDossier
 from app.media.acquisition.candidate_ranker import CandidateRanker
@@ -16,7 +16,7 @@ from app.media.acquisition.models import (
     VisualSourceType,
 )
 from app.media.acquisition.stock import PexelsStockProvider, StockMediaProvider
-from app.media.acquisition.web_capture import WebCaptureService
+from app.media.acquisition.web_capture import WebCaptureService, is_within_canonical_url_scope
 from app.media.director.models import (
     BeatPurpose,
     NarrativeBeat,
@@ -26,6 +26,64 @@ from app.media.director.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_canonical_research_source(
+    binding: Optional[Any] = None,
+    source_refs: Optional[List[str]] = None,
+    dossier: Optional[ResearchDossier] = None,
+) -> Optional[Any]:
+    """Resolve an authorized canonical ResearchSource from ResearchDossier.
+
+    Resolution priority:
+    1. binding.source_ref exact ResearchSource id or source_id
+    2. shot / request source_refs exact ResearchSource id or source_id
+    3. binding.source_url exact canonical ResearchSource URL (or final_url)
+
+    Returns None if dossier is missing, empty, or no source matches.
+    Never creates or synthesizes a canonical source from unverified binding URLs.
+    """
+    if not dossier or not getattr(dossier, "sources", None):
+        return None
+
+    sources = dossier.sources
+
+    def _matches_id(src: Any, ref: str) -> bool:
+        if not ref:
+            return False
+        s_id = getattr(src, "id", None)
+        if s_id is not None and str(s_id) == str(ref):
+            return True
+        s_src_id = getattr(src, "source_id", None)
+        if s_src_id is not None and str(s_src_id) == str(ref):
+            return True
+        return False
+
+    # 1. binding.source_ref exact id / source_id
+    if binding and getattr(binding, "source_ref", None):
+        b_ref = binding.source_ref
+        for s in sources:
+            if _matches_id(s, b_ref):
+                return s
+
+    # 2. source_refs list exact id / source_id
+    if source_refs:
+        for s_ref in source_refs:
+            for s in sources:
+                if _matches_id(s, s_ref):
+                    return s
+
+    # 3. binding.source_url exact canonical ResearchSource URL
+    if binding and getattr(binding, "source_url", None):
+        b_url = (binding.source_url or "").strip().rstrip("/").lower()
+        if b_url:
+            for s in sources:
+                s_url = (getattr(s, "url", None) or "").strip().rstrip("/").lower()
+                s_final = (getattr(s, "final_url", None) or "").strip().rstrip("/").lower()
+                if (s_url and s_url == b_url) or (s_final and s_final == b_url):
+                    return s
+
+    return None
 
 
 class VisualAcquisitionRouter:
@@ -83,53 +141,40 @@ class VisualAcquisitionRouter:
         # LLM screen_instruction text MUST NOT become a trusted evidence URL!
         target_url = None
         if mod in (VisualModality.DOCUMENT_EVIDENCE, VisualModality.SCREENSHOT):
-            # Resolution priority:
-            # 1. EvidenceBinding.source_ref -> ResearchDossier ResearchSource -> canonical source URL
-            if shot.evidence_binding and shot.evidence_binding.source_ref and dossier and dossier.sources:
-                for s in dossier.sources:
-                    if s.id == shot.evidence_binding.source_ref and s.url:
-                        target_url = s.url
-                        break
-            # 2. Or validated EvidenceBinding.source_url whose source_ref resolves to canonical dossier source
-            if not target_url and shot.evidence_binding and shot.evidence_binding.source_url:
-                if dossier and dossier.sources:
-                    for s in dossier.sources:
-                        if s.url and s.url.rstrip("/").lower() == shot.evidence_binding.source_url.rstrip("/").lower():
-                            target_url = s.url
-                            break
-                        if shot.evidence_binding.source_ref and s.id == shot.evidence_binding.source_ref and s.url:
-                            target_url = s.url
-                            break
+            canonical_source = resolve_canonical_research_source(
+                binding=shot.evidence_binding,
+                source_refs=shot.source_refs,
+                dossier=dossier,
+            )
+            if canonical_source:
+                canonical_url = getattr(canonical_source, "url", None) or getattr(canonical_source, "final_url", None)
+                adv_url = shot.evidence_binding.source_url if shot.evidence_binding else None
+                if adv_url and is_within_canonical_url_scope(adv_url, canonical_url):
+                    target_url = adv_url
                 else:
-                    target_url = shot.evidence_binding.source_url
-            # 3. Fallback to shot.source_refs against dossier
-            if not target_url and shot.source_refs and dossier and dossier.sources:
-                for s_ref in shot.source_refs:
-                    for s in dossier.sources:
-                        if s.id == s_ref and s.url:
-                            target_url = s.url
-                            break
-                    if target_url:
-                        break
+                    target_url = canonical_url
+            else:
+                target_url = None
         elif mod == VisualModality.SCREEN_CAPTURE:
             # Separate LOCAL_WEB_APP (localhost/127.0.0.1) from REMOTE SCREEN_CAPTURE
             candidate_url = None
-            if shot.screen_instruction and ("http://" in shot.screen_instruction or "https://" in shot.screen_instruction):
+            if shot.evidence_binding and shot.evidence_binding.source_url:
+                candidate_url = shot.evidence_binding.source_url
+            elif shot.screen_instruction and ("http://" in shot.screen_instruction or "https://" in shot.screen_instruction):
                 import re
                 m = re.search(r"https?://[^\s]+", shot.screen_instruction)
                 if m:
                     candidate_url = m.group(0).rstrip(".,;\"'")
-            elif shot.evidence_binding and shot.evidence_binding.source_url:
-                candidate_url = shot.evidence_binding.source_url
 
             if candidate_url:
                 if "localhost" in candidate_url or "127.0.0.1" in candidate_url or "::1" in candidate_url:
                     target_url = candidate_url
-                elif dossier and dossier.sources:
+                elif dossier and getattr(dossier, "sources", None):
                     # Remote screen capture must resolve to trusted ResearchSource!
                     for s in dossier.sources:
-                        if s.url and (s.url.rstrip("/").lower() == candidate_url.rstrip("/").lower() or candidate_url.lower().startswith(s.url.rstrip("/").lower() + "/")):
-                            target_url = s.url
+                        s_url = getattr(s, "url", None)
+                        if s_url and is_within_canonical_url_scope(candidate_url, s_url):
+                            target_url = candidate_url
                             break
 
         return VisualAcquisitionRequest(
@@ -172,55 +217,31 @@ class VisualAcquisitionRouter:
         # -------------------------------------------------------------
         if modality in (VisualModality.DOCUMENT_EVIDENCE, VisualModality.SCREENSHOT):
             binding = request.evidence_binding
-            # 1. Resolve canonical source URL
-            canonical_url = None
-            if binding and binding.source_ref and dossier and dossier.sources:
-                for s in dossier.sources:
-                    if s.id == binding.source_ref and s.url:
-                        canonical_url = s.url
-                        break
-            if not canonical_url and binding and binding.source_url:
-                if dossier and dossier.sources:
-                    for s in dossier.sources:
-                        if s.url and s.url.rstrip("/").lower() == binding.source_url.rstrip("/").lower():
-                            canonical_url = s.url
-                            break
-                        if binding.source_ref and s.id == binding.source_ref and s.url:
-                            canonical_url = s.url
-                            break
-                else:
-                    canonical_url = binding.source_url
-
-            if not canonical_url and request.source_refs and dossier and dossier.sources:
-                for s_ref in request.source_refs:
-                    for s in dossier.sources:
-                        if s.id == s_ref and s.url:
-                            canonical_url = s.url
-                            break
-                    if canonical_url:
-                        break
-
-            # STRICT REQUIREMENT:
-            # If request.target_url exists but differs from canonical source:
-            # reject: UNTRUSTED_VISUAL_SOURCE
-            # Do not use same-host matching to make it trusted.
+            canonical_source = resolve_canonical_research_source(
+                binding=binding,
+                source_refs=request.source_refs,
+                dossier=dossier,
+            )
             target_url = None
-            if request.target_url:
-                if not canonical_url:
-                    failures.append(f"UNTRUSTED_VISUAL_SOURCE: UNTRUSTED_SOURCE_URL: Evidence target URL '{request.target_url}' cannot be resolved to any canonical ResearchDossier source")
-                else:
-                    req_norm = request.target_url.rstrip("/").lower()
-                    canon_norm = canonical_url.rstrip("/").lower()
-                    if req_norm != canon_norm and not req_norm.startswith(canon_norm + "/"):
-                        failures.append(f"UNTRUSTED_VISUAL_SOURCE: UNTRUSTED_SOURCE_URL: Request target_url '{request.target_url}' differs from canonical source '{canonical_url}'")
-                    else:
-                        target_url = request.target_url
+            if not canonical_source:
+                failures.append(
+                    "UNTRUSTED_VISUAL_SOURCE: UNTRUSTED_SOURCE_URL: Evidence modality requires a canonical ResearchDossier source, "
+                    "but no verified source could be resolved"
+                )
             else:
-                target_url = canonical_url
+                canonical_url = getattr(canonical_source, "url", None) or getattr(canonical_source, "final_url", None)
+                candidate_target = request.target_url or (binding.source_url if binding else None) or canonical_url
+                if not is_within_canonical_url_scope(candidate_target, canonical_url):
+                    failures.append(
+                        f"UNTRUSTED_VISUAL_SOURCE: UNTRUSTED_SOURCE_URL: Target URL '{candidate_target}' "
+                        f"is outside CANONICAL_URL_SCOPE for '{canonical_url}'"
+                    )
+                else:
+                    target_url = candidate_target
 
-            trusted_urls = [s.url for s in (dossier.sources if dossier else []) if s.url]
-            if not trusted_urls and canonical_url:
-                trusted_urls = [canonical_url]
+            trusted_urls = [s.url for s in (dossier.sources if dossier else []) if getattr(s, "url", None)]
+            if canonical_source and getattr(canonical_source, "url", None) and canonical_source.url not in trusted_urls:
+                trusted_urls.append(canonical_source.url)
 
             if target_url and binding:
                 target_path = output_dir / f"{shot_id}_evidence_capture.png"
@@ -234,7 +255,7 @@ class VisualAcquisitionRouter:
                 )
                 if cand:
                     cand.evidence_claim_ids = [binding.claim_id] if binding.claim_id else []
-                    cand.source_ref = binding.source_ref
+                    cand.source_ref = getattr(canonical_source, "id", None) or getattr(canonical_source, "source_id", None) or binding.source_ref
                     candidates.append(cand)
                 else:
                     failures.extend(errs)
@@ -280,24 +301,30 @@ class VisualAcquisitionRouter:
                     )
                 else:
                     # Remote screen capture must resolve to trusted ResearchSource!
-                    trusted_urls = [s.url for s in (dossier.sources if dossier else []) if s.url]
-                    is_remote_trusted = False
-                    if trusted_urls:
-                        req_norm = target_url.rstrip("/").lower()
-                        for t in trusted_urls:
-                            t_norm = (t or "").rstrip("/").lower()
-                            if req_norm == t_norm or req_norm.startswith(t_norm + "/"):
-                                is_remote_trusted = True
-                                break
-                    if not is_remote_trusted:
-                        failures.append(f"UNTRUSTED_VISUAL_SOURCE: Remote screen capture URL '{target_url}' is not in ResearchDossier verified sources")
+                    if not dossier or not getattr(dossier, "sources", None):
+                        failures.append(
+                            f"UNTRUSTED_VISUAL_SOURCE: UNTRUSTED_SOURCE_URL: Remote screen capture requires a verified ResearchDossier source, "
+                            f"got URL '{target_url}' with no dossier"
+                        )
                         cand, errs = None, []
                     else:
-                        cand, errs = self.web_capture.capture_evidence(
-                            url=target_url,
-                            output_path=target_path,
-                            trusted_urls=trusted_urls if trusted_urls else None,
+                        trusted_sources = [s for s in dossier.sources if getattr(s, "url", None)]
+                        matching_source = next(
+                            (s for s in trusted_sources if is_within_canonical_url_scope(target_url, s.url)),
+                            None
                         )
+                        if not matching_source:
+                            failures.append(
+                                f"UNTRUSTED_VISUAL_SOURCE: UNTRUSTED_SOURCE_URL: Remote screen capture URL '{target_url}' is outside ResearchDossier verified source scope"
+                            )
+                            cand, errs = None, []
+                        else:
+                            trusted_urls = [s.url for s in trusted_sources if s.url]
+                            cand, errs = self.web_capture.capture_evidence(
+                                url=target_url,
+                                output_path=target_path,
+                                trusted_urls=trusted_urls,
+                            )
                 if cand:
                     candidates.append(cand)
                 else:

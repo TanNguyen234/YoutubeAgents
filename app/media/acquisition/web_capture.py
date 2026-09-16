@@ -82,6 +82,52 @@ def _is_private_ip(hostname: str) -> bool:
     return False
 
 
+def is_within_canonical_url_scope(target_url: str, canonical_url: str) -> bool:
+    """Evaluate whether target_url is within the permitted CANONICAL_URL_SCOPE of canonical_url.
+
+    Permits the canonical URL itself and explicitly descendant subpaths.
+    Requires identical scheme, identical hostname (preventing hostname-prefix attacks),
+    and identical port.
+    """
+    if not target_url or not canonical_url:
+        return False
+    try:
+        t_parsed = urlparse(target_url.strip())
+        c_parsed = urlparse(canonical_url.strip())
+    except Exception:
+        return False
+
+    # Scheme match
+    if (t_parsed.scheme or "").lower() != (c_parsed.scheme or "").lower():
+        return False
+
+    # Hostname match (parsed host, prevents "docs.example.com.evil.com")
+    t_host = (t_parsed.hostname or "").lower()
+    c_host = (c_parsed.hostname or "").lower()
+    if not t_host or not c_host or t_host != c_host:
+        return False
+
+    # Port match
+    if t_parsed.port != c_parsed.port:
+        return False
+
+    # Path scope
+    t_path = (t_parsed.path or "/").rstrip("/")
+    c_path = (c_parsed.path or "/").rstrip("/")
+
+    # If canonical path is root or empty, any path on same host/port is descendant
+    if not c_path:
+        return True
+
+    # Exact path match or descendant path
+    if t_path.lower() == c_path.lower():
+        return True
+    if t_path.lower().startswith(c_path.lower() + "/"):
+        return True
+
+    return False
+
+
 def validate_capture_url(
     url: str,
     mode: str = "EVIDENCE",
@@ -120,16 +166,7 @@ def validate_capture_url(
     # EVIDENCE mode:
     # 2. If trusted_urls list is provided, target URL must originate from a verified source
     if trusted_urls is not None:
-        normalized_target = raw_url.lower().rstrip("/")
-        matched = False
-        for t_url in trusted_urls:
-            t_clean = (t_url or "").strip().lower().rstrip("/")
-            if not t_clean:
-                continue
-            # Match exact canonical URL or explicit sub-path prefix (do not allow arbitrary same-domain paths)
-            if normalized_target == t_clean or normalized_target.startswith(t_clean + "/"):
-                matched = True
-                break
+        matched = any(is_within_canonical_url_scope(raw_url, t_url) for t_url in trusted_urls if t_url)
         if not matched:
             return False, f"UNTRUSTED_SOURCE_URL: URL '{raw_url}' does not originate from verified ResearchDossier sources."
 
