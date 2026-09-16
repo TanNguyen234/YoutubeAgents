@@ -207,12 +207,12 @@ class VisualAcquisitionRouter:
             target_url = None
             if request.target_url:
                 if not canonical_url:
-                    failures.append(f"UNTRUSTED_VISUAL_SOURCE: Evidence target URL '{request.target_url}' cannot be resolved to any canonical ResearchDossier source")
+                    failures.append(f"UNTRUSTED_VISUAL_SOURCE: UNTRUSTED_SOURCE_URL: Evidence target URL '{request.target_url}' cannot be resolved to any canonical ResearchDossier source")
                 else:
                     req_norm = request.target_url.rstrip("/").lower()
                     canon_norm = canonical_url.rstrip("/").lower()
                     if req_norm != canon_norm and not req_norm.startswith(canon_norm + "/"):
-                        failures.append(f"UNTRUSTED_VISUAL_SOURCE: Request target_url '{request.target_url}' differs from canonical source '{canonical_url}'")
+                        failures.append(f"UNTRUSTED_VISUAL_SOURCE: UNTRUSTED_SOURCE_URL: Request target_url '{request.target_url}' differs from canonical source '{canonical_url}'")
                     else:
                         target_url = request.target_url
             else:

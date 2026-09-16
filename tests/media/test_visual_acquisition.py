@@ -450,6 +450,10 @@ def test_evidence_excerpt_partial_prefix_is_not_enough(tmp_path, monkeypatch):
         "app.media.acquisition.web_capture.validate_capture_url",
         lambda url, **kw: (True, "VALID_FOR_TEST"),
     )
+    monkeypatch.setattr(
+        "app.media.acquisition.web_capture._is_private_ip",
+        lambda host: False,
+    )
 
     try:
         service = WebCaptureService()
@@ -500,6 +504,10 @@ def test_evidence_excerpt_normalized_match_succeeds(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "app.media.acquisition.web_capture.validate_capture_url",
         lambda url, **kw: (True, "VALID_FOR_TEST"),
+    )
+    monkeypatch.setattr(
+        "app.media.acquisition.web_capture._is_private_ip",
+        lambda host: False,
     )
 
     try:
