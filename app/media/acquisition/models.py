@@ -90,6 +90,76 @@ class VisualAssetCandidate(BaseModel):
     evidence_claim_ids: List[str] = Field(default_factory=list, description="Verified claim IDs proven by this asset")
     is_synthetic: bool = Field(default=False, description="Whether asset is AI-generated (GFlow/Veo/Imagen)")
     raw_metadata: Dict[str, Any] = Field(default_factory=dict, description="Provider-specific metadata")
+    actual_modality: Optional[VisualModality] = Field(default=None, description="Actual visual modality resolved for this candidate")
+
+
+def resolve_candidate_actual_modality(
+    candidate: VisualAssetCandidate,
+    requested_modality: VisualModality,
+) -> VisualModality:
+    """Derive the actual visual modality of an acquired or rendered candidate asset."""
+    if candidate.actual_modality:
+        return candidate.actual_modality
+
+    st = candidate.source_type
+    if st in (VisualSourceType.RESEARCH_SOURCE, VisualSourceType.DOCUMENT, VisualSourceType.WEB_PAGE):
+        return VisualModality.DOCUMENT_EVIDENCE
+    if st == VisualSourceType.LOCAL_WEB_APP:
+        return VisualModality.SCREEN_CAPTURE
+    if st == VisualSourceType.FALLBACK_CARD:
+        return VisualModality.STATIC_CARD
+    if st == VisualSourceType.STOCK_MEDIA:
+        return VisualModality.STOCK_VIDEO
+
+    if st == VisualSourceType.RENDERED:
+        meth = (candidate.acquisition_method or "").lower()
+        if "diagram_renderer" in meth or "diagram" in meth:
+            return VisualModality.DIAGRAM
+        if "chart_renderer" in meth or "chart" in meth:
+            return VisualModality.DATA_VISUALIZATION
+        if "motion_renderer" in meth or "motion" in meth:
+            return VisualModality.MOTION_GRAPHICS
+
+        # Check explicit producer metadata in raw_metadata
+        if candidate.raw_metadata and "modality" in candidate.raw_metadata:
+            val = candidate.raw_metadata["modality"]
+            if isinstance(val, VisualModality):
+                return val
+            if isinstance(val, str) and val in VisualModality.__members__:
+                return VisualModality[val]
+
+        if requested_modality in (
+            VisualModality.DIAGRAM,
+            VisualModality.STATIC_DIAGRAM,
+            VisualModality.DATA_VISUALIZATION,
+            VisualModality.STATIC_CHART,
+            VisualModality.MOTION_GRAPHICS,
+            VisualModality.CODE_ANIMATION,
+            VisualModality.UI_SIMULATION,
+            VisualModality.COMPARISON,
+        ):
+            return requested_modality
+        return VisualModality.DIAGRAM
+
+    if st == VisualSourceType.GENERATED:
+        if candidate.raw_metadata and "modality" in candidate.raw_metadata:
+            val = candidate.raw_metadata["modality"]
+            if isinstance(val, VisualModality):
+                return val
+            if isinstance(val, str) and val in VisualModality.__members__:
+                return VisualModality[val]
+
+        meth = (candidate.acquisition_method or "").lower()
+        if "video" in meth:
+            return VisualModality.GENERATED_VIDEO
+        if "image" in meth or "art" in meth:
+            return VisualModality.GENERATED_IMAGE
+
+        if requested_modality in (VisualModality.GENERATED_VIDEO, VisualModality.GENERATED_IMAGE):
+            return requested_modality
+        return VisualModality.GENERATED_IMAGE
+
+    return requested_modality
 
 
 class VisualAcquisitionResult(BaseModel):

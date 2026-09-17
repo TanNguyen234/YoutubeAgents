@@ -7,6 +7,7 @@ import re
 from typing import Dict, List, Optional, Protocol, Tuple
 
 from app.media.acquisition.models import VisualAssetCandidate, VisualSourceType
+from app.media.director.models import VisualModality
 
 
 class StockMediaProvider(Protocol):
@@ -197,6 +198,7 @@ class PexelsStockProvider:
                 duration_seconds=asset_metadata.get("duration"),
                 acquisition_method="pexels_stock_video",
                 is_synthetic=False,
+                actual_modality=VisualModality.STOCK_VIDEO,
                 raw_metadata={
                     "provider": "pexels",
                     "provider_asset_id": asset_metadata.get("id"),

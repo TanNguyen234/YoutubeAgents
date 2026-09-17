@@ -17,6 +17,7 @@ from app.media.acquisition.models import (
     VisualAssetCandidate,
     VisualSourceType,
 )
+from app.media.director.models import VisualModality
 
 logger = logging.getLogger(__name__)
 
@@ -505,6 +506,7 @@ class WebCaptureService:
                 height=1920,
                 acquisition_method="playwright_web_evidence",
                 is_synthetic=False,
+                actual_modality=VisualModality.DOCUMENT_EVIDENCE,
                 raw_metadata={"requested_source_url": url},
             )
             return candidate, []
@@ -626,6 +628,7 @@ class WebCaptureService:
                 height=1920,
                 acquisition_method="playwright_local_ui",
                 is_synthetic=False,
+                actual_modality=VisualModality.SCREEN_CAPTURE,
             )
             return candidate, []
 
