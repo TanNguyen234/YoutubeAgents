@@ -265,6 +265,8 @@ class ShotAssetResult(BaseModel):
     acquisition_method: Optional[str] = Field(default=None, description="Acquisition service or renderer method")
     is_synthetic: bool = Field(default=False, description="Whether asset is AI-generated synthetic media")
     evidence_claim_ids: List[str] = Field(default_factory=list, description="Linked verified claim IDs")
+    semantic_qa_performed: bool = Field(default=False, description="Whether visual semantic QA was executed on this asset")
+    semantic_audit: Optional[Dict[str, Any]] = Field(default=None, description="Detailed semantic QA evaluation report/audit dict")
 
     def __iter__(self):
         """Allow tuple unpacking (path, sha256) for backward compatibility."""
@@ -306,6 +308,7 @@ class TimelineShot(BaseModel):
     asset_acquisition_method: Optional[str] = Field(default=None, description="Acquisition method or renderer")
     asset_is_synthetic: bool = Field(default=False, description="Whether asset is AI-generated synthetic media")
     asset_evidence_claim_ids: List[str] = Field(default_factory=list, description="Linked verified claim IDs")
+    asset_semantic_qa: Optional[Dict[str, Any]] = Field(default=None, description="Visual semantic QA audit summary for this shot asset")
 
 
 
@@ -472,3 +475,13 @@ class ChannelCreativeProfile(BaseModel):
         default="ADVISORY",
         description="Visual Semantic QA mode: DISABLED, ADVISORY, or REQUIRED",
     )
+
+    @classmethod
+    def production_profile(cls, **kwargs) -> "ChannelCreativeProfile":
+        """Factory for production profiles enforcing FAIL_CLOSED and REQUIRED semantic QA."""
+        defaults = {
+            "fallback_policy": CreativeFallbackPolicy.FAIL_CLOSED,
+            "semantic_qa_mode": "REQUIRED",
+        }
+        defaults.update(kwargs)
+        return cls(**defaults)

@@ -29,6 +29,11 @@ HARD_REJECT_ISSUES = {
     VisualSemanticIssue.WRONG_DOCUMENT_REGION,
     VisualSemanticIssue.UI_STATE_NOT_SHOWN,
     VisualSemanticIssue.VISUAL_CONTRADICTION,
+    VisualSemanticIssue.MECHANISM_NOT_EXPLAINED,
+    VisualSemanticIssue.COMPARISON_NOT_CLEAR,
+    VisualSemanticIssue.COMPARISON_NOT_VISIBLE,
+    VisualSemanticIssue.DATA_UNREADABLE,
+    VisualSemanticIssue.DATA_LABELS_UNREADABLE,
 }
 
 
@@ -232,10 +237,37 @@ Carefully inspect the image(s) and output structured JSON strictly matching the 
             return VisualSemanticVerdict.REJECT
 
         # 3. Modality-specific thresholds
-        if shot.visual_modality == VisualModality.DOCUMENT_EVIDENCE:
-            if raw.evidence_visibility is not None and raw.evidence_visibility < 0.80:
+        mod = shot.visual_modality
+        if mod == VisualModality.DOCUMENT_EVIDENCE:
+            if raw.evidence_visibility is None or raw.evidence_visibility < 0.80:
+                if VisualSemanticIssue.EVIDENCE_NOT_VISIBLE not in raw.issues:
+                    raw.issues.append(VisualSemanticIssue.EVIDENCE_NOT_VISIBLE)
                 return VisualSemanticVerdict.REJECT
             if raw.readability < 0.75:
+                return VisualSemanticVerdict.REJECT
+
+        elif mod in (VisualModality.SCREENSHOT, VisualModality.SCREEN_CAPTURE, VisualModality.UI_SIMULATION):
+            if raw.interface_state_match is None or raw.interface_state_match < 0.70:
+                if VisualSemanticIssue.UI_STATE_NOT_SHOWN not in raw.issues:
+                    raw.issues.append(VisualSemanticIssue.UI_STATE_NOT_SHOWN)
+                return VisualSemanticVerdict.REJECT
+
+        elif mod in (VisualModality.DIAGRAM, VisualModality.STATIC_DIAGRAM):
+            if raw.mechanism_clarity is None or raw.mechanism_clarity < 0.70:
+                if VisualSemanticIssue.MECHANISM_NOT_EXPLAINED not in raw.issues:
+                    raw.issues.append(VisualSemanticIssue.MECHANISM_NOT_EXPLAINED)
+                return VisualSemanticVerdict.REJECT
+
+        elif mod in (VisualModality.DATA_VISUALIZATION, VisualModality.STATIC_CHART):
+            if raw.data_readability is None or raw.data_readability < 0.70:
+                if VisualSemanticIssue.DATA_UNREADABLE not in raw.issues:
+                    raw.issues.append(VisualSemanticIssue.DATA_UNREADABLE)
+                return VisualSemanticVerdict.REJECT
+
+        elif mod == VisualModality.COMPARISON:
+            if raw.comparison_clarity is None or raw.comparison_clarity < 0.70:
+                if VisualSemanticIssue.COMPARISON_NOT_CLEAR not in raw.issues:
+                    raw.issues.append(VisualSemanticIssue.COMPARISON_NOT_CLEAR)
                 return VisualSemanticVerdict.REJECT
 
         intent = getattr(shot, "visual_intent", None) or VisualIntent.SHOW_MECHANISM

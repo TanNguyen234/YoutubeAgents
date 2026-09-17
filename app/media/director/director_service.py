@@ -30,7 +30,8 @@ from app.media.director.models import (
     VisualModality,
     VisualizationDataMode,
 )
-from app.media.semantic_qa.models import VisualSemanticQAError, VisualSemanticQAMode
+from app.media.semantic_qa.models import VisualSemanticQAError, VisualSemanticQAMode, VisualSemanticVerdict
+from app.media.acquisition.models import VisualSourceType
 from app.media.director.quality_evaluator import VisualShotEvaluator
 from app.media.director.storyboard_planner import StoryboardPlanner
 from app.media.gflow_provider import AssetGenerationAttempt
@@ -146,6 +147,17 @@ class AutoDirectorService:
         output_dir.mkdir(parents=True, exist_ok=True)
         shots_dir = output_dir / "shots"
         shots_dir.mkdir(parents=True, exist_ok=True)
+
+        # Wire up per-project SemanticQACache sidecar
+        from app.media.semantic_qa.cache import SemanticQACache
+        manifest_dir = output_dir.parent / "manifests" if output_dir.name in ("director", "shots") else output_dir / "manifests"
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        proj_cache_path = manifest_dir / "semantic_qa_cache.json"
+        proj_cache = SemanticQACache(cache_file_path=proj_cache_path)
+
+        judge = getattr(self.acquisition_router, "semantic_judge", None)
+        if judge and getattr(judge, "evaluator", None):
+            judge.evaluator.cache = proj_cache
 
         claims = []
         if fact_report and fact_report.claims:
@@ -290,6 +302,7 @@ class AutoDirectorService:
                 asset_acquisition_method=getattr(asset_res, "acquisition_method", None),
                 asset_is_synthetic=getattr(asset_res, "is_synthetic", False),
                 asset_evidence_claim_ids=list(getattr(asset_res, "evidence_claim_ids", []) or []),
+                asset_semantic_qa=getattr(asset_res, "semantic_audit", None),
             )
             timeline_shots.append(t_shot)
 
@@ -301,7 +314,7 @@ class AutoDirectorService:
         timeline = ShotTimeline(shots=timeline_shots, total_duration=total_audio_duration)
         return timeline, storyboard
 
-    def _generate_shot_asset(
+    def _dispatch_shot_asset(
         self,
         shot: ShotSpec,
         shot_index: int,
@@ -318,24 +331,71 @@ class AutoDirectorService:
         shot_id = shot.shot_id
         fallback_reason = None
 
-        # Stock video check: if requested but no stock provider is installed, explicitly record fallback attempt and route
+        # Stock video check: route through acquisition_router
         if modality == VisualModality.STOCK_VIDEO:
-            fallback_modality = VisualModality.GENERATED_VIDEO if (self.gflow_provider and hasattr(self.gflow_provider, "generate_video")) else VisualModality.MOTION_GRAPHICS
-            fallback_reason = f"STOCK_VIDEO is unsupported: routed to {fallback_modality.value}"
-            self.asset_attempts.append(
-                AssetGenerationAttempt(
-                    shot_id=shot_id,
-                    provider="stock_video_provider",
-                    modality=VisualModality.STOCK_VIDEO.value,
-                    requested_modality=VisualModality.STOCK_VIDEO.value,
-                    actual_modality=fallback_modality.value,
-                    fallback_reason="STOCK_VIDEO is unsupported: no stock media provider configured",
-                    success=False,
-                    error_type="UnsupportedModalityError",
-                    error_message="No stock video provider configured or available",
-                    latency_ms=0,
+            try:
+                acq_req = self.acquisition_router.build_acquisition_request(
+                    shot=shot,
+                    project_id=dossier.topic_id if dossier else "proj",
+                    dossier=dossier,
+                    fact_report=fact_report,
                 )
-            )
+                acq_res = self.acquisition_router.acquire_visual(
+                    request=acq_req,
+                    output_dir=output_dir,
+                    script_title=script_title,
+                    channel_name=channel_name,
+                    dossier=dossier,
+                    fact_report=fact_report,
+                    shot=shot,
+                )
+                selected = acq_res.selected_candidate
+                if not selected and "SEMANTIC_QA_REJECTED_ALL" in acq_res.failure_reasons:
+                    active_fallback = getattr(self.profile, "fallback_policy", CreativeFallbackPolicy.FAIL_CLOSED)
+                    if active_fallback != CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW:
+                        raise VisualSemanticQAError(
+                            f"Visual Semantic QA rejected all candidates for shot '{shot_id}'. FAIL_CLOSED active."
+                        )
+                if selected and selected.source_type != VisualSourceType.FALLBACK_CARD:
+                    provider_name = selected.acquisition_method
+                    actual_mod = VisualModality.STOCK_VIDEO if selected.source_type == VisualSourceType.STOCK_MEDIA else VisualModality.DIAGRAM
+                    self.asset_attempts.append(
+                        AssetGenerationAttempt(
+                            shot_id=shot_id,
+                            provider=provider_name,
+                            modality=actual_mod.value,
+                            success=True,
+                            output_path=selected.file_path,
+                            latency_ms=int((time.time() - t0) * 1000),
+                        )
+                    )
+                    return ShotAssetResult(
+                        path=selected.file_path,
+                        sha256=selected.content_sha256,
+                        requested_modality=requested_modality,
+                        actual_modality=actual_mod,
+                        provider=provider_name,
+                        source_type=selected.source_type.value,
+                        source_url=selected.source_url,
+                        source_ref=selected.source_ref,
+                        license_type=selected.license_type,
+                        attribution=selected.attribution,
+                        acquisition_method=selected.acquisition_method,
+                        is_synthetic=selected.is_synthetic,
+                        evidence_claim_ids=selected.evidence_claim_ids or [],
+                        fallback_reason=fallback_reason,
+                        semantic_qa_performed=bool(acq_res.semantic_audit),
+                        semantic_audit=acq_res.semantic_audit or None,
+                    )
+            except Exception as e:
+                active_fallback = getattr(self.profile, "fallback_policy", CreativeFallbackPolicy.FAIL_CLOSED)
+                if isinstance(e, VisualSemanticQAError) and active_fallback != CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW:
+                    raise
+                logger.warning(f"Stock video acquisition failed for {shot_id}: {e}")
+
+            # Fallback if stock video acquisition produced no valid candidate
+            fallback_modality = VisualModality.GENERATED_VIDEO if (self.gflow_provider and hasattr(self.gflow_provider, "generate_video")) else VisualModality.MOTION_GRAPHICS
+            fallback_reason = f"STOCK_VIDEO acquisition unavailable or failed: routed to {fallback_modality.value}"
             modality = fallback_modality
 
         # Modality A: DIAGRAM
@@ -627,6 +687,8 @@ class AutoDirectorService:
                         is_synthetic=selected.is_synthetic,
                         evidence_claim_ids=selected.evidence_claim_ids or [],
                         fallback_reason=fallback_reason,
+                        semantic_qa_performed=bool(acq_res.semantic_audit),
+                        semantic_audit=acq_res.semantic_audit or None,
                     )
             except Exception as e:
                 active_fallback = getattr(self.profile, "fallback_policy", CreativeFallbackPolicy.FAIL_CLOSED)
@@ -746,6 +808,8 @@ class AutoDirectorService:
                         is_synthetic=selected.is_synthetic,
                         evidence_claim_ids=selected.evidence_claim_ids or ([binding.claim_id] if binding.claim_id else []),
                         fallback_reason=fallback_reason,
+                        semantic_qa_performed=bool(acq_res.semantic_audit),
+                        semantic_audit=acq_res.semantic_audit or None,
                     )
             except Exception as e:
                 active_fallback = getattr(self.profile, "fallback_policy", CreativeFallbackPolicy.FAIL_CLOSED)
@@ -900,6 +964,9 @@ class AutoDirectorService:
                                 requested_modality=requested_modality,
                                 actual_modality=VisualModality.GENERATED_VIDEO,
                                 provider="gflow",
+                                source_type="GENERATED",
+                                acquisition_method="gflow_veo_video",
+                                is_synthetic=True,
                                 fallback_reason=fallback_reason,
                             )
                     except Exception as e:
@@ -943,6 +1010,9 @@ class AutoDirectorService:
                                 requested_modality=requested_modality,
                                 actual_modality=VisualModality.GENERATED_IMAGE,
                                 provider="gflow",
+                                source_type="GENERATED",
+                                acquisition_method="gflow_imagen_image",
+                                is_synthetic=True,
                                 fallback_reason="Video generation failed, fell back to AI image" if modality == VisualModality.GENERATED_VIDEO else fallback_reason,
                             )
                     except Exception as e:
@@ -1003,6 +1073,151 @@ class AutoDirectorService:
             fallback_reason="All primary renderers failed, fell back to static card",
         )
 
+    def _evaluate_final_shot_asset_if_needed(
+        self,
+        shot: ShotSpec,
+        asset_res: ShotAssetResult,
+        output_dir: Path,
+    ) -> ShotAssetResult:
+        """Execute semantic QA gate on final rendered asset if not already evaluated.
+
+        Covers direct render modalities: DIAGRAM, DATA_VISUALIZATION, CODE_ANIMATION,
+        UI_SIMULATION, COMPARISON, MOTION_GRAPHICS, TIMELINE, GENERATED_IMAGE, GENERATED_VIDEO, etc.
+        Enforces fail-closed when semantic_qa_mode == 'REQUIRED'.
+        """
+        if getattr(asset_res, "semantic_qa_performed", False):
+            return asset_res
+
+        qa_mode_val = getattr(self.profile, "semantic_qa_mode", "ADVISORY")
+        if isinstance(qa_mode_val, str):
+            qa_mode_str = qa_mode_val.upper()
+        else:
+            qa_mode_str = getattr(qa_mode_val, "value", "ADVISORY").upper()
+
+        if qa_mode_str == "DISABLED":
+            return asset_res
+
+        asset_path = Path(asset_res.path)
+        if not asset_path.exists() or asset_path.stat().st_size == 0:
+            if qa_mode_str == "REQUIRED":
+                raise VisualSemanticQAError(
+                    f"VISUAL_ASSET_MISSING: Asset file for shot '{shot.shot_id}' does not exist or is empty: {asset_path}"
+                )
+            return asset_res
+
+        # Retrieve or initialize semantic evaluator
+        judge = getattr(self.acquisition_router, "semantic_judge", None)
+        evaluator = getattr(judge, "evaluator", None)
+        if not evaluator:
+            from app.media.semantic_qa.backend import AntigravityVisualBackend
+            from app.media.semantic_qa.evaluator import VisualSemanticEvaluator
+            v_backend = self.backend if hasattr(self.backend, "evaluate_visual") else AntigravityVisualBackend()
+            evaluator = VisualSemanticEvaluator(backend=v_backend)
+
+        # Build candidate object representing the final rendered asset
+        from app.media.acquisition.models import VisualAssetCandidate, VisualSourceType
+        cand_src = VisualSourceType.RENDERED
+        if asset_res.source_type and asset_res.source_type in VisualSourceType.__members__:
+            cand_src = VisualSourceType(asset_res.source_type)
+
+        cand = VisualAssetCandidate(
+            candidate_id=f"final_{shot.shot_id}",
+            source_type=cand_src,
+            file_path=str(asset_path),
+            content_sha256=asset_res.sha256,
+            acquisition_method=asset_res.provider or "direct_renderer",
+            is_synthetic=asset_res.is_synthetic,
+            evidence_claim_ids=list(asset_res.evidence_claim_ids or []),
+            source_url=asset_res.source_url,
+            source_ref=asset_res.source_ref,
+            license_type=asset_res.license_type,
+            attribution=asset_res.attribution,
+        )
+
+        # Evaluate against actual produced modality (e.g. if fallback resolved to DIAGRAM)
+        eval_shot = shot.model_copy(update={"visual_modality": asset_res.actual_modality})
+
+        try:
+            assessment = evaluator.evaluate_candidate(candidate=cand, shot=eval_shot)
+            audit_dict = {
+                "candidate_id": cand.candidate_id,
+                "shot_id": shot.shot_id,
+                "verdict": assessment.verdict.value,
+                "semantic_relevance": assessment.semantic_relevance,
+                "visual_intent_match": assessment.visual_intent_match,
+                "subject_match": assessment.subject_match,
+                "readability": assessment.readability,
+                "information_value": assessment.information_value,
+                "generic_slop_score": assessment.generic_slop_score,
+                "issues": [i.value for i in assessment.issues],
+                "concise_reason": assessment.concise_reason,
+                "evaluator_backend": assessment.evaluator_backend,
+                "evaluator_model": assessment.evaluator_model,
+                "evaluator_policy_version": assessment.evaluator_policy_version,
+                "candidate_sha256": assessment.candidate_sha256,
+                "semantic_input_hash": assessment.semantic_input_hash,
+            }
+            if assessment.evidence_visibility is not None:
+                audit_dict["evidence_visibility"] = assessment.evidence_visibility
+            if assessment.interface_state_match is not None:
+                audit_dict["interface_state_match"] = assessment.interface_state_match
+            if assessment.mechanism_clarity is not None:
+                audit_dict["mechanism_clarity"] = assessment.mechanism_clarity
+            if assessment.comparison_clarity is not None:
+                audit_dict["comparison_clarity"] = assessment.comparison_clarity
+            if assessment.data_readability is not None:
+                audit_dict["data_readability"] = assessment.data_readability
+
+            asset_res.semantic_qa_performed = True
+            asset_res.semantic_audit = audit_dict
+
+            if assessment.verdict != VisualSemanticVerdict.ACCEPT:
+                if qa_mode_str == "REQUIRED":
+                    raise VisualSemanticQAError(
+                        f"Visual Semantic QA REJECTED final asset for shot '{shot.shot_id}' (modality={asset_res.actual_modality.value}): "
+                        f"issues={[i.value for i in assessment.issues]}, reason='{assessment.concise_reason}'"
+                    )
+                else:
+                    logger.warning(
+                        "VISUAL_SEMANTIC_QA_ADVISORY_REJECT: Shot '%s' final asset rejected: issues=%s reason='%s'",
+                        shot.shot_id,
+                        [i.value for i in assessment.issues],
+                        assessment.concise_reason,
+                    )
+            return asset_res
+        except VisualSemanticQAError:
+            if qa_mode_str == "REQUIRED":
+                raise
+            logger.warning("VISUAL_SEMANTIC_QA_ERROR in advisory mode for %s", shot.shot_id, exc_info=True)
+            return asset_res
+        except Exception as e:
+            if qa_mode_str == "REQUIRED":
+                raise VisualSemanticQAError(f"Visual Semantic QA backend failure on shot '{shot.shot_id}': {e}") from e
+            logger.warning("VISUAL_SEMANTIC_QA_ERROR in advisory mode for %s: %s", shot.shot_id, e)
+            return asset_res
+
+    def _generate_shot_asset(
+        self,
+        shot: ShotSpec,
+        shot_index: int,
+        output_dir: Path,
+        script_title: str,
+        channel_name: str,
+        dossier: Optional[ResearchDossier] = None,
+        fact_report: Optional[FactCheckReport] = None,
+    ) -> ShotAssetResult:
+        """Execute shot asset dispatch followed by universal semantic QA evaluation."""
+        res = self._dispatch_shot_asset(
+            shot=shot,
+            shot_index=shot_index,
+            output_dir=output_dir,
+            script_title=script_title,
+            channel_name=channel_name,
+            dossier=dossier,
+            fact_report=fact_report,
+        )
+        return self._evaluate_final_shot_asset_if_needed(shot=shot, asset_res=res, output_dir=output_dir)
+
     def regenerate_single_shot(
         self,
         project_id: str,
@@ -1061,6 +1276,7 @@ class AutoDirectorService:
                 t_shot.asset_path = str(asset_res.path)
                 t_shot.asset_sha256 = asset_res.sha256
                 t_shot.modality = asset_res.actual_modality
+                t_shot.asset_semantic_qa = getattr(asset_res, "semantic_audit", None)
                 break
 
         storyboard_path = output_dir / f"storyboard_{project_id}.json"
