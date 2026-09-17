@@ -131,9 +131,10 @@ class MediaProductionPipeline:
         pitch: str = "+0Hz",
         force_rebuild: bool = False,
         fallback_policy: Optional[CreativeFallbackPolicy] = None,
+        production_mode: bool = False,
     ) -> Tuple[VideoProject, MediaQAResult, RenderManifest]:
         """Execute full media production for a VERIFIED project with strict idempotency."""
-        active_fallback_policy = fallback_policy or self.fallback_policy
+        active_fallback_policy = CreativeFallbackPolicy.FAIL_CLOSED if production_mode else (fallback_policy or self.fallback_policy)
         render_prof = profile or RenderProfile()
         self.renderer.profile = render_prof
         self.qa.profile = render_prof
@@ -208,11 +209,23 @@ class MediaProductionPipeline:
         # Resolve Creative Profile
         resolved_profile = getattr(self.director, "profile", None)
         if not resolved_profile or resolved_profile.name in ("Tech Engineering Channel", "default"):
-            resolved_profile = get_channel_profile_for_niche(channel_niche)
+            resolved_profile = get_channel_profile_for_niche(channel_niche, production_mode=production_mode)
             if hasattr(self.director, "apply_profile"):
                 self.director.apply_profile(resolved_profile)
             elif hasattr(self.director, "profile"):
                 self.director.profile = resolved_profile
+        elif production_mode and hasattr(resolved_profile, "to_production_profile"):
+            resolved_profile = resolved_profile.to_production_profile()
+            if hasattr(self.director, "apply_profile"):
+                self.director.apply_profile(resolved_profile)
+            elif hasattr(self.director, "profile"):
+                self.director.profile = resolved_profile
+
+        if production_mode:
+            if hasattr(self.director, "fallback_policy"):
+                self.director.fallback_policy = CreativeFallbackPolicy.FAIL_CLOSED
+            if hasattr(self.director, "semantic_qa_mode"):
+                self.director.semantic_qa_mode = "REQUIRED"
 
         # P1-6: Unify creative evaluator profile with canonical director evaluator
         self.visual_evaluator = getattr(self.director, "evaluator", self.visual_evaluator)
@@ -220,7 +233,9 @@ class MediaProductionPipeline:
             self.visual_evaluator.profile = resolved_profile
         creative_profile_name = resolved_profile.name if resolved_profile else "default"
         active_qa_mode = "ADVISORY"
-        if resolved_profile and getattr(resolved_profile, "semantic_qa_mode", None):
+        if production_mode:
+            active_qa_mode = "REQUIRED"
+        elif resolved_profile and getattr(resolved_profile, "semantic_qa_mode", None):
             active_qa_mode = getattr(resolved_profile, "semantic_qa_mode", "ADVISORY")
         elif self.director and getattr(self.director, "profile", None):
             active_qa_mode = getattr(self.director.profile, "semantic_qa_mode", "ADVISORY")

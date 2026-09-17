@@ -485,3 +485,12 @@ class ChannelCreativeProfile(BaseModel):
         }
         defaults.update(kwargs)
         return cls(**defaults)
+
+    def to_production_profile(self) -> "ChannelCreativeProfile":
+        """Return a copy of this profile configured for production: FAIL_CLOSED and REQUIRED QA."""
+        return self.model_copy(
+            update={
+                "fallback_policy": CreativeFallbackPolicy.FAIL_CLOSED,
+                "semantic_qa_mode": "REQUIRED",
+            }
+        )

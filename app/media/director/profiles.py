@@ -116,13 +116,26 @@ TECH_DOCUMENTARY_PROFILE = ChannelCreativeProfile(
 )
 
 
-def get_channel_profile_for_niche(niche: str) -> ChannelCreativeProfile:
-    """Retrieve the optimal ChannelCreativeProfile for a given channel niche."""
+def get_channel_profile_for_niche(
+    niche: str,
+    production_mode: bool = False,
+) -> ChannelCreativeProfile:
+    """Retrieve the optimal ChannelCreativeProfile for a given channel niche.
+
+    If production_mode is True, turns the resolved niche profile into:
+    - semantic_qa_mode = "REQUIRED"
+    - fallback_policy = CreativeFallbackPolicy.FAIL_CLOSED
+    """
     n_lower = niche.lower()
     if any(k in n_lower for k in ["code", "developer", "programming", "devops"]):
-        return CODE_TUTORIAL_PROFILE
-    if any(k in n_lower for k in ["benchmark", "data", "paper", "metric", "hardware", "gpu"]):
-        return BENCHMARK_ANALYSIS_PROFILE
-    if any(k in n_lower for k in ["history", "doc", "story", "founder"]):
-        return TECH_DOCUMENTARY_PROFILE
-    return EDITORIAL_TECH_PROFILE
+        base = CODE_TUTORIAL_PROFILE
+    elif any(k in n_lower for k in ["benchmark", "data", "paper", "metric", "hardware", "gpu"]):
+        base = BENCHMARK_ANALYSIS_PROFILE
+    elif any(k in n_lower for k in ["history", "doc", "story", "founder"]):
+        base = TECH_DOCUMENTARY_PROFILE
+    else:
+        base = EDITORIAL_TECH_PROFILE
+
+    if production_mode:
+        return base.to_production_profile()
+    return base
