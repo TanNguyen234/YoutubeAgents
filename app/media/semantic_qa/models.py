@@ -27,7 +27,9 @@ class VisualSemanticIssue(str, Enum):
     UI_STATE_NOT_SHOWN = "UI_STATE_NOT_SHOWN"
     MECHANISM_NOT_EXPLAINED = "MECHANISM_NOT_EXPLAINED"
     COMPARISON_NOT_VISIBLE = "COMPARISON_NOT_VISIBLE"
+    COMPARISON_NOT_CLEAR = "COMPARISON_NOT_CLEAR"
     DATA_LABELS_UNREADABLE = "DATA_LABELS_UNREADABLE"
+    DATA_UNREADABLE = "DATA_UNREADABLE"
 
     GENERIC_STOCK = "GENERIC_STOCK"
     DECORATIVE_ONLY = "DECORATIVE_ONLY"
@@ -105,3 +107,29 @@ class VisualSemanticAssessment(BaseModel):
 class VisualSemanticQAError(RuntimeError):
     """Raised when Visual Semantic QA encounters an unrecoverable failure in REQUIRED mode."""
     pass
+
+
+class FrameSamplingError(VisualSemanticQAError):
+    """Raised when candidate visual frame extraction fails."""
+    pass
+
+
+class FFmpegUnavailableError(FrameSamplingError):
+    """Raised when ffmpeg or ffprobe binaries are not available."""
+    error_code: str = "FFMPEG_UNAVAILABLE"
+
+
+class FFprobeFailedError(FrameSamplingError):
+    """Raised when ffprobe execution fails to inspect video file."""
+    error_code: str = "FFPROBE_FAILED"
+
+
+class InvalidVideoError(FrameSamplingError):
+    """Raised when video file is missing, empty, or unreadable."""
+    error_code: str = "INVALID_VIDEO"
+
+
+class FrameExtractionFailedError(FrameSamplingError):
+    """Raised when ffmpeg fails to decode/extract real visual frames."""
+    error_code: str = "FRAME_SAMPLING_FAILED"
+

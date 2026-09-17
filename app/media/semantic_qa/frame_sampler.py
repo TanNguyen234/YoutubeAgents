@@ -8,8 +8,20 @@ import shutil
 import subprocess
 from typing import List, Optional
 
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except Exception:
+    pass
+
 from app.media.acquisition.models import VisualAssetCandidate
-from app.media.semantic_qa.models import CandidateVisualSample
+from app.media.semantic_qa.models import (
+    CandidateVisualSample,
+    FFmpegUnavailableError,
+    FFprobeFailedError,
+    FrameExtractionFailedError,
+    InvalidVideoError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +46,10 @@ class VideoFrameSampler:
         return h.hexdigest()
 
     def _get_video_duration(self, video_path: Path) -> float:
-        """Measure precise video duration using ffprobe, fallback to 1.0s if probe fails."""
+        """Measure precise video duration using ffprobe. Fails closed with typed error on failure."""
         ffprobe_bin = shutil.which("ffprobe")
         if not ffprobe_bin:
-            return 1.0
+            raise FFmpegUnavailableError("FFMPEG_UNAVAILABLE: ffprobe executable not found on PATH")
         try:
             cmd = [
                 ffprobe_bin,
@@ -48,10 +60,17 @@ class VideoFrameSampler:
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
             val = float(res.stdout.strip())
-            return max(0.1, val)
+            if val <= 0.0:
+                raise InvalidVideoError(f"INVALID_VIDEO: Video reported non-positive duration ({val}s): {video_path}")
+            return val
+        except subprocess.CalledProcessError as e:
+            raise FFprobeFailedError(f"FFPROBE_FAILED: ffprobe failed for {video_path}: {e.stderr or e}") from e
+        except ValueError as e:
+            raise InvalidVideoError(f"INVALID_VIDEO: Could not parse video duration from ffprobe: {e}") from e
         except Exception as e:
-            logger.warning("ffprobe failed to read duration for %s: %s", video_path, e)
-            return 1.0
+            if isinstance(e, (FFmpegUnavailableError, FFprobeFailedError, InvalidVideoError)):
+                raise
+            raise FFprobeFailedError(f"FFPROBE_FAILED: {e}") from e
 
     def sample_candidate(
         self,
@@ -61,11 +80,12 @@ class VideoFrameSampler:
         """Extract representative frames for a candidate asset.
 
         Static images: returns the image directly.
-        Videos: samples up to 3 frames at 25%, 50%, and 75% of measured duration.
+        Videos: samples real decoded frames at 25%, 50%, and 75% of measured duration.
+        Fails closed with typed error if real frames cannot be extracted.
         """
         path = Path(candidate.file_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Candidate file does not exist: {path}")
+        if not path.exists() or path.stat().st_size == 0:
+            raise InvalidVideoError(f"INVALID_VIDEO: Candidate file does not exist or is empty: {path}")
 
         ext = path.suffix.lower()
 
@@ -81,9 +101,12 @@ class VideoFrameSampler:
 
         # 2. Video Candidate
         ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            raise FFmpegUnavailableError("FFMPEG_UNAVAILABLE: ffmpeg executable not found on PATH")
+
         duration = candidate.duration_seconds or self._get_video_duration(path)
         if duration <= 0.0:
-            duration = 1.0
+            raise InvalidVideoError(f"INVALID_VIDEO: Invalid video duration ({duration}s) for {path}")
 
         # Quarter, half, and three-quarter positions (never 0.0 to avoid black intro frames)
         ratios = [0.25, 0.50, 0.75]
@@ -96,27 +119,27 @@ class VideoFrameSampler:
             out_name = f"{shot_id}_{candidate.candidate_id}_f{idx}_{int(ts * 1000)}.png"
             out_path = self.temp_dir / out_name
 
-            if ffmpeg_bin:
-                try:
-                    cmd = [
-                        ffmpeg_bin,
-                        "-y",
-                        "-ss", str(ts),
-                        "-i", str(path),
-                        "-vframes", "1",
-                        "-q:v", "2",
-                        str(out_path),
-                    ]
-                    subprocess.run(cmd, capture_output=True, check=True, timeout=15)
-                except Exception as e:
-                    logger.warning("FFmpeg frame extraction failed at %ss for %s: %s", ts, path, e)
+            try:
+                cmd = [
+                    ffmpeg_bin,
+                    "-y",
+                    "-ss", str(ts),
+                    "-i", str(path),
+                    "-vframes", "1",
+                    "-q:v", "2",
+                    str(out_path),
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=15)
+            except Exception as e:
+                raise FrameExtractionFailedError(
+                    f"FRAME_SAMPLING_FAILED: FFmpeg frame extraction failed at timestamp {ts}s for {path}: {e}"
+                ) from e
 
-            # Fallback if ffmpeg extraction didn't produce file
-            if not out_path.exists():
-                # If extraction fails (e.g. mock test environment), generate a placeholder PNG
-                from PIL import Image
-                img = Image.new("RGB", (320, 240), color=(50, 50, 50))
-                img.save(out_path)
+            # Strictly require real extracted frame file
+            if not out_path.exists() or out_path.stat().st_size == 0:
+                raise FrameExtractionFailedError(
+                    f"FRAME_SAMPLING_FAILED: Extracted frame does not exist or is empty: {out_path}"
+                )
 
             sha = self._compute_file_sha256(out_path)
             sample_paths.append(str(out_path.resolve()))

@@ -125,10 +125,12 @@ class AntigravityVisualBackend:
         if self.effort:
             cmd.extend(["--effort", self.effort])
 
-        # Crucial: --dangerously-skip-permissions is required in headless print mode
-        # to allow the internal agent to inspect image files without terminal interaction
+        # Security hardening: Execute inside strict sandbox and disable slash commands.
+        # Do NOT use --dangerously-skip-permissions. agy runs with default read permissions
+        # while denying write_file, command execution, or network actions.
         cmd.extend([
-            "--dangerously-skip-permissions",
+            "--sandbox",
+            "--disable-slash-commands",
             "--print",
             full_prompt,
             "--output-format",
