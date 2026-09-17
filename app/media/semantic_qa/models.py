@@ -1,7 +1,7 @@
 """Domain models, enums, and typed contracts for Visual Semantic QA and Candidate Judging."""
 
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -132,4 +132,61 @@ class InvalidVideoError(FrameSamplingError):
 class FrameExtractionFailedError(FrameSamplingError):
     """Raised when ffmpeg fails to decode/extract real visual frames."""
     error_code: str = "FRAME_SAMPLING_FAILED"
+
+
+def normalize_semantic_audit(
+    performed: bool,
+    verdict: Optional[str] = None,
+    issues: Optional[List[Any]] = None,
+    reason: Optional[str] = None,
+    policy_version: Optional[str] = None,
+    backend: Optional[str] = None,
+    model: Optional[str] = None,
+    semantic_score: Optional[float] = None,
+    deterministic_score: Optional[float] = None,
+    final_score: Optional[float] = None,
+    component_scores: Optional[Dict[str, Optional[float]]] = None,
+    candidate_id: Optional[str] = None,
+    shot_id: Optional[str] = None,
+    candidate_sha256: Optional[str] = None,
+    semantic_input_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return a normalized audit dictionary adhering to the Visual Semantic QA audit contract."""
+    clean_issues = []
+    if issues:
+        for i in issues:
+            if hasattr(i, "value"):
+                clean_issues.append(str(i.value))
+            elif isinstance(i, str):
+                clean_issues.append(i)
+            else:
+                clean_issues.append(str(i))
+
+    audit: Dict[str, Any] = {
+        "performed": bool(performed),
+        "verdict": verdict,
+        "issues": clean_issues,
+        "reason": reason,
+        "policy_version": policy_version,
+        "backend": backend,
+        "model": model,
+        "semantic_score": semantic_score,
+        "deterministic_score": deterministic_score,
+        "final_score": final_score if final_score is not None else semantic_score,
+    }
+    if candidate_id:
+        audit["candidate_id"] = candidate_id
+    if shot_id:
+        audit["shot_id"] = shot_id
+    if candidate_sha256:
+        audit["candidate_sha256"] = candidate_sha256
+    if semantic_input_hash:
+        audit["semantic_input_hash"] = semantic_input_hash
+
+    if component_scores:
+        for k, v in component_scores.items():
+            if v is not None:
+                audit[k] = v
+
+    return audit
 

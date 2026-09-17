@@ -14,6 +14,7 @@ from app.media.acquisition.models import (
     VisualAssetCandidate,
     VisualAssetProvenance,
     VisualSourceType,
+    resolve_candidate_actual_modality,
 )
 from app.media.acquisition.stock import PexelsStockProvider, StockMediaProvider
 from app.media.acquisition.web_capture import WebCaptureService, is_within_canonical_url_scope
@@ -336,6 +337,7 @@ class VisualAcquisitionRouter:
                             height=1920,
                             acquisition_method="diagram_renderer_evidence_fallback",
                             is_synthetic=False,
+                            actual_modality=VisualModality.DIAGRAM,
                         )
                     )
                 except Exception as e:
@@ -403,6 +405,7 @@ class VisualAcquisitionRouter:
                             height=1920,
                             acquisition_method="diagram_renderer_screencap_fallback",
                             is_synthetic=False,
+                            actual_modality=VisualModality.DIAGRAM,
                         )
                     )
                 except Exception as e:
@@ -450,6 +453,7 @@ class VisualAcquisitionRouter:
                             height=1920,
                             acquisition_method="diagram_renderer_stock_fallback",
                             is_synthetic=False,
+                            actual_modality=VisualModality.DIAGRAM,
                         )
                     )
                 except Exception as e:
@@ -478,6 +482,7 @@ class VisualAcquisitionRouter:
                         height=1920,
                         acquisition_method="visual_factory_static_card",
                         is_synthetic=False,
+                        actual_modality=VisualModality.STATIC_CARD,
                     )
                 )
             except Exception as e:
@@ -493,11 +498,24 @@ class VisualAcquisitionRouter:
             det_scores = {c.candidate_id: score for c, score in ranked}
             active_qa_mode = qa_mode or self.qa_mode
 
-            if active_qa_mode == VisualSemanticQAMode.DISABLED or not self.semantic_judge:
+            if active_qa_mode == VisualSemanticQAMode.DISABLED:
                 if ranked:
                     winner, winning_score = ranked[0]
                     selected_id = winner.candidate_id
                     self.ranker.record_selection(winner, request.modality)
+            elif not self.semantic_judge:
+                if active_qa_mode == VisualSemanticQAMode.REQUIRED:
+                    failures.append("SEMANTIC_QA_UNAVAILABLE: Semantic judge is required but not configured")
+                    raise VisualSemanticQAError("SEMANTIC_QA_UNAVAILABLE")
+                else:
+                    logger.warning(
+                        "SEMANTIC_QA_UNAVAILABLE: No semantic judge configured, advisory fallback to deterministic winner"
+                    )
+                    failures.append("SEMANTIC_QA_UNAVAILABLE")
+                    if ranked:
+                        winner, winning_score = ranked[0]
+                        selected_id = winner.candidate_id
+                        self.ranker.record_selection(winner, request.modality)
             else:
                 try:
                     judging_shot = shot
@@ -558,16 +576,7 @@ class VisualAcquisitionRouter:
                         winner = c
                         break
                 if winner:
-                    if winner.source_type in (VisualSourceType.RESEARCH_SOURCE, VisualSourceType.DOCUMENT, VisualSourceType.WEB_PAGE):
-                        actual_modality = VisualModality.DOCUMENT_EVIDENCE
-                    elif winner.source_type == VisualSourceType.LOCAL_WEB_APP:
-                        actual_modality = VisualModality.SCREEN_CAPTURE
-                    elif winner.source_type == VisualSourceType.RENDERED:
-                        actual_modality = VisualModality.DIAGRAM
-                    elif winner.source_type == VisualSourceType.FALLBACK_CARD:
-                        actual_modality = VisualModality.STATIC_CARD
-                    else:
-                        actual_modality = request.modality
+                    actual_modality = winner.actual_modality or resolve_candidate_actual_modality(winner, request.modality)
 
         return VisualAcquisitionResult(
             request=request,

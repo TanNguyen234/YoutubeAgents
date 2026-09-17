@@ -13,6 +13,7 @@ from app.media.acquisition.models import (
     VisualAcquisitionRequest,
     VisualAssetCandidate,
     VisualSourceType,
+    resolve_candidate_actual_modality,
 )
 from app.media.director.models import ShotSpec
 from app.media.semantic_qa.evaluator import VisualSemanticEvaluator
@@ -22,11 +23,51 @@ from app.media.semantic_qa.models import (
     VisualSemanticIssue,
     VisualSemanticQAError,
     VisualSemanticVerdict,
+    normalize_semantic_audit,
 )
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+
+
+def verify_asset_file_integrity(
+    file_path: Path | str,
+    declared_sha: Optional[str] = None,
+) -> Tuple[bool, Optional[str], Optional[str]]:
+    """Verify asset file existence, non-emptiness, valid format, and SHA-256 integrity.
+
+    Returns:
+        (passed: bool, failure_reason: Optional[str], actual_sha: Optional[str])
+    """
+    path = Path(file_path)
+    if not path.exists():
+        return False, f"MISSING_FILE: Asset file not found: {path}", None
+
+    try:
+        size = os.path.getsize(path)
+        if size == 0:
+            return False, f"EMPTY_FILE: Asset file is 0 bytes: {path}", None
+    except Exception as e:
+        return False, f"FILE_READ_ERROR: {e}", None
+
+    try:
+        actual_sha = VisualCandidateJudge._compute_sha256(path)
+    except Exception as e:
+        return False, f"SHA_COMPUTE_ERROR: {e}", None
+
+    if declared_sha and actual_sha.lower() != declared_sha.lower():
+        return (
+            False,
+            f"VISUAL_ASSET_SHA_MISMATCH: Declared '{declared_sha}' != actual '{actual_sha}'",
+            actual_sha,
+        )
+
+    ext = path.suffix.lower()
+    if ext not in SUPPORTED_MEDIA_EXTENSIONS:
+        return False, f"UNSUPPORTED_MEDIA_TYPE: Extension '{ext}' not supported", actual_sha
+
+    return True, None, actual_sha
 
 
 class CandidateJudgingResult(BaseModel):
@@ -83,33 +124,19 @@ class VisualCandidateJudge:
         - REAL_REQUIRED gate: synthetic assets prohibited for real modalities
         - Basic provenance presence
         """
-        path = Path(candidate.file_path)
-        if not path.exists():
-            return False, f"MISSING_FILE: Asset file not found: {path}", VisualSemanticIssue.EVIDENCE_NOT_VISIBLE
-
-        try:
-            size = os.path.getsize(path)
-            if size == 0:
-                return False, f"EMPTY_FILE: Asset file is 0 bytes: {path}", VisualSemanticIssue.LOW_INFORMATION_DENSITY
-        except Exception as e:
-            return False, f"FILE_READ_ERROR: {e}", VisualSemanticIssue.EVIDENCE_NOT_VISIBLE
-
-        # SHA-256 match check
-        try:
-            actual_sha = self._compute_sha256(path)
-            if candidate.content_sha256 and actual_sha.lower() != candidate.content_sha256.lower():
-                return (
-                    False,
-                    f"SHA_MISMATCH: Declared '{candidate.content_sha256}' != actual '{actual_sha}'",
-                    VisualSemanticIssue.VISUAL_CONTRADICTION,
-                )
-        except Exception as e:
-            return False, f"SHA_COMPUTE_ERROR: {e}", VisualSemanticIssue.EVIDENCE_NOT_VISIBLE
-
-        # Supported media format
-        ext = path.suffix.lower()
-        if ext not in SUPPORTED_MEDIA_EXTENSIONS:
-            return False, f"UNSUPPORTED_MEDIA_TYPE: Extension '{ext}' not supported", VisualSemanticIssue.VISUAL_INTENT_MISMATCH
+        passed, reason, actual_sha = verify_asset_file_integrity(
+            candidate.file_path, declared_sha=candidate.content_sha256
+        )
+        if not passed:
+            if reason and "MISSING_FILE" in reason:
+                return False, reason, VisualSemanticIssue.EVIDENCE_NOT_VISIBLE
+            if reason and "EMPTY_FILE" in reason:
+                return False, reason, VisualSemanticIssue.LOW_INFORMATION_DENSITY
+            if reason and "VISUAL_ASSET_SHA_MISMATCH" in reason:
+                return False, reason, VisualSemanticIssue.VISUAL_CONTRADICTION
+            if reason and "UNSUPPORTED_MEDIA_TYPE" in reason:
+                return False, reason, VisualSemanticIssue.VISUAL_INTENT_MISMATCH
+            return False, reason or "INTEGRITY_CHECK_FAILED", VisualSemanticIssue.EVIDENCE_NOT_VISIBLE
 
         # Dimension sanity
         if candidate.width is not None and candidate.width < 100:
@@ -187,6 +214,10 @@ class VisualCandidateJudge:
         failures: List[str] = []
 
         for cand in shortlist:
+            # Derive actual candidate modality before semantic evaluation
+            cand_modality = cand.actual_modality or resolve_candidate_actual_modality(cand, request.modality)
+            cand.actual_modality = cand_modality
+
             # 1. Deterministic Precheck
             passed, precheck_reason, precheck_issue = self.run_deterministic_precheck(cand, request)
             if not passed:
@@ -216,9 +247,10 @@ class VisualCandidateJudge:
                 failures.append(f"PRECHECK_FAILED ({cand.candidate_id}): {precheck_reason}")
                 continue
 
-            # 2. Semantic Evaluation
+            # 2. Semantic Evaluation using candidate actual modality
+            eval_shot = shot.model_copy(update={"visual_modality": cand_modality})
             try:
-                assessment = self.evaluator.evaluate_candidate(cand, shot)
+                assessment = self.evaluator.evaluate_candidate(cand, eval_shot)
             except VisualSemanticQAError:
                 raise
             except Exception as e:
@@ -259,18 +291,42 @@ class VisualCandidateJudge:
         winner, win_final, win_det, win_sem = accepted_candidates[0]
         winner_assessment = assessments[winner.candidate_id]
 
-        audit_metadata = {
-            "candidate_id": winner.candidate_id,
-            "deterministic_score": win_det,
-            "semantic_score": win_sem,
-            "final_score": win_final,
-            "semantic_verdict": winner_assessment.verdict.value,
-            "semantic_issues": [i.value for i in winner_assessment.issues],
-            "semantic_reason": winner_assessment.concise_reason,
-            "semantic_policy_version": winner_assessment.evaluator_policy_version,
-            "semantic_backend": winner_assessment.evaluator_backend,
-            "semantic_model": winner_assessment.evaluator_model,
+        component_scores = {
+            "semantic_relevance": winner_assessment.semantic_relevance,
+            "visual_intent_match": winner_assessment.visual_intent_match,
+            "subject_match": winner_assessment.subject_match,
+            "readability": winner_assessment.readability,
+            "information_value": winner_assessment.information_value,
+            "generic_slop_score": winner_assessment.generic_slop_score,
         }
+        if winner_assessment.evidence_visibility is not None:
+            component_scores["evidence_visibility"] = winner_assessment.evidence_visibility
+        if winner_assessment.interface_state_match is not None:
+            component_scores["interface_state_match"] = winner_assessment.interface_state_match
+        if winner_assessment.mechanism_clarity is not None:
+            component_scores["mechanism_clarity"] = winner_assessment.mechanism_clarity
+        if winner_assessment.comparison_clarity is not None:
+            component_scores["comparison_clarity"] = winner_assessment.comparison_clarity
+        if winner_assessment.data_readability is not None:
+            component_scores["data_readability"] = winner_assessment.data_readability
+
+        audit_metadata = normalize_semantic_audit(
+            performed=True,
+            verdict=winner_assessment.verdict.value,
+            issues=[i.value for i in winner_assessment.issues],
+            reason=winner_assessment.concise_reason,
+            policy_version=winner_assessment.evaluator_policy_version,
+            backend=winner_assessment.evaluator_backend,
+            model=winner_assessment.evaluator_model,
+            semantic_score=win_sem,
+            deterministic_score=win_det,
+            final_score=win_final,
+            component_scores=component_scores,
+            candidate_id=winner.candidate_id,
+            shot_id=shot.shot_id,
+            candidate_sha256=winner_assessment.candidate_sha256,
+            semantic_input_hash=winner_assessment.semantic_input_hash,
+        )
 
         return CandidateJudgingResult(
             shot_id=shot.shot_id,
