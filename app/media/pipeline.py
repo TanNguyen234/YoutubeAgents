@@ -32,6 +32,7 @@ from app.media.models import (
     DIRECTOR_PIPELINE_VERSION,
     GROUNDING_POLICY_VERSION,
     RETENTION_POLICY_VERSION,
+    VISUAL_SEMANTIC_QA_POLICY_VERSION,
     compute_artifact_fingerprint,
     compute_production_fingerprint,
     compute_retention_plan_hash,
@@ -218,6 +219,14 @@ class MediaProductionPipeline:
         if resolved_profile:
             self.visual_evaluator.profile = resolved_profile
         creative_profile_name = resolved_profile.name if resolved_profile else "default"
+        active_qa_mode = "ADVISORY"
+        if resolved_profile and getattr(resolved_profile, "semantic_qa_mode", None):
+            active_qa_mode = getattr(resolved_profile, "semantic_qa_mode", "ADVISORY")
+        elif self.director and getattr(self.director, "profile", None):
+            active_qa_mode = getattr(self.director.profile, "semantic_qa_mode", "ADVISORY")
+        if not isinstance(active_qa_mode, str):
+            active_qa_mode = getattr(active_qa_mode, "value", "ADVISORY")
+        active_qa_mode = active_qa_mode.upper()
 
         # Resolve Content Format
         raw_fmt = getattr(project.script, "content_format", ContentFormat.EXPLAINER)
@@ -286,6 +295,7 @@ class MediaProductionPipeline:
             creative_qa_policy_version=CREATIVE_QA_POLICY_VERSION,
             retention_policy_version=RETENTION_POLICY_VERSION,
             retention_plan_hash=current_retention_plan_hash,
+            visual_semantic_qa_mode=active_qa_mode,
         )
 
         if not force_rebuild and manifest_path.exists():
@@ -300,6 +310,10 @@ class MediaProductionPipeline:
                 cached_fallback_pol = getattr(cached_manifest, "fallback_policy", None)
                 cached_profile = getattr(cached_manifest, "creative_profile", None)
                 cached_format = getattr(cached_manifest, "content_format", None)
+                cached_qa_mode = getattr(cached_manifest, "visual_semantic_qa_mode", "ADVISORY") or "ADVISORY"
+                if not isinstance(cached_qa_mode, str):
+                    cached_qa_mode = getattr(cached_qa_mode, "value", "ADVISORY")
+                cached_qa_mode = cached_qa_mode.upper()
                 cached_fingerprint = getattr(cached_manifest, "request_fingerprint", None) or cached_manifest.production_fingerprint
                 cached_director_used = getattr(cached_manifest, "director_used", True)
                 cached_fallback_occurred = getattr(cached_manifest, "director_fallback_occurred", False)
@@ -314,6 +328,7 @@ class MediaProductionPipeline:
                     and (cached_fallback_pol is None or cached_fallback_pol == active_fallback_policy.value)
                     and (cached_profile is None or cached_profile == creative_profile_name)
                     and (cached_format is None or cached_format == content_format_str)
+                    and (cached_qa_mode == active_qa_mode)
                     and cached_fingerprint == requested_production_fingerprint
                     and cached_manifest.canonical_narration_sha256 == expected_narration_hash
                     and cached_manifest.render_profile == render_prof.name
@@ -668,6 +683,7 @@ class MediaProductionPipeline:
                 creative_qa_policy_version=CREATIVE_QA_POLICY_VERSION,
                 retention_policy_version=RETENTION_POLICY_VERSION,
                 retention_plan_hash=current_retention_plan_hash,
+                visual_semantic_qa_mode=active_qa_mode,
             )
 
             # 9b. AI Background Music Generation
@@ -881,6 +897,8 @@ class MediaProductionPipeline:
                 grounding_policy_version=GROUNDING_POLICY_VERSION,
                 creative_qa_policy_version=CREATIVE_QA_POLICY_VERSION,
                 retention_policy_version=RETENTION_POLICY_VERSION,
+                visual_semantic_qa_policy_version=VISUAL_SEMANTIC_QA_POLICY_VERSION,
+                visual_semantic_qa_mode=active_qa_mode,
                 retention_plan_hash=current_retention_plan_hash,
                 fallback_policy=active_fallback_policy.value,
                 creative_profile=creative_profile_name,
@@ -918,6 +936,7 @@ class MediaProductionPipeline:
                             "evidence_claim_ids": list(getattr(s, "asset_evidence_claim_ids", []) or []),
                             "acquisition_method": getattr(s, "asset_acquisition_method", None) or "director",
                             "synthetic": getattr(s, "asset_is_synthetic", False),
+                            "semantic_qa": getattr(s, "asset_semantic_qa", None),
                         }
                         for s in timeline.shots
                     ]

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -13,6 +14,11 @@ from app.media.semantic_qa.models import VisualSemanticAssessment
 logger = logging.getLogger(__name__)
 
 VISUAL_SEMANTIC_QA_POLICY_VERSION = "semantic-qa-v1"
+
+
+def get_project_semantic_cache_path(project_id: str, base_dir: Path | str = Path("output/projects")) -> Path:
+    """Return canonical path to project semantic QA cache sidecar: output/projects/<project_id>/manifests/semantic_qa_cache.json."""
+    return Path(base_dir) / project_id / "manifests" / "semantic_qa_cache.json"
 
 
 def compute_semantic_input_hash(
@@ -74,8 +80,10 @@ class SemanticQACache:
         if self.cache_file_path:
             try:
                 self.cache_file_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(self.cache_file_path, "w", encoding="utf-8") as f:
+                tmp_path = self.cache_file_path.with_name(f"{self.cache_file_path.name}.tmp")
+                with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(self._cache, f, indent=2)
+                os.replace(tmp_path, self.cache_file_path)
             except Exception as e:
                 logger.warning("Failed to save semantic QA cache to %s: %s", self.cache_file_path, e)
 
