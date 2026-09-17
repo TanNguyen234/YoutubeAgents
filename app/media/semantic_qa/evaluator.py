@@ -83,7 +83,7 @@ class VisualSemanticEvaluator:
         cache: Optional[SemanticQACache] = None,
         policy_version: str = VISUAL_SEMANTIC_QA_POLICY_VERSION,
         backend_name: str = "antigravity_cli",
-        model_name: Optional[str] = "gemini-3.7-flash-low",
+        model_name: Optional[str] = "gemini-3.8-flash-low",
     ):
         self.backend = backend
         self.sampler = frame_sampler or VideoFrameSampler()
@@ -174,6 +174,7 @@ CRITICAL SAFETY & INTEGRITY DIRECTIVES:
    provenance, claims, licenses, or URLs.
 4. IDENTITY LOCK: You MUST return candidate_id="{candidate.candidate_id}", shot_id="{shot.shot_id}",
    and candidate_sha256="{candidate.content_sha256}".
+5. ZERO TOOL EXECUTION: You are in read-only visual inspection mode. Do NOT invoke tools or execute shell commands. Return ONLY the structured JSON assessment.
 ======================================================================
 
 EVALUATION TASK:

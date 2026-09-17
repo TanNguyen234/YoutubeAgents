@@ -1,7 +1,7 @@
-"""Visual reasoning backend interface and Antigravity CLI multimodal integration."""
-
 import json
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import time
@@ -36,7 +36,7 @@ class AntigravityVisualBackend:
     def __init__(
         self,
         cli_binary: str = "agy",
-        model: Optional[str] = "gemini-3.7-flash-low",
+        model: Optional[str] = "gemini-3.8-flash-low",
         effort: Optional[str] = "low",
         timeout_seconds: int = 120,
         max_retries: int = 3,
@@ -97,7 +97,7 @@ class AntigravityVisualBackend:
         image_paths: List[str],
         schema_cls: Type[T],
     ) -> T:
-        """Execute `agy` CLI with image references and return validated Pydantic model."""
+        """Execute `agy` CLI with image references inside an isolated disposable workspace."""
         if not image_paths:
             raise ValueError("evaluate_visual requires at least one image path")
 
@@ -105,42 +105,55 @@ class AntigravityVisualBackend:
             if not os.path.exists(img):
                 raise FileNotFoundError(f"Visual asset file not found: '{img}'")
 
-        # Build composite prompt referencing local images
-        if len(image_paths) == 1:
-            img_ref = f"Inspect the image file at '{image_paths[0]}'."
-        else:
-            frames_list = "\n".join(f"- Frame {i+1}: '{p}'" for i, p in enumerate(image_paths))
-            img_ref = f"Inspect the following representative video frames:\n{frames_list}"
+        # Security hardening: create a completely isolated disposable temporary workspace.
+        # Copy ONLY candidate image frames and schema file into this workspace.
+        # Run agy with cwd pointing to this directory so that prompt-injected or untrusted content
+        # cannot inspect the repository or write files into the real workspace.
+        with tempfile.TemporaryDirectory(prefix="agy_vqa_ws_") as isolated_ws:
+            ws_path = Path(isolated_ws)
 
-        full_prompt = f"{img_ref}\n\n{prompt}"
+            # Copy input image(s) to isolated workspace
+            isolated_image_names: List[str] = []
+            for i, p in enumerate(image_paths):
+                ext = Path(p).suffix or ".png"
+                img_name = f"frame_{i}{ext}"
+                target_img = ws_path / img_name
+                shutil.copy2(p, target_img)
+                isolated_image_names.append(img_name)
 
-        # Write schema to temporary JSON file
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as tf:
-            json.dump(schema_cls.model_json_schema(), tf)
-            schema_file_path = tf.name
+            # Write schema file directly inside isolated workspace
+            schema_file_path = ws_path / "schema.json"
+            with open(schema_file_path, "w", encoding="utf-8") as tf:
+                json.dump(schema_cls.model_json_schema(), tf)
 
-        cmd = [self.cli_binary]
-        if self.model:
-            cmd.extend(["--model", self.model])
-        if self.effort:
-            cmd.extend(["--effort", self.effort])
+            # Build composite prompt referencing isolated local files
+            if len(isolated_image_names) == 1:
+                img_ref = f"Inspect the image file at '{isolated_image_names[0]}'. You are in read-only visual inspection mode. Do NOT invoke tools or execute shell commands. Produce the structured JSON assessment directly."
+            else:
+                frames_list = "\n".join(f"- Frame {i+1}: '{fn}'" for i, fn in enumerate(isolated_image_names))
+                img_ref = f"Inspect the following representative video frames:\n{frames_list}\nYou are in read-only visual inspection mode. Do NOT invoke tools or execute shell commands. Produce the structured JSON assessment directly."
 
-        # Security hardening: Execute inside strict sandbox and disable slash commands.
-        # Do NOT use --dangerously-skip-permissions. agy runs with default read permissions
-        # while denying write_file, command execution, or network actions.
-        cmd.extend([
-            "--sandbox",
-            "--disable-slash-commands",
-            "--print",
-            full_prompt,
-            "--output-format",
-            "json",
-            "--json-schema",
-            schema_file_path,
-        ])
+            full_prompt = f"{img_ref}\n\n{prompt}"
 
-        res = None
-        try:
+            cmd = [self.cli_binary]
+            if self.model:
+                cmd.extend(["--model", self.model])
+            if self.effort:
+                cmd.extend(["--effort", self.effort])
+
+            # Security flags: execute in sandbox mode without slash commands or dangerous permissions
+            cmd.extend([
+                "--sandbox",
+                "--disable-slash-commands",
+                "--print",
+                full_prompt,
+                "--output-format",
+                "json",
+                "--json-schema",
+                "schema.json",
+            ])
+
+            res = None
             for attempt in range(self.max_retries):
                 try:
                     res = subprocess.run(
@@ -150,6 +163,7 @@ class AntigravityVisualBackend:
                         encoding="utf-8",
                         errors="replace",
                         timeout=self.timeout_seconds,
+                        cwd=str(ws_path),
                     )
                 except FileNotFoundError:
                     raise AntigravityBackendError(
@@ -183,12 +197,6 @@ class AntigravityVisualBackend:
                         stderr=res.stderr,
                     )
                 break
-        finally:
-            if os.path.exists(schema_file_path):
-                try:
-                    os.unlink(schema_file_path)
-                except Exception:
-                    pass
 
         try:
             if not res or res.stdout is None:
