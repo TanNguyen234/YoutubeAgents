@@ -7,8 +7,11 @@
 - Per-project sidecar semantic cache persistence in output/projects/<id>/manifests/semantic_qa_cache.json
 """
 
+import hashlib
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Type
 from unittest.mock import MagicMock
@@ -30,6 +33,7 @@ from app.media.director.models import (
     VisualIntent,
     VisualModality,
 )
+from app.media.director.profiles import get_channel_profile_for_niche
 from app.media.models import (
     compute_artifact_fingerprint,
     compute_production_fingerprint,
@@ -253,12 +257,14 @@ def test_gflow_generated_media_synthetic_provenance(tmp_path: Path):
     dummy_img = tmp_path / "gflow_test.png"
     Image.new("RGB", (320, 240), color=(50, 100, 150)).save(dummy_img)
 
+    img_sha = hashlib.sha256(dummy_img.read_bytes()).hexdigest()
     dummy_vid = tmp_path / "gflow_test.mp4"
     dummy_vid.write_bytes(b"dummy_video_content")
+    vid_sha = hashlib.sha256(dummy_vid.read_bytes()).hexdigest()
 
     mock_gflow = MagicMock()
-    mock_gflow.generate_image.return_value = (str(dummy_img), "sha_img_123", {})
-    mock_gflow.generate_video.return_value = (str(dummy_vid), "sha_vid_123", {})
+    mock_gflow.generate_image.return_value = (str(dummy_img), img_sha, {})
+    mock_gflow.generate_video.return_value = (str(dummy_vid), vid_sha, {})
 
     backend = _make_accepting_backend()
     profile = ChannelCreativeProfile(name="gflow_prof", semantic_qa_mode="ADVISORY")
@@ -425,3 +431,241 @@ def test_per_project_semantic_qa_cache_persistence(tmp_path: Path):
     assert assessment_2.verdict == VisualSemanticVerdict.ACCEPT
     # Mock backend call count must NOT have increased (reused from persistent sidecar cache)
     assert len(mock_backend.invocations) == 1
+
+
+# ==============================================================================
+# 6. Direct Asset Integrity Precheck & Cache Protection Tests
+# ==============================================================================
+
+def test_direct_render_sha_mismatch_rejected_before_vlm(tmp_path: Path):
+    """Direct render asset with SHA mismatch fails closed before VLM in REQUIRED mode
+    and corrects SHA while rejecting before VLM in ADVISORY mode."""
+    backend = _make_accepting_backend()
+    prod_profile = ChannelCreativeProfile.production_profile(name="prod_sha_mismatch")
+    director = AutoDirectorService(profile=prod_profile, reasoning_backend=backend)
+
+    diag_file = tmp_path / "fake_diag.png"
+    Image.new("RGB", (320, 240), color=(10, 20, 30)).save(diag_file)
+
+    # Return mismatching declared SHA
+    director.diagram_renderer.render_from_instruction = MagicMock(
+        return_value=(diag_file, "wrong_hash_1234567890abcdef")
+    )
+
+    shot = ShotSpec(
+        shot_id="shot_sha_mismatch",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.DIAGRAM,
+        requested_modality=VisualModality.DIAGRAM,
+        visual_intent=VisualIntent.SHOW_MECHANISM,
+        subject="Corrupt Hash Diagram",
+        narration_segment="Integrity check catches mismatch.",
+        duration_seconds=3.0,
+        diagram_instruction="Simple diagram",
+    )
+
+    # In REQUIRED mode, raises VisualSemanticQAError before VLM
+    with pytest.raises(VisualSemanticQAError, match="VISUAL_ASSET_SHA_MISMATCH"):
+        director._generate_shot_asset(
+            shot=shot,
+            shot_index=0,
+            output_dir=tmp_path,
+            script_title="Integrity Test",
+            channel_name="Tech Channel",
+        )
+    assert len(backend.invocations) == 0  # VLM was never reached
+
+    # In ADVISORY mode, rejects before VLM and corrects SHA
+    adv_profile = ChannelCreativeProfile(name="adv_prof", semantic_qa_mode="ADVISORY")
+    director_adv = AutoDirectorService(profile=adv_profile, reasoning_backend=backend)
+    director_adv.diagram_renderer.render_from_instruction = MagicMock(
+        return_value=(diag_file, "wrong_hash_1234567890abcdef")
+    )
+    res_adv = director_adv._generate_shot_asset(
+        shot=shot,
+        shot_index=0,
+        output_dir=tmp_path,
+        script_title="Integrity Test",
+        channel_name="Tech Channel",
+    )
+    assert len(backend.invocations) == 0  # VLM was never reached
+    assert res_adv.semantic_audit["verdict"] == "REJECT"
+    assert "VISUAL_ASSET_SHA_MISMATCH" in res_adv.semantic_audit["reason"]
+
+
+def test_direct_render_correct_sha_reaches_vlm(tmp_path: Path):
+    """Direct render asset with matching SHA successfully reaches VLM evaluator."""
+    backend = _make_accepting_backend()
+    prod_profile = ChannelCreativeProfile.production_profile(name="prod_correct_sha")
+    director = AutoDirectorService(profile=prod_profile, reasoning_backend=backend)
+
+    diag_file = tmp_path / "correct_diag.png"
+    Image.new("RGB", (320, 240), color=(10, 20, 30)).save(diag_file)
+    correct_sha = hashlib.sha256(diag_file.read_bytes()).hexdigest()
+
+    director.diagram_renderer.render_from_instruction = MagicMock(
+        return_value=(diag_file, correct_sha)
+    )
+
+    shot = ShotSpec(
+        shot_id="shot_sha_correct",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.DIAGRAM,
+        requested_modality=VisualModality.DIAGRAM,
+        visual_intent=VisualIntent.SHOW_MECHANISM,
+        subject="Correct Hash Diagram",
+        narration_segment="Integrity check passes and evaluates via VLM.",
+        duration_seconds=3.0,
+        diagram_instruction="Valid diagram",
+    )
+
+    res = director._generate_shot_asset(
+        shot=shot,
+        shot_index=0,
+        output_dir=tmp_path,
+        script_title="Integrity Test",
+        channel_name="Tech Channel",
+    )
+    assert len(backend.invocations) == 1
+    assert res.semantic_qa_performed is True
+    assert res.semantic_audit["verdict"] == "ACCEPT"
+
+
+def test_generated_image_wrong_provider_hash_does_not_enter_semantic_cache(tmp_path: Path):
+    """GFlow generated image returning incorrect provider SHA-256 does not poison the semantic cache."""
+    dummy_img = tmp_path / "gflow_corrupt_sha.png"
+    Image.new("RGB", (320, 240), color=(80, 120, 160)).save(dummy_img)
+
+    wrong_sha = "wrong_provider_hash_0000000000000000000000000000000000000000"
+    mock_gflow = MagicMock()
+    mock_gflow.generate_image.return_value = (str(dummy_img), wrong_sha, {})
+
+    cache_path = tmp_path / "test_sidecar_cache.json"
+    cache = SemanticQACache(cache_file_path=cache_path)
+    backend = _make_accepting_backend()
+    evaluator = VisualSemanticEvaluator(backend=backend, cache=cache)
+
+    profile = ChannelCreativeProfile(name="gflow_prof", semantic_qa_mode="ADVISORY")
+    director = AutoDirectorService(profile=profile, gflow_provider=mock_gflow, reasoning_backend=backend)
+    director.acquisition_router.semantic_judge = VisualCandidateJudge(evaluator=evaluator)
+
+    shot_img = ShotSpec(
+        shot_id="shot_wrong_sha_img",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.GENERATED_IMAGE,
+        requested_modality=VisualModality.GENERATED_IMAGE,
+        visual_intent=VisualIntent.ESTABLISH_CONTEXT,
+        subject="Corrupt Hash Image",
+        narration_segment="Provider hash differs from actual disk hash.",
+        duration_seconds=3.0,
+        generation_prompt="Cyberpunk room",
+    )
+
+    res = director._generate_shot_asset(
+        shot=shot_img,
+        shot_index=0,
+        output_dir=tmp_path,
+        script_title="Integrity Test",
+        channel_name="Tech Channel",
+    )
+
+    # VLM was not invoked
+    assert len(backend.invocations) == 0
+    # Cache must not contain the wrong hash
+    assert not cache.get(f"shot_wrong_sha_img:{wrong_sha}:v1")
+    # File cache was not written with wrong hash
+    assert not cache_path.exists() or wrong_sha not in cache_path.read_text()
+
+
+# ==============================================================================
+# 7. Real Generated Video Integration Test
+# ==============================================================================
+
+def test_real_generated_video_integration(tmp_path: Path):
+    """AutoDirectorService._generate_shot_asset() with GENERATED_VIDEO invokes real frame sampling
+    on a real MP4 fixture, verifying synthetic provenance, 3 real decoded frames, and semantic QA invocation."""
+    ffmpeg_bin = shutil.which("ffmpeg")
+    assert ffmpeg_bin is not None
+    video_file = tmp_path / "gflow_veo.mp4"
+    cmd = [
+        ffmpeg_bin, "-y",
+        "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=3.0",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        str(video_file),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+    actual_sha = hashlib.sha256(video_file.read_bytes()).hexdigest()
+    mock_gflow = MagicMock()
+    mock_gflow.generate_video.return_value = (str(video_file), actual_sha, {"model": "veo-2"})
+
+    backend = _make_accepting_backend()
+    profile = ChannelCreativeProfile(name="gflow_vid_prof", semantic_qa_mode="REQUIRED")
+    director = AutoDirectorService(profile=profile, gflow_provider=mock_gflow, reasoning_backend=backend)
+
+    shot = ShotSpec(
+        shot_id="shot_veo_01",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.GENERATED_VIDEO,
+        requested_modality=VisualModality.GENERATED_VIDEO,
+        visual_intent=VisualIntent.ESTABLISH_CONTEXT,
+        subject="Robotic arm assembling chip",
+        narration_segment="Precision robotic manipulators place dies on the substrate.",
+        duration_seconds=3.0,
+        generation_prompt="Cinematic close-up of robotic arm placing microchip",
+    )
+
+    asset_res = director._generate_shot_asset(
+        shot=shot,
+        shot_index=0,
+        output_dir=tmp_path,
+        script_title="Semiconductor Fab",
+        channel_name="Tech Channel",
+    )
+
+    assert asset_res.source_type == "GENERATED"
+    assert asset_res.is_synthetic is True
+    assert asset_res.acquisition_method == "gflow_veo_video"
+    assert asset_res.semantic_qa_performed is True
+    assert asset_res.semantic_audit is not None
+    assert asset_res.semantic_audit["verdict"] == "ACCEPT"
+    assert len(backend.invocations) == 1
+
+    # Verify frame sampler decoded 3 real frames
+    call_images = backend.invocations[0]["image_paths"]
+    assert len(call_images) == 3
+    for f in call_images:
+        assert Path(f).exists()
+        assert Path(f).stat().st_size > 0
+
+    # If REQUIRED assessment rejects, VisualSemanticQAError is raised
+    reject_backend = _make_rejecting_backend(VisualSemanticIssue.ACTION_MISMATCH)
+    director_reject = AutoDirectorService(profile=profile, gflow_provider=mock_gflow, reasoning_backend=reject_backend)
+    with pytest.raises(VisualSemanticQAError, match="Visual Semantic QA REJECTED final asset"):
+        director_reject._generate_shot_asset(
+            shot=shot,
+            shot_index=0,
+            output_dir=tmp_path,
+            script_title="Semiconductor Fab",
+            channel_name="Tech Channel",
+        )
+
+
+# ==============================================================================
+# 8. Preview vs Production Profile Policy Test
+# ==============================================================================
+
+def test_preview_profile_advisory_vs_production_execution_required():
+    """Verify normal preview profile is ADVISORY while explicit production execution is REQUIRED + FAIL_CLOSED."""
+    preview_prof = get_channel_profile_for_niche("code tutorial", production_mode=False)
+    assert preview_prof.semantic_qa_mode == "ADVISORY"
+
+    prod_prof = get_channel_profile_for_niche("code tutorial", production_mode=True)
+    assert prod_prof.semantic_qa_mode == "REQUIRED"
+    assert prod_prof.fallback_policy == CreativeFallbackPolicy.FAIL_CLOSED
+

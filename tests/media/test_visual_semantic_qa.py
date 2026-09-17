@@ -1065,16 +1065,21 @@ def test_policy_version_change_invalidates_semantic_cache(tmp_image: Path):
 # ==============================================================================
 
 def test_video_candidate_extracts_three_representative_frames(tmp_path: Path):
-    """Video sampling produces 3 frames at 25%, 50%, and 75% using real FFmpeg decoding."""
+    """Video sampling produces 3 frames at 25%, 50%, and 75% using real FFmpeg decoding
+    and verifies that temporally distinct sections yield non-identical decoded frames."""
     sampler = VideoFrameSampler(temp_dir=tmp_path)
     video_file = tmp_path / "mock_video.mp4"
 
     ffmpeg_bin = shutil.which("ffmpeg")
     assert ffmpeg_bin is not None
+    # Generate multi-colored video: 0-1.2s red, 1.2-2.5s green, 2.5-4.0s blue
     cmd = [
         ffmpeg_bin, "-y",
-        "-f", "lavfi",
-        "-i", "testsrc=duration=4:size=320x240:rate=25",
+        "-f", "lavfi", "-i", "color=c=red:s=320x240:d=1.2",
+        "-f", "lavfi", "-i", "color=c=green:s=320x240:d=1.3",
+        "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=1.5",
+        "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+        "-map", "[v]",
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         str(video_file),
@@ -1094,6 +1099,12 @@ def test_video_candidate_extracts_three_representative_frames(tmp_path: Path):
     assert len(sample.sample_paths) == 3
     assert len(sample.sample_sha256s) == 3
     assert sample.sampling_method == "ffmpeg_25_50_75"
+
+    # Verify decoded frames exist and their SHA-256 hashes are not all identical
+    for p in sample.sample_paths:
+        assert os.path.exists(p)
+        assert os.path.getsize(p) > 0
+    assert len(set(sample.sample_sha256s)) == 3
 
     sampler.cleanup_samples(sample)
     # Temp samples removed
@@ -1444,3 +1455,349 @@ def test_scenario_d_ui_checkpoint_button_vs_dashboard_title(tmp_path: Path):
     assert res.selected_candidate_id == "cand_ui_action"
     assert res.assessments["cand_ui_action"].verdict == VisualSemanticVerdict.ACCEPT
     assert res.assessments["cand_ui_title"].verdict == VisualSemanticVerdict.REJECT
+
+
+# ==============================================================================
+# Router Without Judge Hardened Tests
+# ==============================================================================
+
+def test_required_router_without_semantic_judge_fails_closed(tmp_image: Path, tmp_path: Path):
+    """Router in REQUIRED mode with semantic_judge=None raises VisualSemanticQAError('SEMANTIC_QA_UNAVAILABLE')."""
+    from unittest.mock import MagicMock
+    sha = compute_file_sha(tmp_image)
+    diagram_mock = MagicMock()
+    diagram_mock.render_from_instruction.return_value = (tmp_image, sha)
+
+    router = VisualAcquisitionRouter(
+        diagram_renderer=diagram_mock,
+        semantic_judge=None,
+        qa_mode=VisualSemanticQAMode.REQUIRED,
+    )
+    shot = make_shot(modality=VisualModality.STOCK_VIDEO)
+    req = VisualAcquisitionRequest(
+        project_id="p_noj", shot_id=shot.shot_id, modality=VisualModality.STOCK_VIDEO,
+        visual_intent=shot.visual_intent, subject=shot.subject,
+    )
+
+    with pytest.raises(VisualSemanticQAError, match="SEMANTIC_QA_UNAVAILABLE"):
+        router.acquire_visual(req, tmp_path, shot=shot, qa_mode=VisualSemanticQAMode.REQUIRED)
+
+
+def test_advisory_router_without_semantic_judge_warns_and_continues(tmp_image: Path, tmp_path: Path):
+    """Router in ADVISORY mode with semantic_judge=None warns SEMANTIC_QA_UNAVAILABLE and selects deterministic winner."""
+    from unittest.mock import MagicMock
+    sha = compute_file_sha(tmp_image)
+    diagram_mock = MagicMock()
+    diagram_mock.render_from_instruction.return_value = (tmp_image, sha)
+
+    router = VisualAcquisitionRouter(
+        diagram_renderer=diagram_mock,
+        semantic_judge=None,
+        qa_mode=VisualSemanticQAMode.ADVISORY,
+    )
+    shot = make_shot(modality=VisualModality.STOCK_VIDEO)
+    req = VisualAcquisitionRequest(
+        project_id="p_adv_noj", shot_id=shot.shot_id, modality=VisualModality.STOCK_VIDEO,
+        visual_intent=shot.visual_intent, subject=shot.subject,
+    )
+
+    res = router.acquire_visual(req, tmp_path, shot=shot, qa_mode=VisualSemanticQAMode.ADVISORY)
+    assert res.selected_candidate_id == f"fallback_stock_diag_{shot.shot_id}"
+    assert any("SEMANTIC_QA_UNAVAILABLE" in f for f in res.failure_reasons)
+
+
+def test_disabled_router_without_semantic_judge_preserves_legacy_behavior(tmp_image: Path, tmp_path: Path):
+    """Router in DISABLED mode with semantic_judge=None selects deterministic winner with no semantic warning."""
+    from unittest.mock import MagicMock
+    sha = compute_file_sha(tmp_image)
+    diagram_mock = MagicMock()
+    diagram_mock.render_from_instruction.return_value = (tmp_image, sha)
+
+    router = VisualAcquisitionRouter(
+        diagram_renderer=diagram_mock,
+        semantic_judge=None,
+        qa_mode=VisualSemanticQAMode.DISABLED,
+    )
+    shot = make_shot(modality=VisualModality.STOCK_VIDEO)
+    req = VisualAcquisitionRequest(
+        project_id="p_dis_noj", shot_id=shot.shot_id, modality=VisualModality.STOCK_VIDEO,
+        visual_intent=shot.visual_intent, subject=shot.subject,
+    )
+
+    res = router.acquire_visual(req, tmp_path, shot=shot, qa_mode=VisualSemanticQAMode.DISABLED)
+    assert res.selected_candidate_id == f"fallback_stock_diag_{shot.shot_id}"
+    assert not any("SEMANTIC_QA_UNAVAILABLE" in f for f in res.failure_reasons)
+
+
+# ==============================================================================
+# Actual Candidate Modality Judging Tests
+# ==============================================================================
+
+def test_stock_failure_diagram_is_judged_as_diagram(tmp_image: Path, tmp_path: Path):
+    """When STOCK_VIDEO fails and falls back to rendered DIAGRAM, judge evaluates it as DIAGRAM."""
+    from unittest.mock import MagicMock
+    sha = compute_file_sha(tmp_image)
+    diagram_mock = MagicMock()
+    diagram_mock.render_from_instruction.return_value = (tmp_image, sha)
+
+    judged_modalities = []
+    mock_backend = MockVisualReasoningBackend(structured_responses=[
+        RawVisualEvaluationResponse(
+            candidate_id="fallback_stock_diag_s_01",
+            shot_id="s_01",
+            candidate_sha256=sha,
+            verdict=VisualSemanticVerdict.ACCEPT,
+            semantic_relevance=0.9,
+            visual_intent_match=0.9,
+            subject_match=0.9,
+            readability=0.9,
+            composition_quality=0.9,
+            information_value=0.9,
+            mechanism_clarity=0.9,
+            generic_slop_score=0.05,
+            concise_reason="Valid diagram fallback",
+        )
+    ])
+    evaluator = VisualSemanticEvaluator(backend=mock_backend)
+    orig_eval = evaluator.evaluate_candidate
+    def spy_eval(candidate, shot, **kwargs):
+        judged_modalities.append(shot.visual_modality)
+        return orig_eval(candidate, shot, **kwargs)
+    evaluator.evaluate_candidate = spy_eval
+
+    judge = VisualCandidateJudge(evaluator=evaluator)
+    router = VisualAcquisitionRouter(
+        diagram_renderer=diagram_mock,
+        semantic_judge=judge,
+        qa_mode=VisualSemanticQAMode.REQUIRED,
+    )
+
+    shot = make_shot(modality=VisualModality.STOCK_VIDEO, intent=VisualIntent.SHOW_MECHANISM)
+    req = VisualAcquisitionRequest(
+        project_id="p1", shot_id=shot.shot_id, modality=VisualModality.STOCK_VIDEO,
+        visual_intent=VisualIntent.SHOW_MECHANISM, subject="Database Replication",
+    )
+
+    res = router.acquire_visual(req, tmp_path, shot=shot, qa_mode=VisualSemanticQAMode.REQUIRED)
+    assert len(judged_modalities) == 1
+    assert judged_modalities[0] == VisualModality.DIAGRAM
+    assert res.actual_modality == VisualModality.DIAGRAM
+
+
+def test_document_capture_fallback_diagram_is_judged_as_diagram(tmp_image: Path, tmp_path: Path):
+    """When DOCUMENT_EVIDENCE fails and falls back to DIAGRAM, judge evaluates it as DIAGRAM."""
+    from unittest.mock import MagicMock
+    sha = compute_file_sha(tmp_image)
+    diagram_mock = MagicMock()
+    diagram_mock.render_from_instruction.return_value = (tmp_image, sha)
+
+    judged_modalities = []
+    mock_backend = MockVisualReasoningBackend(structured_responses=[
+        RawVisualEvaluationResponse(
+            candidate_id="fallback_diagram_shot_doc",
+            shot_id="shot_doc",
+            candidate_sha256=sha,
+            verdict=VisualSemanticVerdict.ACCEPT,
+            semantic_relevance=0.9,
+            visual_intent_match=0.9,
+            subject_match=0.9,
+            readability=0.9,
+            composition_quality=0.9,
+            information_value=0.9,
+            mechanism_clarity=0.9,
+            generic_slop_score=0.05,
+            concise_reason="Valid diagram fallback",
+        )
+    ])
+    evaluator = VisualSemanticEvaluator(backend=mock_backend)
+    orig_eval = evaluator.evaluate_candidate
+    def spy_eval(candidate, shot, **kwargs):
+        judged_modalities.append(shot.visual_modality)
+        return orig_eval(candidate, shot, **kwargs)
+    evaluator.evaluate_candidate = spy_eval
+
+    judge = VisualCandidateJudge(evaluator=evaluator)
+    router = VisualAcquisitionRouter(
+        diagram_renderer=diagram_mock,
+        semantic_judge=judge,
+        qa_mode=VisualSemanticQAMode.REQUIRED,
+    )
+
+    shot = ShotSpec(
+        shot_id="shot_doc",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        requested_modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE,
+        subject="Spec Documentation",
+        narration_segment="According to RFC 9110 specification.",
+        duration_seconds=3.0,
+    )
+    req = VisualAcquisitionRequest(
+        project_id="p_doc", shot_id="shot_doc", modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE, subject="Spec Documentation",
+    )
+
+    res = router.acquire_visual(req, tmp_path, shot=shot, qa_mode=VisualSemanticQAMode.REQUIRED)
+    assert len(judged_modalities) == 1
+    assert judged_modalities[0] == VisualModality.DIAGRAM
+    assert res.actual_modality == VisualModality.DIAGRAM
+
+
+def test_screen_capture_fallback_diagram_is_judged_as_diagram(tmp_image: Path, tmp_path: Path):
+    """When SCREEN_CAPTURE fails and falls back to DIAGRAM, judge evaluates it as DIAGRAM."""
+    from unittest.mock import MagicMock
+    sha = compute_file_sha(tmp_image)
+    diagram_mock = MagicMock()
+    diagram_mock.render_from_instruction.return_value = (tmp_image, sha)
+
+    judged_modalities = []
+    mock_backend = MockVisualReasoningBackend(structured_responses=[
+        RawVisualEvaluationResponse(
+            candidate_id="fallback_screencap_diag_shot_sc",
+            shot_id="shot_sc",
+            candidate_sha256=sha,
+            verdict=VisualSemanticVerdict.ACCEPT,
+            semantic_relevance=0.9,
+            visual_intent_match=0.9,
+            subject_match=0.9,
+            readability=0.9,
+            composition_quality=0.9,
+            information_value=0.9,
+            mechanism_clarity=0.9,
+            generic_slop_score=0.05,
+            concise_reason="Valid diagram fallback",
+        )
+    ])
+    evaluator = VisualSemanticEvaluator(backend=mock_backend)
+    orig_eval = evaluator.evaluate_candidate
+    def spy_eval(candidate, shot, **kwargs):
+        judged_modalities.append(shot.visual_modality)
+        return orig_eval(candidate, shot, **kwargs)
+    evaluator.evaluate_candidate = spy_eval
+
+    judge = VisualCandidateJudge(evaluator=evaluator)
+    router = VisualAcquisitionRouter(
+        diagram_renderer=diagram_mock,
+        semantic_judge=judge,
+        qa_mode=VisualSemanticQAMode.REQUIRED,
+    )
+
+    shot = ShotSpec(
+        shot_id="shot_sc",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.SCREEN_CAPTURE,
+        requested_modality=VisualModality.SCREEN_CAPTURE,
+        visual_intent=VisualIntent.SHOW_INTERFACE,
+        subject="Dashboard Interface",
+        narration_segment="The metrics dashboard shows live throughput.",
+        duration_seconds=3.0,
+    )
+    req = VisualAcquisitionRequest(
+        project_id="p_sc", shot_id="shot_sc", modality=VisualModality.SCREEN_CAPTURE,
+        visual_intent=VisualIntent.SHOW_INTERFACE, subject="Dashboard Interface",
+    )
+
+    res = router.acquire_visual(req, tmp_path, shot=shot, qa_mode=VisualSemanticQAMode.REQUIRED)
+    assert len(judged_modalities) == 1
+    assert judged_modalities[0] == VisualModality.DIAGRAM
+    assert res.actual_modality == VisualModality.DIAGRAM
+
+
+def test_fallback_card_is_judged_as_static_card(tmp_image: Path, tmp_path: Path):
+    """When candidates fail and last resort card is rendered, judge evaluates it as STATIC_CARD."""
+    from unittest.mock import MagicMock
+    sha = compute_file_sha(tmp_image)
+    factory_mock = MagicMock()
+    factory_mock.render_scene_card.return_value = (tmp_image, sha)
+
+    judged_modalities = []
+    mock_backend = MockVisualReasoningBackend(structured_responses=[
+        RawVisualEvaluationResponse(
+            candidate_id="static_card_s_01",
+            shot_id="s_01",
+            candidate_sha256=sha,
+            verdict=VisualSemanticVerdict.ACCEPT,
+            semantic_relevance=0.8,
+            visual_intent_match=0.8,
+            subject_match=0.8,
+            readability=0.8,
+            composition_quality=0.8,
+            information_value=0.8,
+            generic_slop_score=0.05,
+            concise_reason="Fallback card",
+        )
+    ])
+    evaluator = VisualSemanticEvaluator(backend=mock_backend)
+    orig_eval = evaluator.evaluate_candidate
+    def spy_eval(candidate, shot, **kwargs):
+        judged_modalities.append(shot.visual_modality)
+        return orig_eval(candidate, shot, **kwargs)
+    evaluator.evaluate_candidate = spy_eval
+
+    judge = VisualCandidateJudge(evaluator=evaluator)
+    router = VisualAcquisitionRouter(
+        visual_factory=factory_mock,
+        semantic_judge=judge,
+        qa_mode=VisualSemanticQAMode.REQUIRED,
+    )
+
+    shot = make_shot(modality=VisualModality.STOCK_VIDEO)
+    req = VisualAcquisitionRequest(
+        project_id="p_card", shot_id=shot.shot_id, modality=VisualModality.STOCK_VIDEO,
+        visual_intent=VisualIntent.ESTABLISH_CONTEXT, subject="Card Headline",
+    )
+
+    res = router.acquire_visual(req, tmp_path, shot=shot, qa_mode=VisualSemanticQAMode.REQUIRED)
+    assert len(judged_modalities) == 1
+    assert judged_modalities[0] == VisualModality.STATIC_CARD
+    assert res.actual_modality == VisualModality.STATIC_CARD
+
+
+def test_selected_result_actual_modality_matches_judged_modality(tmp_image: Path, tmp_path: Path):
+    """VisualAcquisitionResult.actual_modality strictly equals the judged candidate actual_modality."""
+    from unittest.mock import MagicMock
+    sha = compute_file_sha(tmp_image)
+    diagram_mock = MagicMock()
+    diagram_mock.render_from_instruction.return_value = (tmp_image, sha)
+
+    mock_backend = MockVisualReasoningBackend(structured_responses=[
+        RawVisualEvaluationResponse(
+            candidate_id="fallback_stock_diag_shot_match",
+            shot_id="shot_match",
+            candidate_sha256=sha,
+            verdict=VisualSemanticVerdict.ACCEPT,
+            semantic_relevance=0.9,
+            visual_intent_match=0.9,
+            subject_match=0.9,
+            readability=0.9,
+            composition_quality=0.9,
+            information_value=0.9,
+            mechanism_clarity=0.9,
+            generic_slop_score=0.05,
+            concise_reason="Good diagram",
+        )
+    ])
+    evaluator = VisualSemanticEvaluator(backend=mock_backend)
+    judge = VisualCandidateJudge(evaluator=evaluator)
+    router = VisualAcquisitionRouter(
+        diagram_renderer=diagram_mock,
+        semantic_judge=judge,
+        qa_mode=VisualSemanticQAMode.REQUIRED,
+    )
+
+    shot = make_shot(modality=VisualModality.STOCK_VIDEO)
+    shot = shot.model_copy(update={"shot_id": "shot_match"})
+    req = VisualAcquisitionRequest(
+        project_id="p_match", shot_id="shot_match", modality=VisualModality.STOCK_VIDEO,
+        visual_intent=VisualIntent.SHOW_MECHANISM, subject="Matching Modality",
+    )
+
+    res = router.acquire_visual(req, tmp_path, shot=shot, qa_mode=VisualSemanticQAMode.REQUIRED)
+    assert res.selected_candidate_id == "fallback_stock_diag_shot_match"
+    assert res.actual_modality == VisualModality.DIAGRAM
+
+
+
