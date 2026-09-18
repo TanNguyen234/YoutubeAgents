@@ -277,12 +277,33 @@ class VisualCandidateJudge:
         # 3. Winning Selection
         if not accepted_candidates:
             logger.warning("VISUAL_SEMANTIC_QA_REJECTED_ALL: shot_id=%s all candidates rejected", shot.shot_id)
+            top_rejected_audit = {}
+            if shortlist and shortlist[0].candidate_id in assessments:
+                top_cand = shortlist[0]
+                top_assessment = assessments[top_cand.candidate_id]
+                top_rejected_audit = normalize_semantic_audit(
+                    performed=True,
+                    verdict=top_assessment.verdict.value,
+                    issues=[i.value for i in top_assessment.issues],
+                    reason=top_assessment.concise_reason,
+                    policy_version=top_assessment.evaluator_policy_version,
+                    backend=top_assessment.evaluator_backend,
+                    model=top_assessment.evaluator_model,
+                    semantic_score=0.0,
+                    deterministic_score=None,
+                    final_score=0.0,
+                    candidate_id=top_cand.candidate_id,
+                    shot_id=shot.shot_id,
+                    candidate_sha256=top_assessment.candidate_sha256,
+                    semantic_input_hash=top_assessment.semantic_input_hash,
+                )
             return CandidateJudgingResult(
                 shot_id=shot.shot_id,
                 selected_candidate_id=None,
                 winning_candidate=None,
                 assessments=assessments,
                 candidate_final_scores=candidate_final_scores,
+                audit_metadata=top_rejected_audit,
                 failure_reasons=failures + ["SEMANTIC_QA_REJECTED_ALL"],
             )
 

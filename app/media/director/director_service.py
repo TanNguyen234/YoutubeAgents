@@ -30,7 +30,17 @@ from app.media.director.models import (
     VisualModality,
     VisualizationDataMode,
 )
-from app.media.semantic_qa.models import VisualSemanticQAError, VisualSemanticQAMode, VisualSemanticVerdict
+from app.media.semantic_qa.models import (
+    VisualSemanticIssue,
+    VisualSemanticQAError,
+    VisualSemanticQAMode,
+    VisualSemanticVerdict,
+)
+from app.media.director.visual_retry import (
+    VisualRetryAction,
+    VisualRetryDecision,
+    VisualRetryPolicy,
+)
 from app.media.acquisition.models import VisualSourceType
 from app.media.director.quality_evaluator import VisualShotEvaluator
 from app.media.director.storyboard_planner import StoryboardPlanner
@@ -298,6 +308,9 @@ class AutoDirectorService:
                 asset_is_synthetic=getattr(asset_res, "is_synthetic", False),
                 asset_evidence_claim_ids=list(getattr(asset_res, "evidence_claim_ids", []) or []),
                 asset_semantic_qa=getattr(asset_res, "semantic_audit", None),
+                asset_retry_attempted=getattr(asset_res, "retry_attempted", False),
+                asset_retry_action=getattr(asset_res, "retry_action", None),
+                asset_retry_count=getattr(asset_res, "retry_count", 0),
             )
             timeline_shots.append(t_shot)
 
@@ -321,7 +334,7 @@ class AutoDirectorService:
     ) -> ShotAssetResult:
         """Dispatch asset generation to the best available renderer or provider for the shot modality."""
         t0 = time.time()
-        requested_modality = shot.visual_modality
+        requested_modality = shot.requested_modality or shot.visual_modality
         modality = shot.visual_modality
         shot_id = shot.shot_id
         fallback_reason = None
@@ -365,6 +378,27 @@ class AutoDirectorService:
                     )
                     selected = acq_res.selected_candidate
                     if not selected and "SEMANTIC_QA_REJECTED_ALL" in acq_res.failure_reasons:
+                        if acq_res.candidates:
+                            cand = acq_res.candidates[0]
+                            actual_mod = cand.actual_modality or VisualModality.STOCK_VIDEO
+                            return ShotAssetResult(
+                                path=cand.file_path,
+                                sha256=cand.content_sha256,
+                                requested_modality=requested_modality,
+                                actual_modality=actual_mod,
+                                provider=cand.acquisition_method,
+                                source_type=cand.source_type.value,
+                                source_url=cand.source_url,
+                                source_ref=cand.source_ref,
+                                license_type=cand.license_type,
+                                attribution=cand.attribution,
+                                acquisition_method=cand.acquisition_method,
+                                is_synthetic=cand.is_synthetic,
+                                evidence_claim_ids=cand.evidence_claim_ids or [],
+                                fallback_reason="Stock media rejected by Semantic QA",
+                                semantic_qa_performed=True,
+                                semantic_audit=acq_res.semantic_audit or None,
+                            )
                         active_fallback = getattr(self.profile, "fallback_policy", CreativeFallbackPolicy.FAIL_CLOSED)
                         if active_fallback != CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW:
                             raise VisualSemanticQAError(
@@ -683,6 +717,27 @@ class AutoDirectorService:
                 )
                 selected = acq_res.selected_candidate
                 if not selected and "SEMANTIC_QA_REJECTED_ALL" in acq_res.failure_reasons:
+                    if acq_res.candidates:
+                        cand = acq_res.candidates[0]
+                        actual_mod = cand.actual_modality or VisualModality.SCREEN_CAPTURE
+                        return ShotAssetResult(
+                            path=cand.file_path,
+                            sha256=cand.content_sha256,
+                            requested_modality=requested_modality,
+                            actual_modality=actual_mod,
+                            provider=cand.acquisition_method,
+                            source_type=cand.source_type.value,
+                            source_url=cand.source_url,
+                            source_ref=cand.source_ref,
+                            license_type=cand.license_type,
+                            attribution=cand.attribution,
+                            acquisition_method=cand.acquisition_method,
+                            is_synthetic=cand.is_synthetic,
+                            evidence_claim_ids=cand.evidence_claim_ids or [],
+                            fallback_reason="Screen capture rejected by Semantic QA",
+                            semantic_qa_performed=True,
+                            semantic_audit=acq_res.semantic_audit or None,
+                        )
                     active_fallback = getattr(self.profile, "fallback_policy", CreativeFallbackPolicy.FAIL_CLOSED)
                     if active_fallback != CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW:
                         raise VisualSemanticQAError(
@@ -803,6 +858,27 @@ class AutoDirectorService:
                 )
                 selected = acq_res.selected_candidate
                 if not selected and "SEMANTIC_QA_REJECTED_ALL" in acq_res.failure_reasons:
+                    if acq_res.candidates:
+                        cand = acq_res.candidates[0]
+                        actual_mod = cand.actual_modality or VisualModality.DOCUMENT_EVIDENCE
+                        return ShotAssetResult(
+                            path=cand.file_path,
+                            sha256=cand.content_sha256,
+                            requested_modality=requested_modality,
+                            actual_modality=actual_mod,
+                            provider=cand.acquisition_method,
+                            source_type=cand.source_type.value,
+                            source_url=cand.source_url or (binding.source_url if binding else None),
+                            source_ref=cand.source_ref or (binding.source_ref if binding else None),
+                            license_type=cand.license_type,
+                            attribution=cand.attribution,
+                            acquisition_method=cand.acquisition_method,
+                            is_synthetic=cand.is_synthetic,
+                            evidence_claim_ids=cand.evidence_claim_ids or ([binding.claim_id] if binding and binding.claim_id else []),
+                            fallback_reason="Document evidence capture rejected by Semantic QA",
+                            semantic_qa_performed=True,
+                            semantic_audit=acq_res.semantic_audit or None,
+                        )
                     active_fallback = getattr(self.profile, "fallback_policy", CreativeFallbackPolicy.FAIL_CLOSED)
                     if active_fallback != CreativeFallbackPolicy.ALLOW_LEGACY_PREVIEW:
                         raise VisualSemanticQAError(
@@ -1106,6 +1182,7 @@ class AutoDirectorService:
         shot: ShotSpec,
         asset_res: ShotAssetResult,
         output_dir: Path,
+        raise_on_reject: bool = True,
     ) -> ShotAssetResult:
         """Execute semantic QA gate on final rendered asset if not already evaluated.
 
@@ -1248,7 +1325,7 @@ class AutoDirectorService:
                 ):
                     if extra is not None:
                         dims.append(extra)
-                sem_score = round(sum(dims) / len(dims), 4)
+                    sem_score = round(sum(dims) / len(dims), 4)
 
             audit_dict = normalize_semantic_audit(
                 performed=True,
@@ -1272,7 +1349,7 @@ class AutoDirectorService:
             asset_res.semantic_audit = audit_dict
 
             if assessment.verdict != VisualSemanticVerdict.ACCEPT:
-                if qa_mode_str == "REQUIRED":
+                if qa_mode_str == "REQUIRED" and raise_on_reject:
                     raise VisualSemanticQAError(
                         f"Visual Semantic QA REJECTED final asset for shot '{shot.shot_id}' (modality={asset_res.actual_modality.value}): "
                         f"issues={[i.value for i in assessment.issues]}, reason='{assessment.concise_reason}'"
@@ -1306,8 +1383,15 @@ class AutoDirectorService:
         dossier: Optional[ResearchDossier] = None,
         fact_report: Optional[FactCheckReport] = None,
     ) -> ShotAssetResult:
-        """Execute shot asset dispatch followed by universal semantic QA evaluation."""
-        res = self._dispatch_shot_asset(
+        """Execute shot asset dispatch with bounded selective retry upon semantic rejection."""
+        qa_mode_val = getattr(self.profile, "semantic_qa_mode", "ADVISORY")
+        if isinstance(qa_mode_val, str):
+            qa_mode_str = qa_mode_val.upper()
+        else:
+            qa_mode_str = getattr(qa_mode_val, "value", "ADVISORY").upper()
+
+        # Attempt 0: initial asset dispatch
+        res_0 = self._dispatch_shot_asset(
             shot=shot,
             shot_index=shot_index,
             output_dir=output_dir,
@@ -1316,7 +1400,145 @@ class AutoDirectorService:
             dossier=dossier,
             fact_report=fact_report,
         )
-        return self._evaluate_final_shot_asset_if_needed(shot=shot, asset_res=res, output_dir=output_dir)
+
+        if qa_mode_str == "DISABLED":
+            res_0.retry_attempted = False
+            res_0.retry_action = None
+            res_0.retry_count = 0
+            return res_0
+
+        # Evaluate attempt 0 without immediately raising on reject
+        res_0 = self._evaluate_final_shot_asset_if_needed(
+            shot=shot,
+            asset_res=res_0,
+            output_dir=output_dir,
+            raise_on_reject=False,
+        )
+
+        audit_0 = getattr(res_0, "semantic_audit", None)
+        verdict_0 = audit_0.get("verdict") if audit_0 else "ACCEPT"
+        if verdict_0 == "ACCEPT":
+            res_0.retry_attempted = False
+            res_0.retry_action = None
+            res_0.retry_count = 0
+            return res_0
+
+        # Initial candidate was rejected by Semantic QA: evaluate deterministic retry policy
+        raw_issues = audit_0.get("issues", []) if audit_0 else []
+        issues_0: List[VisualSemanticIssue] = []
+        for iss in raw_issues:
+            try:
+                issues_0.append(VisualSemanticIssue(iss))
+            except ValueError:
+                pass
+
+        concise_reason = audit_0.get("reason", "") if audit_0 else ""
+        candidate_id_0 = audit_0.get("candidate_id") if audit_0 else None
+
+        decision = VisualRetryPolicy.evaluate_decision(
+            shot=shot,
+            actual_modality=res_0.actual_modality,
+            issues=issues_0,
+            concise_reason=concise_reason,
+            attempt_index=0,
+            original_candidate_id=candidate_id_0,
+            candidate_sha=res_0.sha256,
+        )
+
+        logger.info(
+            "Shot '%s' Semantic QA REJECTED on attempt 0. Retry decision: action=%s, reason='%s'",
+            shot.shot_id,
+            decision.action.value,
+            decision.reason,
+        )
+
+        if decision.action == VisualRetryAction.NO_RETRY:
+            res_0.retry_attempted = False
+            res_0.retry_action = VisualRetryAction.NO_RETRY.value
+            res_0.retry_count = 0
+            if qa_mode_str == "REQUIRED":
+                raise VisualSemanticQAError(
+                    f"Visual Semantic QA REJECTED final asset for shot '{shot.shot_id}' and policy decided NO_RETRY: "
+                    f"issues={[i.value for i in issues_0]}, reason='{decision.reason}'"
+                )
+            return res_0
+
+        # Prepare corrective shot for Attempt 1
+        retry_shot = shot.model_copy(deep=True)
+        if not retry_shot.requested_modality:
+            retry_shot.requested_modality = shot.requested_modality or shot.visual_modality
+        if decision.target_modality:
+            retry_shot.visual_modality = decision.target_modality
+
+        if decision.action == VisualRetryAction.REGENERATE:
+            retry_shot.generation_prompt = decision.corrected_instruction
+        elif decision.action in (VisualRetryAction.RERENDER, VisualRetryAction.SWITCH_TO_DIAGRAM):
+            retry_shot.diagram_instruction = decision.corrected_instruction
+            retry_shot.visual_modality = VisualModality.DIAGRAM
+        elif decision.action == VisualRetryAction.REACQUIRE:
+            if retry_shot.evidence_binding and decision.corrected_instruction:
+                retry_shot.evidence_binding = retry_shot.evidence_binding.model_copy(
+                    update={"source_excerpt": decision.corrected_instruction}
+                )
+
+        # Dispatch Attempt 1 (Corrective Retry)
+        res_1 = self._dispatch_shot_asset(
+            shot=retry_shot,
+            shot_index=shot_index,
+            output_dir=output_dir,
+            script_title=script_title,
+            channel_name=channel_name,
+            dossier=dossier,
+            fact_report=fact_report,
+        )
+
+        # Duplicate Output Detection: Compare retry SHA with rejected candidate SHA
+        if res_1.sha256 and res_1.sha256 == res_0.sha256:
+            logger.warning(
+                "DUPLICATE_RETRY_OUTPUT: Corrective retry for shot '%s' produced identical content SHA-256 '%s'. Failing closed.",
+                shot.shot_id,
+                res_1.sha256,
+            )
+            decision.duplicate_output_detected = True
+            res_1.retry_attempted = True
+            res_1.retry_action = decision.action.value
+            res_1.retry_count = 1
+            if qa_mode_str == "REQUIRED":
+                raise VisualSemanticQAError(
+                    f"Visual Semantic QA REJECTED final asset: DUPLICATE_RETRY_OUTPUT: Corrective retry for shot '{shot.shot_id}' produced identical content SHA-256 "
+                    f"'{res_1.sha256}' as rejected candidate. Failing closed."
+                )
+            return res_1
+
+        # Evaluate Attempt 1
+        res_1 = self._evaluate_final_shot_asset_if_needed(
+            shot=retry_shot,
+            asset_res=res_1,
+            output_dir=output_dir,
+            raise_on_reject=False,
+        )
+
+        audit_1 = getattr(res_1, "semantic_audit", None)
+        verdict_1 = audit_1.get("verdict") if audit_1 else "ACCEPT"
+
+        res_1.retry_attempted = True
+        res_1.retry_action = decision.action.value
+        res_1.retry_count = 1
+
+        if verdict_1 != "ACCEPT":
+            logger.warning(
+                "Shot '%s' Semantic QA REJECTED on corrective retry (Attempt 1). Attempts budget exhausted.",
+                shot.shot_id,
+            )
+            if qa_mode_str == "REQUIRED":
+                issues_1 = audit_1.get("issues", []) if audit_1 else []
+                reason_1 = audit_1.get("reason", "") if audit_1 else ""
+                raise VisualSemanticQAError(
+                    f"Visual Semantic QA REJECTED final asset for shot '{shot.shot_id}' after corrective retry (attempts budget exhausted): "
+                    f"issues={issues_1}, reason='{reason_1}'"
+                )
+
+        return res_1
 
     def regenerate_single_shot(
         self,
@@ -1377,6 +1599,9 @@ class AutoDirectorService:
                 t_shot.asset_sha256 = asset_res.sha256
                 t_shot.modality = asset_res.actual_modality
                 t_shot.asset_semantic_qa = getattr(asset_res, "semantic_audit", None)
+                t_shot.asset_retry_attempted = getattr(asset_res, "retry_attempted", False)
+                t_shot.asset_retry_action = getattr(asset_res, "retry_action", None)
+                t_shot.asset_retry_count = getattr(asset_res, "retry_count", 0)
                 break
 
         storyboard_path = output_dir / f"storyboard_{project_id}.json"
