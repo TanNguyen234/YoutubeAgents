@@ -34,7 +34,7 @@ agy \
 ## 2. Security & Workspace Isolation Architecture
 
 ### Disposable Workspace Isolation
-To guarantee untrusted media cannot mutate or inspect the real project workspace:
+To reduce exposure of the real project workspace during untrusted visual evaluation:
 1. Every evaluation spawns a disposable temporary directory via `tempfile.TemporaryDirectory(prefix="agy_vqa_ws_")`.
 2. ONLY the candidate image(s) or decoded video frames and the Pydantic `schema.json` are copied into this workspace.
 3. The Antigravity process executes with `cwd=ws_path`.
@@ -47,10 +47,10 @@ To guarantee untrusted media cannot mutate or inspect the real project workspace
 - **Omission of Dangerous Flags**: `--dangerously-skip-permissions` is omitted.
 - **Zero-Tool Directives**: Prompts explicitly instruct the model that it is in read-only visual inspection mode and must NOT invoke tools or execute shell commands.
 
-### Limitations & Honest Security Guarantees
+### Limitations & Honest Security Boundaries
 - **Workspace-Isolated and Adversarially Exercised**: Headless visual evaluations execute strictly within disposable temporary directories with `--sandbox` and `--disable-slash-commands`.
 - **Tool-level Disablement Limitation**: The installed `agy` CLI does not currently expose granular tool-denial CLI flags (e.g. `--deny-tool=write_file`).
-- **Containment Boundary**: Because granular tool denial flags do not exist in the CLI, **disposable workspace isolation** (`TemporaryDirectory` as `cwd`) is the primary physical isolation boundary ensuring that even if an unprivileged workspace-level action were attempted, it can only touch disposable files and cannot mutate or inspect repository files.
+- **Containment Boundary**: Disposable workspace isolation (`TemporaryDirectory` as `cwd`) keeps evaluation inputs and normal workspace-relative operations inside a disposable directory. This reduces repository exposure, but is not by itself proof that the process cannot access other host paths permitted by inherited OS and sandbox permissions.
 - **Auto-Denial Behavior**: In headless non-interactive mode (`--print`), unapproved shell commands (e.g., `RunCommand`) are automatically blocked by the runtime (`denied_actions: [{"action": "command", "display_name": "RunCommand"}]`).
 - **Instrument Scope**: The verification proves zero repository contamination, clean git status, rejection of malicious instructions, and disposable containment. It does not independently instrument all outbound network requests, every possible host filesystem read, or every inherited host permission.
 
