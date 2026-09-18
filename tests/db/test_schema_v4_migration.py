@@ -104,7 +104,7 @@ def test_v3_database_migrates_publication_job_synthetic_media_column(tmp_path: P
 
     # After migration
     conn = sqlite3.connect(db_path)
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == SCHEMA_VERSION
     cols_after = {r[1] for r in conn.execute("PRAGMA table_info(publication_jobs);").fetchall()}
     assert "contains_synthetic_media" in cols_after
     conn.close()
@@ -166,7 +166,7 @@ def test_migration_is_idempotent(tmp_path: Path):
     migrate_database(db_path)
 
     conn = sqlite3.connect(db_path)
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == SCHEMA_VERSION
     cols = {r[1] for r in conn.execute("PRAGMA table_info(publication_jobs);").fetchall()}
     assert "contains_synthetic_media" in cols
     conn.close()
