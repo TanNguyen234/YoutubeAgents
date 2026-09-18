@@ -1,6 +1,6 @@
 """Topic evaluator service generating 8-dimension scores using Antigravity reasoning."""
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field, model_validator
 
 from app.core.backend import AntigravityCLIBackend, ReasoningBackend
@@ -85,3 +85,57 @@ Provide:
             "historical_fit": eval_output.historical_fit,
         }
         return scores, eval_output.rationale, eval_output.score_reasons
+
+    def evaluate_editorial_dimensions(
+        self,
+        channel: Channel,
+        keyword: str,
+        angle: str,
+        market_titles: Optional[List[str]] = None,
+    ) -> Tuple[float, str, str, Dict[str, str]]:
+        """Prompt reasoning engine to score strictly editorial dimensions (channel_fit, angle differentiation).
+
+        The model is strictly barred from inventing market demand, freshness, or competition scores.
+        Returns: (channel_fit, originality_rationale, rationale, score_reasons)
+        """
+        titles_block = "\n".join(f"- {t}" for t in (market_titles or [])) or "None provided."
+        prompt = f"""You are an elite YouTube Content Strategist evaluating video editorial viability for the channel '{channel.title}'.
+Channel Niche: {channel.niche}
+Target Audience: {channel.target_audience}
+Default Language: {channel.default_language}
+
+CANDIDATE TOPIC: "{keyword}"
+CANDIDATE ANGLE: "{angle}"
+
+COMPETING MARKET TITLES RECENTLY OBSERVED:
+{titles_block}
+
+EDITORIAL EVALUATION TASK:
+Evaluate ONLY the editorial alignment and narrative angle for {channel.title}:
+1. channel_fit: Persona and brand alignment for {channel.title} and its target audience '{channel.target_audience}' (scale 0.0 to 10.0).
+2. originality_rationale: How distinct and differentiated is this angle compared to existing content and observed market titles?
+3. rationale: Concise strategic summary of why this specific angle is compelling for the channel.
+4. score_reasons: Detailed justification for channel_fit.
+
+CRITICAL CONSTRAINT: Do NOT attempt to estimate or invent search volume, view count, market velocity, trend percentage, or competition metrics. Those are measured separately from authoritative market data.
+"""
+        eval_output = self.backend.generate_structured(prompt, EditorialEvaluationOutput)
+        if isinstance(eval_output, dict):
+            eval_output = EditorialEvaluationOutput.model_validate(eval_output)
+
+        return (
+            eval_output.channel_fit,
+            eval_output.originality_rationale,
+            eval_output.rationale,
+            eval_output.score_reasons,
+        )
+
+
+class EditorialEvaluationOutput(BaseModel):
+    """Structured LLM output for strictly editorial / semantic evaluation dimensions."""
+
+    channel_fit: float = Field(ge=0.0, le=10.0, description="Niche persona and audience alignment score (0-10)")
+    originality_rationale: str = Field(description="Qualitative assessment of angle uniqueness and differentiation")
+    rationale: str = Field(description="Editorial synthesis explaining why this angle works for the channel")
+    score_reasons: Dict[str, str] = Field(default_factory=dict, description="Brief justification per scored editorial dimension")
+

@@ -85,11 +85,19 @@ class StrategyFeedbackLoop:
             "recommendations": recommendations,
         }
 
-    def compute_historical_fit_score(self, keyword: str, channel_id: str) -> float:
-        """Calculate historical performance fit score (0.0 - 10.0) for candidate keyword."""
+    def compute_historical_fit_score(
+        self, keyword: str, channel_id: str, allow_neutral_fallback: bool = False
+    ) -> Optional[float]:
+        """Calculate historical performance fit score (0.0 - 10.0) for candidate keyword.
+
+        Returns:
+            Measured historical fit score (0.0 - 10.0) if real channel analytics are available.
+            None if real analytics are absent (strictly preventing fake 6.0 baseline).
+            6.0 only if allow_neutral_fallback=True is explicitly requested for legacy compatibility.
+        """
         analysis = self.analyze_channel_performance(channel_id)
         if not analysis.get("has_data") or not analysis.get("top_projects"):
-            return 6.0  # Neutral baseline when history is absent
+            return 6.0 if allow_neutral_fallback else None
 
         kw_tokens = set(keyword.lower().split())
         max_overlap_ratio = 0.0

@@ -19,6 +19,16 @@ DEFAULT_WEIGHTS: Dict[str, float] = {
     "historical_fit": 0.05,
 }
 
+# Authoritative default Opportunity Engine Phase 1 weights (sum to 1.0)
+DEFAULT_OPPORTUNITY_WEIGHTS: Dict[str, float] = {
+    "demand": 0.30,
+    "freshness": 0.20,
+    "competition": 0.15,
+    "channel_fit": 0.15,
+    "originality": 0.10,
+    "historical_fit": 0.10,
+}
+
 CONFIG_FILE_PATH = Path("config/topic_weights.yaml")
 
 
@@ -30,9 +40,11 @@ class TopicStrategist:
         config_path: Optional[Path] = None,
         weights_config_path: Optional[Path] = None,
         weights_override: Optional[Dict[str, float]] = None,
+        opportunity_weights_override: Optional[Dict[str, float]] = None,
         duplicate_threshold: float = 0.80,
     ):
         self.weights = DEFAULT_WEIGHTS.copy()
+        self.opportunity_weights = DEFAULT_OPPORTUNITY_WEIGHTS.copy()
         self.duplicate_threshold = duplicate_threshold
 
         path_to_load = weights_config_path or config_path or CONFIG_FILE_PATH
@@ -41,6 +53,8 @@ class TopicStrategist:
 
         if weights_override:
             self.weights = weights_override.copy()
+        if opportunity_weights_override:
+            self.opportunity_weights = opportunity_weights_override.copy()
 
         self.duplicate_detector = DuplicateDetector(similarity_threshold=self.duplicate_threshold)
 
@@ -55,10 +69,34 @@ class TopicStrategist:
                         total = sum(loaded_weights.values())
                         if total > 0:
                             self.weights = {k: v / total for k, v in loaded_weights.items()}
+                    loaded_opp_weights = data.get("opportunity_weights")
+                    if loaded_opp_weights and isinstance(loaded_opp_weights, dict):
+                        total_opp = sum(loaded_opp_weights.values())
+                        if total_opp > 0:
+                            self.opportunity_weights = {k: v / total_opp for k, v in loaded_opp_weights.items()}
                     if "duplicate_threshold" in data:
                         self.duplicate_threshold = float(data["duplicate_threshold"])
         except Exception:
             self.weights = DEFAULT_WEIGHTS.copy()
+            self.opportunity_weights = DEFAULT_OPPORTUNITY_WEIGHTS.copy()
+
+    def compute_opportunity_score(
+        self, scores: Dict[str, Optional[float]]
+    ) -> float:
+        """Calculate weighted composite opportunity score with dynamic renormalization over available non-None dimensions (0.0 - 10.0 scale)."""
+        weighted_sum = 0.0
+        total_weight = 0.0
+
+        for dim, weight in self.opportunity_weights.items():
+            if dim in scores and scores[dim] is not None:
+                weighted_sum += float(scores[dim]) * weight
+                total_weight += weight
+
+        if total_weight == 0:
+            return 0.0
+
+        composite = weighted_sum / total_weight
+        return round(min(max(composite, 0.0), 10.0), 2)
 
     def compute_composite_score(self, breakdown: Union[TopicScoreBreakdown, Dict[str, Optional[float]]]) -> float:
         """Calculate weighted composite score dynamically renormalized over available non-None dimensions (0.0 - 10.0 scale)."""

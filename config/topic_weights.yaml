@@ -11,5 +11,14 @@ weights:
   production_feasibility: 0.05
   historical_fit: 0.10
 
+# Opportunity Engine Phase 1 weights for pre-research market opportunity scoring
+opportunity_weights:
+  demand: 0.30
+  freshness: 0.20
+  competition: 0.15
+  channel_fit: 0.15
+  originality: 0.10
+  historical_fit: 0.10
+
 # Duplicate threshold: similarity score above which a topic is rejected
 duplicate_threshold: 0.65

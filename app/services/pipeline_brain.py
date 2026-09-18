@@ -20,6 +20,7 @@ from app.domain.models import (
     ContentSeries,
     EditorialSlot,
     FactCheckReport,
+    OpportunityPortfolio,
     PublicationJob,
     ResearchDossier,
     ReviewRecord,
@@ -27,6 +28,7 @@ from app.domain.models import (
     SEOPackage,
     ThumbnailPackage,
     TopicCandidate,
+    TopicOpportunity,
     VideoCreativeBrief,
     VideoProject,
 )
@@ -47,6 +49,7 @@ from app.services.script_writer import ScriptWriter
 from app.services.seo_optimizer import SEOOptimizerService
 from app.domain.models import resolve_default_creative_brief
 from app.services.hook_strategy import HookTournamentService
+from app.services.opportunity_engine import OpportunityEngine
 from app.services.retention_planner import RetentionPlanner
 from app.services.script_retention import ScriptRetentionEvaluator
 from app.services.strategy_feedback import StrategyFeedbackLoop
@@ -72,6 +75,7 @@ class BrainPipeline:
         extractor: Optional[ClaimExtractor] = None,
         checker: Optional[FactChecker] = None,
         tts_backend: Optional[TTSBackend] = None,
+        opportunity_engine: Optional[OpportunityEngine] = None,
     ):
         self.repo = repo or repository
         if not self.repo:
@@ -85,7 +89,46 @@ class BrainPipeline:
         self.extractor = extractor or ClaimExtractor(backend=self.backend)
         self.checker = checker or FactChecker(backend=self.backend)
         self.tts_backend = tts_backend
+        self.opportunity_engine = opportunity_engine or OpportunityEngine(
+            repository=self.repo,
+            strategist=self.strategist,
+            evaluator=self.evaluator,
+            backend=self.backend,
+        )
         self.last_retention_report: Optional[Any] = None
+
+    def discover_opportunities(
+        self,
+        channel: Channel,
+        seed_queries: Optional[List[str]] = None,
+        recent_topics: Optional[List[str]] = None,
+        max_candidates: int = 5,
+        force_refresh: bool = False,
+    ) -> OpportunityPortfolio:
+        """Stage 0 / Autonomous Discovery: Discover and rank candidate topic opportunities using real market evidence."""
+        return self.opportunity_engine.discover_opportunities(
+            channel=channel,
+            seed_queries=seed_queries,
+            recent_topics=recent_topics,
+            max_candidates=max_candidates,
+            force_refresh=force_refresh,
+        )
+
+    def select_topic_opportunity(
+        self,
+        channel: Channel,
+        seed_queries: Optional[List[str]] = None,
+        recent_topics: Optional[List[str]] = None,
+        max_candidates: int = 5,
+    ) -> Optional[TopicOpportunity]:
+        """Discover opportunities and return top-ranked candidate passing evidence gates (or None if blocked)."""
+        portfolio = self.discover_opportunities(
+            channel=channel,
+            seed_queries=seed_queries,
+            recent_topics=recent_topics,
+            max_candidates=max_candidates,
+        )
+        return portfolio.selected_topic
 
     def run_stage_1_to_5(
         self,
