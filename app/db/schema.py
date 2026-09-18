@@ -3,9 +3,9 @@
 from pathlib import Path
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
-SCHEMA_V4_SQL = """
+SCHEMA_V5_SQL = """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS channels (
@@ -279,11 +279,43 @@ CREATE TABLE IF NOT EXISTS quota_usage_records (
     timestamp TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE SET NULL
 );
+
+CREATE TABLE IF NOT EXISTS market_signal_snapshots (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    query TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'YOUTUBE_DATA_API_V3',
+    collected_at TEXT NOT NULL,
+    sample_video_ids_json TEXT NOT NULL,
+    sample_size INTEGER NOT NULL DEFAULT 0,
+    recent_video_count_7d INTEGER NOT NULL DEFAULT 0,
+    recent_video_count_30d INTEGER NOT NULL DEFAULT 0,
+    recent_share_30d REAL NOT NULL DEFAULT 0.0,
+    median_views REAL NOT NULL DEFAULT 0.0,
+    p75_views REAL NOT NULL DEFAULT 0.0,
+    median_age_days REAL NOT NULL DEFAULT 0.0,
+    median_views_per_day REAL NOT NULL DEFAULT 0.0,
+    p75_views_per_day REAL NOT NULL DEFAULT 0.0,
+    unique_creator_count INTEGER NOT NULL DEFAULT 0,
+    top_creator_share REAL NOT NULL DEFAULT 0.0,
+    estimated_result_count INTEGER,
+    formula_version TEXT NOT NULL DEFAULT 'v1.0',
+    confidence TEXT NOT NULL DEFAULT 'HIGH',
+    raw_metrics_json TEXT,
+    derived_scores_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_signals_batch ON market_signal_snapshots(batch_id);
+CREATE INDEX IF NOT EXISTS idx_market_signals_query ON market_signal_snapshots(channel_id, query);
 """
 
 # Backwards compatibility aliases
-SCHEMA_V3_SQL = SCHEMA_V4_SQL
-SCHEMA_V2_SQL = SCHEMA_V4_SQL
+SCHEMA_V4_SQL = SCHEMA_V5_SQL
+SCHEMA_V3_SQL = SCHEMA_V5_SQL
+SCHEMA_V2_SQL = SCHEMA_V5_SQL
 
 
 def migrate_database(db_path: Path) -> None:
@@ -428,13 +460,20 @@ def migrate_database(db_path: Path) -> None:
                     "ALTER TABLE publication_jobs "
                     "ADD COLUMN contains_synthetic_media INTEGER NOT NULL DEFAULT 0;"
                 )
-            conn.executescript(SCHEMA_V4_SQL)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.executescript(SCHEMA_V5_SQL)
+            conn.execute(f"PRAGMA user_version = 4;")
             conn.commit()
             current_version = 4
+
+        # 4. Migrate v4 to v5: market_signal_snapshots
+        if current_version < 5:
+            conn.executescript(SCHEMA_V5_SQL)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.commit()
+            current_version = 5
         else:
-            # Current v4 idempotent check
-            conn.executescript(SCHEMA_V4_SQL)
+            # Current v5 idempotent check
+            conn.executescript(SCHEMA_V5_SQL)
             cursor.execute("PRAGMA table_info(topic_candidates);")
             tc_cols = {row[1] for row in cursor.fetchall()}
             if tc_cols and "score_breakdown_json" not in tc_cols:

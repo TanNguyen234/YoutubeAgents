@@ -31,6 +31,7 @@ from app.domain.models import (
     ContentSeries,
     EditorialSlot,
     FactCheckReport,
+    MarketSignalSnapshot,
     PublicationJob,
     QualityResult,
     QuotaUsageRecord,
@@ -1256,4 +1257,113 @@ class SQLiteRepository:
                 )
                 for r in rows
             ]
+
+    # --- Market Signal Snapshot Operations ---
+    def save_market_signal_snapshot(self, snapshot: MarketSignalSnapshot) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO market_signal_snapshots (
+                    id, batch_id, channel_id, query, source, collected_at,
+                    sample_video_ids_json, sample_size,
+                    recent_video_count_7d, recent_video_count_30d, recent_share_30d,
+                    median_views, p75_views, median_age_days,
+                    median_views_per_day, p75_views_per_day,
+                    unique_creator_count, top_creator_share,
+                    estimated_result_count, formula_version, confidence,
+                    raw_metrics_json, derived_scores_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    snapshot.id,
+                    snapshot.batch_id,
+                    snapshot.channel_id,
+                    snapshot.query,
+                    snapshot.source,
+                    snapshot.collected_at.isoformat(),
+                    json.dumps(snapshot.sample_video_ids),
+                    snapshot.sample_size,
+                    snapshot.recent_video_count_7d,
+                    snapshot.recent_video_count_30d,
+                    snapshot.recent_share_30d,
+                    snapshot.median_views,
+                    snapshot.p75_views,
+                    snapshot.median_age_days,
+                    snapshot.median_views_per_day,
+                    snapshot.p75_views_per_day,
+                    snapshot.unique_creator_count,
+                    snapshot.top_creator_share,
+                    snapshot.estimated_result_count,
+                    snapshot.formula_version,
+                    snapshot.confidence,
+                    json.dumps(snapshot.raw_metrics),
+                    json.dumps(snapshot.derived_scores),
+                    snapshot.created_at.isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def _row_to_market_signal_snapshot(self, row: sqlite3.Row) -> MarketSignalSnapshot:
+        return MarketSignalSnapshot(
+            id=row["id"],
+            batch_id=row["batch_id"],
+            channel_id=row["channel_id"],
+            query=row["query"],
+            source=row["source"],
+            collected_at=datetime.fromisoformat(row["collected_at"]),
+            sample_video_ids=json.loads(row["sample_video_ids_json"]) if row["sample_video_ids_json"] else [],
+            sample_size=row["sample_size"],
+            recent_video_count_7d=row["recent_video_count_7d"],
+            recent_video_count_30d=row["recent_video_count_30d"],
+            recent_share_30d=row["recent_share_30d"],
+            median_views=row["median_views"],
+            p75_views=row["p75_views"],
+            median_age_days=row["median_age_days"],
+            median_views_per_day=row["median_views_per_day"],
+            p75_views_per_day=row["p75_views_per_day"],
+            unique_creator_count=row["unique_creator_count"],
+            top_creator_share=row["top_creator_share"],
+            estimated_result_count=row["estimated_result_count"],
+            formula_version=row["formula_version"],
+            confidence=row["confidence"],
+            raw_metrics=json.loads(row["raw_metrics_json"]) if row["raw_metrics_json"] else {},
+            derived_scores=json.loads(row["derived_scores_json"]) if row["derived_scores_json"] else {},
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def get_market_signal_snapshot(self, snapshot_id: str) -> Optional[MarketSignalSnapshot]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM market_signal_snapshots WHERE id = ?;",
+                (snapshot_id,),
+            ).fetchone()
+            return self._row_to_market_signal_snapshot(row) if row else None
+
+    def get_market_signals_for_batch(self, batch_id: str) -> List[MarketSignalSnapshot]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM market_signal_snapshots WHERE batch_id = ? ORDER BY created_at ASC;",
+                (batch_id,),
+            ).fetchall()
+            return [self._row_to_market_signal_snapshot(r) for r in rows]
+
+    def get_latest_market_signal(
+        self, channel_id: str, query: str, ttl_hours: float = 24.0
+    ) -> Optional[MarketSignalSnapshot]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM market_signal_snapshots
+                WHERE channel_id = ? AND query = ?
+                ORDER BY collected_at DESC LIMIT 1;
+                """,
+                (channel_id, query),
+            ).fetchone()
+            if not row:
+                return None
+            snapshot = self._row_to_market_signal_snapshot(row)
+            age_seconds = (datetime.now(timezone.utc) - snapshot.collected_at).total_seconds()
+            if age_seconds <= (ttl_hours * 3600.0):
+                return snapshot
+            return None
 

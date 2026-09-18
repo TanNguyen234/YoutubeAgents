@@ -71,6 +71,104 @@ class TopicCandidate(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class MarketVideoObservation(BaseModel):
+    """Normalized raw observation of a sampled YouTube market video."""
+
+    video_id: str = Field(description="YouTube video ID")
+    title: str = Field(description="Video title")
+    channel_id: str = Field(description="Channel ID of video publisher")
+    channel_title: str = Field(description="Channel display name")
+    published_at: datetime = Field(description="Video publication timestamp in UTC")
+    view_count: int = Field(ge=0, description="Observed lifetime views")
+    duration_seconds: int = Field(default=0, ge=0, description="Duration of video in seconds")
+    like_count: Optional[int] = Field(default=None, ge=0, description="Observed like count if available")
+    comment_count: Optional[int] = Field(default=None, ge=0, description="Observed comment count if available")
+
+
+class MarketSignalSnapshot(BaseModel):
+    """Deterministic market evidence snapshot collected from YouTube Data API v3."""
+
+    id: str = Field(description="Unique snapshot ID (e.g. mss-xxxx)")
+    batch_id: str = Field(description="Discovery batch identifier")
+    channel_id: str = Field(description="Channel ID for which discovery was performed")
+    query: str = Field(description="Market search query / candidate phrase")
+    source: str = Field(default="YOUTUBE_DATA_API_V3", description="Authoritative signal source")
+    collected_at: datetime = Field(description="Timestamp when market data was fetched")
+
+    sample_video_ids: List[str] = Field(default_factory=list, description="IDs of videos in sample")
+    sample_size: int = Field(ge=0, description="Total sampled videos")
+
+    recent_video_count_7d: int = Field(default=0, ge=0, description="Videos published within past 7 days")
+    recent_video_count_30d: int = Field(default=0, ge=0, description="Videos published within past 30 days")
+    recent_share_30d: float = Field(default=0.0, ge=0.0, le=1.0, description="Fraction of videos published within 30 days")
+
+    median_views: float = Field(default=0.0, ge=0.0, description="Median view count in sample")
+    p75_views: float = Field(default=0.0, ge=0.0, description="75th percentile view count in sample")
+
+    median_age_days: float = Field(default=0.0, ge=0.0, description="Median age of sampled videos in days")
+
+    median_views_per_day: float = Field(default=0.0, ge=0.0, description="Median view velocity (views/day)")
+    p75_views_per_day: float = Field(default=0.0, ge=0.0, description="75th percentile view velocity (views/day)")
+
+    unique_creator_count: int = Field(default=0, ge=0, description="Distinct creator channels in sample")
+    top_creator_share: float = Field(default=0.0, ge=0.0, le=1.0, description="Fraction of sample from the top creator")
+
+    estimated_result_count: Optional[int] = Field(default=None, ge=0, description="Approximate result count from API")
+    formula_version: str = Field(default="v1.0", description="Scoring formula version")
+    confidence: str = Field(default="HIGH", description="Confidence status: HIGH or INSUFFICIENT_SIGNAL")
+
+    raw_metrics: Dict[str, Any] = Field(default_factory=dict, description="Raw metric details for audit")
+    derived_scores: Dict[str, float] = Field(default_factory=dict, description="Deterministic 0-10 dimension scores")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class OpportunityHypothesis(BaseModel):
+    """Structured editorial hypothesis proposed by reasoning backend."""
+
+    model_config = {"extra": "forbid"}
+
+    keyword: str = Field(description="Proposed search/topic keyword phrase")
+    angle: str = Field(description="Unique narrative or technical angle")
+    viewer_question: Optional[str] = Field(default=None, description="Curiosity question answering audience need")
+    rationale: str = Field(description="Editorial rationale explaining why this topic works")
+    supporting_video_ids: List[str] = Field(default_factory=list, description="IDs of observed videos supporting this hypothesis")
+
+
+class TopicOpportunity(BaseModel):
+    """An individual topic candidate ranked within an opportunity portfolio."""
+
+    keyword: str = Field(description="Topic keyword phrase")
+    angle: str = Field(description="Specific video angle / perspective")
+
+    opportunity_score: float = Field(ge=0.0, le=10.0, description="Composite market opportunity score (0-10)")
+
+    demand: float = Field(ge=0.0, le=10.0, description="Deterministic demand proxy score (0-10)")
+    freshness: float = Field(ge=0.0, le=10.0, description="Deterministic trend freshness proxy score (0-10)")
+    competition: float = Field(ge=0.0, le=10.0, description="Deterministic competition opportunity score (0-10)")
+    channel_fit: float = Field(ge=0.0, le=10.0, description="Channel niche persona alignment score (0-10)")
+    originality: float = Field(ge=0.0, le=10.0, description="Originality / differentiation score (0-10)")
+    historical_fit: Optional[float] = Field(default=None, ge=0.0, le=10.0, description="Real channel history fit score (0-10) or None")
+
+    market_signal_id: Optional[str] = Field(default=None, description="Linked MarketSignalSnapshot ID")
+    confidence: str = Field(default="HIGH", description="Confidence status: HIGH or INSUFFICIENT_SIGNAL")
+
+    score_reasons: Dict[str, str] = Field(default_factory=dict, description="Detailed explanation per dimension")
+    rationale: Optional[str] = Field(default=None, description="Editorial synthesis")
+    supporting_video_ids: List[str] = Field(default_factory=list, description="Validated supporting video IDs")
+
+
+class OpportunityPortfolio(BaseModel):
+    """Ranked portfolio of topic opportunities discovered for a channel."""
+
+    batch_id: str = Field(description="Unique portfolio discovery batch ID")
+    channel_id: str = Field(description="Associated channel ID")
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    candidates: List[TopicOpportunity] = Field(default_factory=list, description="Ranked candidate opportunities (#1 to #5)")
+    selected_topic: Optional[TopicOpportunity] = Field(default=None, description="Top-ranked opportunity passing evidence gates")
+    selection_reason: Optional[str] = Field(default=None, description="Audit trail explaining selection or why blocked")
+
+
 class ResearchSource(BaseModel):
     """Verified source document or citation supporting claims with real provenance."""
 
