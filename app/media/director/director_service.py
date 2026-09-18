@@ -1434,6 +1434,15 @@ class AutoDirectorService:
 
         concise_reason = audit_0.get("reason", "") if audit_0 else ""
         candidate_id_0 = audit_0.get("candidate_id") if audit_0 else None
+        failure_reasons_0 = audit_0.get("failure_reasons", []) if audit_0 else []
+
+        initial_rejection_audit = {
+            "verdict": audit_0.get("verdict", "REJECT") if audit_0 else "REJECT",
+            "issues": [i.value for i in issues_0],
+            "reason": concise_reason,
+            "candidate_id": candidate_id_0,
+            "candidate_sha256": (audit_0.get("candidate_sha256") if audit_0 else None) or res_0.sha256,
+        }
 
         decision = VisualRetryPolicy.evaluate_decision(
             shot=shot,
@@ -1443,6 +1452,7 @@ class AutoDirectorService:
             attempt_index=0,
             original_candidate_id=candidate_id_0,
             candidate_sha=res_0.sha256,
+            failure_reasons=failure_reasons_0,
         )
 
         logger.info(
@@ -1456,6 +1466,14 @@ class AutoDirectorService:
             res_0.retry_attempted = False
             res_0.retry_action = VisualRetryAction.NO_RETRY.value
             res_0.retry_count = 0
+            if getattr(res_0, "semantic_audit", None) is not None:
+                res_0.semantic_audit["retry"] = {
+                    "attempted": False,
+                    "count": 0,
+                    "action": VisualRetryAction.NO_RETRY.value,
+                    "decision_reason": decision.reason,
+                    "initial_rejection": initial_rejection_audit,
+                }
             if qa_mode_str == "REQUIRED":
                 raise VisualSemanticQAError(
                     f"Visual Semantic QA REJECTED final asset for shot '{shot.shot_id}' and policy decided NO_RETRY: "
@@ -1475,11 +1493,6 @@ class AutoDirectorService:
         elif decision.action in (VisualRetryAction.RERENDER, VisualRetryAction.SWITCH_TO_DIAGRAM):
             retry_shot.diagram_instruction = decision.corrected_instruction
             retry_shot.visual_modality = VisualModality.DIAGRAM
-        elif decision.action == VisualRetryAction.REACQUIRE:
-            if retry_shot.evidence_binding and decision.corrected_instruction:
-                retry_shot.evidence_binding = retry_shot.evidence_binding.model_copy(
-                    update={"source_excerpt": decision.corrected_instruction}
-                )
 
         # Dispatch Attempt 1 (Corrective Retry)
         res_1 = self._dispatch_shot_asset(
@@ -1503,10 +1516,20 @@ class AutoDirectorService:
             res_1.retry_attempted = True
             res_1.retry_action = decision.action.value
             res_1.retry_count = 1
+            if getattr(res_1, "semantic_audit", None) is None:
+                res_1.semantic_audit = {}
+            res_1.semantic_audit["retry"] = {
+                "attempted": True,
+                "count": 1,
+                "action": decision.action.value,
+                "decision_reason": decision.reason,
+                "duplicate_output_detected": True,
+                "initial_rejection": initial_rejection_audit,
+            }
             if qa_mode_str == "REQUIRED":
                 raise VisualSemanticQAError(
                     f"Visual Semantic QA REJECTED final asset: DUPLICATE_RETRY_OUTPUT: Corrective retry for shot '{shot.shot_id}' produced identical content SHA-256 "
-                    f"'{res_1.sha256}' as rejected candidate. Failing closed."
+                    f"'{res_1.sha256}' as rejected candidate (initial issues={[i.value for i in issues_0]}, initial_reason='{concise_reason}'). Failing closed."
                 )
             return res_1
 
@@ -1519,7 +1542,19 @@ class AutoDirectorService:
         )
 
         audit_1 = getattr(res_1, "semantic_audit", None)
-        verdict_1 = audit_1.get("verdict") if audit_1 else "ACCEPT"
+        if audit_1 is None:
+            audit_1 = {}
+            res_1.semantic_audit = audit_1
+
+        audit_1["retry"] = {
+            "attempted": True,
+            "count": 1,
+            "action": decision.action.value,
+            "decision_reason": decision.reason,
+            "initial_rejection": initial_rejection_audit,
+        }
+
+        verdict_1 = audit_1.get("verdict", "ACCEPT")
 
         res_1.retry_attempted = True
         res_1.retry_action = decision.action.value
@@ -1531,11 +1566,13 @@ class AutoDirectorService:
                 shot.shot_id,
             )
             if qa_mode_str == "REQUIRED":
-                issues_1 = audit_1.get("issues", []) if audit_1 else []
-                reason_1 = audit_1.get("reason", "") if audit_1 else ""
+                issues_1 = audit_1.get("issues", [])
+                reason_1 = audit_1.get("reason", "")
                 raise VisualSemanticQAError(
                     f"Visual Semantic QA REJECTED final asset for shot '{shot.shot_id}' after corrective retry (attempts budget exhausted): "
-                    f"issues={issues_1}, reason='{reason_1}'"
+                    f"attempt_0: issues={[i.value for i in issues_0]}, reason='{concise_reason}'; "
+                    f"retry_action: {decision.action.value}; "
+                    f"attempt_1: issues={issues_1}, reason='{reason_1}'"
                 )
 
         return res_1

@@ -132,19 +132,28 @@ class VisualRetryPolicy:
                 VisualSemanticIssue.VISUAL_CLUTTER,
             }
             matching = [i for i in issues if i in actionable_issues]
-            if matching or issues:
-                corrected_prompt = cls._build_corrected_generation_prompt(shot, issues)
+            if matching:
+                corrected_prompt = cls._build_corrected_generation_prompt(shot, matching)
                 return VisualRetryDecision(
                     shot_id=shot.shot_id,
                     original_candidate_id=original_candidate_id,
                     original_modality=actual_modality,
                     action=VisualRetryAction.REGENERATE,
                     issues=issues,
-                    reason=f"Regenerating {actual_modality.value} with stricter corrective prompt targeting {[i.value for i in issues]}",
+                    reason=f"Regenerating {actual_modality.value} with stricter corrective prompt targeting {[i.value for i in matching]}",
                     attempt_index=attempt_index,
                     target_modality=actual_modality,
                     corrected_instruction=corrected_prompt,
                 )
+            return VisualRetryDecision(
+                shot_id=shot.shot_id,
+                original_candidate_id=original_candidate_id,
+                original_modality=actual_modality,
+                action=VisualRetryAction.NO_RETRY,
+                issues=issues,
+                reason=f"Semantic rejection contains no retryable issue for actual modality {actual_modality.value}: {[i.value for i in issues]}.",
+                attempt_index=attempt_index,
+            )
 
         # CASE B: DIAGRAM or STATIC_DIAGRAM
         elif actual_modality in (VisualModality.DIAGRAM, VisualModality.STATIC_DIAGRAM):
@@ -155,19 +164,28 @@ class VisualRetryPolicy:
                 VisualSemanticIssue.LOW_INFORMATION_DENSITY,
             }
             matching = [i for i in issues if i in actionable_issues]
-            if matching or issues:
-                corrected_diag = cls._build_corrected_diagram_instruction(shot, issues)
+            if matching:
+                corrected_diag = cls._build_corrected_diagram_instruction(shot, matching)
                 return VisualRetryDecision(
                     shot_id=shot.shot_id,
                     original_candidate_id=original_candidate_id,
                     original_modality=actual_modality,
                     action=VisualRetryAction.RERENDER,
                     issues=issues,
-                    reason=f"Rerendering diagram with explicit directional sequence targeting {[i.value for i in issues]}",
+                    reason=f"Rerendering diagram with explicit directional sequence targeting {[i.value for i in matching]}",
                     attempt_index=attempt_index,
                     target_modality=VisualModality.DIAGRAM,
                     corrected_instruction=corrected_diag,
                 )
+            return VisualRetryDecision(
+                shot_id=shot.shot_id,
+                original_candidate_id=original_candidate_id,
+                original_modality=actual_modality,
+                action=VisualRetryAction.NO_RETRY,
+                issues=issues,
+                reason=f"Semantic rejection contains no retryable issue for actual modality {actual_modality.value}: {[i.value for i in issues]}.",
+                attempt_index=attempt_index,
+            )
 
         # CASE E: STOCK_VIDEO (Generic or Intent Mismatch -> Switch to Diagram)
         elif actual_modality == VisualModality.STOCK_VIDEO:
@@ -179,51 +197,61 @@ class VisualRetryPolicy:
                 VisualSemanticIssue.DECORATIVE_ONLY,
             }
             matching = [i for i in issues if i in actionable_issues]
-            if matching or issues:
-                diagram_spec = cls._build_corrected_diagram_instruction(shot, issues)
+            if matching:
+                diagram_spec = cls._build_corrected_diagram_instruction(shot, matching)
                 return VisualRetryDecision(
                     shot_id=shot.shot_id,
                     original_candidate_id=original_candidate_id,
                     original_modality=actual_modality,
                     action=VisualRetryAction.SWITCH_TO_DIAGRAM,
                     issues=issues,
-                    reason=f"Switching rejected stock media to technical diagram targeting {[i.value for i in issues]}",
+                    reason=f"Switching rejected stock media to technical diagram targeting {[i.value for i in matching]}",
                     attempt_index=attempt_index,
                     target_modality=VisualModality.DIAGRAM,
                     corrected_instruction=diagram_spec,
                 )
-
-        # CASE C: DOCUMENT_EVIDENCE
-        elif actual_modality in (VisualModality.DOCUMENT_EVIDENCE, VisualModality.SCREENSHOT):
-            # Check if an alternative excerpt anchor is available
-            binding = shot.evidence_binding
-            if binding and binding.claim_text and binding.claim_text != binding.source_excerpt:
-                # Targeted reacquisition using alternative claim anchor
-                return VisualRetryDecision(
-                    shot_id=shot.shot_id,
-                    original_candidate_id=original_candidate_id,
-                    original_modality=actual_modality,
-                    action=VisualRetryAction.REACQUIRE,
-                    issues=issues,
-                    reason="Reacquiring document evidence with alternative claim anchor.",
-                    attempt_index=attempt_index,
-                    target_modality=actual_modality,
-                    corrected_instruction=binding.claim_text,
-                )
-            # If no alternative targeting mechanism exists, capturing identical page is a no-op: reject!
             return VisualRetryDecision(
                 shot_id=shot.shot_id,
                 original_candidate_id=original_candidate_id,
                 original_modality=actual_modality,
                 action=VisualRetryAction.NO_RETRY,
                 issues=issues,
-                reason="Document evidence lacks an alternative region-targeting mechanism (no-op retry rejected).",
+                reason=f"Semantic rejection contains no retryable issue for actual modality {actual_modality.value}: {[i.value for i in issues]}.",
+                attempt_index=attempt_index,
+            )
+
+        # CASE C: DOCUMENT_EVIDENCE / SCREENSHOT
+        elif actual_modality in (VisualModality.DOCUMENT_EVIDENCE, VisualModality.SCREENSHOT):
+            # Trust boundary: Paraphrased claim_text must never be promoted to source_excerpt locator.
+            # Without a verified alternative canonical excerpt, document evidence reacquisition is rejected.
+            return VisualRetryDecision(
+                shot_id=shot.shot_id,
+                original_candidate_id=original_candidate_id,
+                original_modality=actual_modality,
+                action=VisualRetryAction.NO_RETRY,
+                issues=issues,
+                reason="Document evidence has no alternate verified excerpt/region target; semantic reacquisition would be a no-op or would weaken provenance.",
                 attempt_index=attempt_index,
             )
 
         # CASE D: SCREEN_CAPTURE
         elif actual_modality == VisualModality.SCREEN_CAPTURE:
-            # Check if interaction plan or alternative plan exists
+            actionable_issues = {
+                VisualSemanticIssue.UI_STATE_NOT_SHOWN,
+                VisualSemanticIssue.VISUAL_INTENT_MISMATCH,
+                VisualSemanticIssue.SUBJECT_MISMATCH,
+            }
+            matching = [i for i in issues if i in actionable_issues]
+            if not matching:
+                return VisualRetryDecision(
+                    shot_id=shot.shot_id,
+                    original_candidate_id=original_candidate_id,
+                    original_modality=actual_modality,
+                    action=VisualRetryAction.NO_RETRY,
+                    issues=issues,
+                    reason=f"Semantic rejection contains no retryable issue for actual modality {actual_modality.value}: {[i.value for i in issues]}.",
+                    attempt_index=attempt_index,
+                )
             caps = provider_capabilities or {}
             if caps.get("has_alternate_interaction"):
                 return VisualRetryDecision(
@@ -329,17 +357,30 @@ class VisualRetryPolicy:
 
     @staticmethod
     def _build_corrected_diagram_instruction(shot: ShotSpec, issues: List[VisualSemanticIssue]) -> str:
-        """Construct explicit directional sequence for DiagramRenderer (using -> connecting nodes)."""
-        base = shot.diagram_instruction or shot.narration_segment or shot.subject or "System Flow"
-        subj = shot.subject or "Client Request"
-        act = shot.action or "Processing Engine"
+        """Construct corrective diagram instruction using ONLY existing grounded shot context.
 
-        # If base already has clean directional arrows, keep and clarify
-        if "->" in base or "→" in base:
-            return f"Directional mechanism flow: {base}. Use labeled arrows and clear node sequence."
+        Strictly prohibits inventing unmentioned mechanisms or generic architecture nodes
+        such as 'Log & Index', 'State Verification', 'Database', 'API Gateway', or 'Worker'.
+        """
+        # If diagram_instruction already specifies an explicit sequence, preserve it with layout directives
+        if shot.diagram_instruction and ("->" in shot.diagram_instruction or "→" in shot.diagram_instruction):
+            return (
+                f"{shot.diagram_instruction}. "
+                "Make the existing sequence explicit with labeled directional arrows and clear visual hierarchy. "
+                "Do not add invented stages or unmentioned components."
+            )
 
-        # Derive clean technical sequence from subject and action
-        return (
-            f"Directional mechanism flow: Input Source: {subj} -> Processing Pipeline: {act} -> "
-            f"State Verification: Log & Index -> Final Output. Use labeled directional arrows."
+        # Build grounded directional instruction strictly from shot context
+        parts = [
+            f"Create a directional diagram using only the entities and mechanism explicitly described here: '{shot.narration_segment}'.",
+        ]
+        if shot.subject:
+            parts.append(f"Primary subject: '{shot.subject}'.")
+        if shot.action:
+            parts.append(f"Action/mechanism: '{shot.action}'.")
+        parts.append(
+            "Emphasize cause-and-effect with labeled directional arrows. "
+            "Represent only entities and steps directly supported by this shot context; "
+            "do not invent additional components, unmentioned stages, or generic architecture nodes."
         )
+        return " ".join(parts)

@@ -161,6 +161,12 @@ def test_bounded_generated_retry_succeeds_on_second_attempt(tmp_path: Path):
     assert asset_res.sha256 == sha_b
     assert asset_res.semantic_qa_performed is True
     assert asset_res.semantic_audit["verdict"] == "ACCEPT"
+    assert asset_res.semantic_audit["retry"]["attempted"] is True
+    assert asset_res.semantic_audit["retry"]["count"] == 1
+    assert asset_res.semantic_audit["retry"]["action"] == VisualRetryAction.REGENERATE.value
+    assert asset_res.semantic_audit["retry"]["initial_rejection"]["verdict"] == "REJECT"
+    assert VisualSemanticIssue.SUBJECT_MISMATCH.value in asset_res.semantic_audit["retry"]["initial_rejection"]["issues"]
+    assert asset_res.semantic_audit["retry"]["initial_rejection"]["candidate_sha256"] == sha_a
 
     # Verify corrective prompt was passed on retry
     call_args_1 = mock_gflow.generate_image.call_args_list[0]
@@ -439,24 +445,28 @@ def test_trust_and_integrity_failures_never_retried(failure_keyword: str):
 
 
 # ==============================================================================
-# Test 7: Document Evidence Canonical Authority Preserved
+# Test 7 / Regression Test A: Document Claim Text Must Never Become Source Excerpt
 # ==============================================================================
 
-def test_document_evidence_canonical_authority_preserved_across_reacquisition():
-    """Document evidence reacquisition uses alternative claim text targeting without
-    mutating canonical source_ref, source_url, or claim_id."""
+def test_document_claim_text_never_becomes_source_excerpt(tmp_path: Path):
+    """Paraphrased claim_text must never be promoted to source_excerpt locator.
+    Document evidence without verified alternative canonical excerpt returns NO_RETRY.
+    Critically, source_excerpt remains unchanged across the entire operation."""
+    canonical_source_excerpt = "Exact sentence from original source: Q3 revenue was $11,353 million."
+    paraphrased_claim = "Paraphrased claim: Revenue grew significantly in third quarter."
+
     binding = EvidenceBinding(
         claim_id="claim_sec_456",
         source_ref="sec_filing_q3",
         source_title="Alphabet Q3 2024 Form 10-Q",
         source_url="https://sec.gov/edgar/data/123/q3_2024.htm",
-        claim_text="Google Cloud revenue grew 35% to $11.35 billion.",
-        source_excerpt="Initial unhighlighted excerpt on page",
+        claim_text=paraphrased_claim,
+        source_excerpt=canonical_source_excerpt,
         claim_verified=True,
     )
 
     shot = ShotSpec(
-        shot_id="shot_doc_authority",
+        shot_id="shot_doc_trust_boundary",
         scene_index=0,
         beat_id="beat_01",
         visual_modality=VisualModality.DOCUMENT_EVIDENCE,
@@ -468,6 +478,7 @@ def test_document_evidence_canonical_authority_preserved_across_reacquisition():
         evidence_binding=binding,
     )
 
+    # 1. Policy level check
     decision = VisualRetryPolicy.evaluate_decision(
         shot=shot,
         actual_modality=VisualModality.DOCUMENT_EVIDENCE,
@@ -476,13 +487,74 @@ def test_document_evidence_canonical_authority_preserved_across_reacquisition():
         attempt_index=0,
     )
 
-    assert decision.action == VisualRetryAction.REACQUIRE
-    assert decision.corrected_instruction == "Google Cloud revenue grew 35% to $11.35 billion."
+    assert decision.action == VisualRetryAction.NO_RETRY
+    assert "has no alternate verified excerpt/region target" in decision.reason
+    assert decision.corrected_instruction is None
 
-    # Verify canonical authority remains immutable
-    assert shot.evidence_binding.claim_id == "claim_sec_456"
-    assert shot.evidence_binding.source_ref == "sec_filing_q3"
-    assert shot.evidence_binding.source_url == "https://sec.gov/edgar/data/123/q3_2024.htm"
+    # 2. Orchestration level check with Director
+    dummy_doc = tmp_path / "doc_page.png"
+    Image.new("RGB", (320, 240), color=(240, 240, 240)).save(dummy_doc)
+    doc_sha = hashlib.sha256(dummy_doc.read_bytes()).hexdigest()
+
+    mock_doc_cand = MagicMock()
+    mock_doc_cand.file_path = str(dummy_doc)
+    mock_doc_cand.content_sha256 = doc_sha
+    mock_doc_cand.actual_modality = VisualModality.DOCUMENT_EVIDENCE
+    mock_doc_cand.acquisition_method = "web_capture"
+    mock_doc_cand.source_type = MagicMock(value="DOCUMENT")
+    mock_doc_cand.source_url = binding.source_url
+    mock_doc_cand.source_ref = binding.source_ref
+    mock_doc_cand.license_type = "Public Domain"
+    mock_doc_cand.attribution = "SEC"
+    mock_doc_cand.is_synthetic = False
+    mock_doc_cand.evidence_claim_ids = [binding.claim_id]
+
+    mock_acq_res = MagicMock()
+    mock_acq_res.selected_candidate = None
+    mock_acq_res.candidates = [mock_doc_cand]
+    mock_acq_res.failure_reasons = ["SEMANTIC_QA_REJECTED"]
+    mock_acq_res.semantic_audit = {
+        "performed": True,
+        "verdict": "REJECT",
+        "issues": ["EVIDENCE_NOT_VISIBLE"],
+        "reason": "Target highlight not visible in screenshot viewport",
+        "candidate_id": "cand_doc_01",
+    }
+
+    mock_router = MagicMock()
+    mock_router.build_acquisition_request.return_value = MagicMock()
+    mock_router.acquire_visual.return_value = mock_acq_res
+
+    backend = SequentialMockBackend([
+        {"verdict": VisualSemanticVerdict.REJECT, "issues": [VisualSemanticIssue.EVIDENCE_NOT_VISIBLE], "reason": "Highlight not in viewport"},
+    ])
+
+    profile = ChannelCreativeProfile.production_profile(name="doc_trust_prof")
+    profile.semantic_qa_mode = "ADVISORY"
+    director = AutoDirectorService(profile=profile, reasoning_backend=backend)
+    director.acquisition_router = mock_router
+    evaluator = VisualSemanticEvaluator(backend=backend)
+    mock_router.semantic_judge = VisualCandidateJudge(evaluator=evaluator)
+
+    asset_res = director._generate_shot_asset(
+        shot=shot,
+        shot_index=0,
+        output_dir=tmp_path,
+        script_title="SEC Filing",
+        channel_name="Finance",
+    )
+
+    # Asset failed closed to NO_RETRY
+    assert asset_res.retry_attempted is False
+    assert asset_res.retry_action == VisualRetryAction.NO_RETRY.value
+    assert asset_res.retry_count == 0
+    # Exactly 1 acquisition call, no corrective retry
+    assert mock_router.acquire_visual.call_count == 1
+
+    # CRITICAL INVARIANT: source_excerpt must NEVER be mutated to claim_text
+    assert shot.evidence_binding.source_excerpt == canonical_source_excerpt
+    assert shot.evidence_binding.source_excerpt != shot.evidence_binding.claim_text
+    assert shot.evidence_binding.claim_text == paraphrased_claim
 
 
 # ==============================================================================
@@ -626,7 +698,7 @@ def test_noop_retries_rejected_for_uncontrollable_modalities():
         attempt_index=0,
     )
     assert doc_decision.action == VisualRetryAction.NO_RETRY
-    assert "no-op retry rejected" in doc_decision.reason
+    assert "has no alternate verified excerpt/region target" in doc_decision.reason
 
     # 9b. Data visualization / Chart renderer (fixed layout and fonts)
     chart_shot = ShotSpec(
@@ -749,3 +821,367 @@ def test_regenerate_single_shot_propagates_retry_metadata(tmp_path: Path):
     assert t_shot.asset_retry_action == VisualRetryAction.REGENERATE.value
     assert t_shot.asset_retry_count == 1
     assert t_shot.asset_sha256 == sha_b
+
+
+# ==============================================================================
+# Regression Test B: Diagram Retry Does Not Invent Components
+# ==============================================================================
+
+def test_diagram_retry_does_not_invent_mechanism_nodes():
+    """Diagram corrective instruction must ONLY use grounded shot context and explicit
+    sequences. It must NEVER inject invented generic architecture nodes like
+    'Log & Index', 'State Verification', 'Database', 'API Gateway', or 'Worker'."""
+    # Fixture 1: Transformer self-attention
+    attn_shot = ShotSpec(
+        shot_id="shot_transformer_attn",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.DIAGRAM,
+        requested_modality=VisualModality.DIAGRAM,
+        visual_intent=VisualIntent.SHOW_MECHANISM,
+        subject="Transformer self-attention",
+        narration_segment="Each token compares its query with the keys of other tokens, producing attention weights used to combine value vectors.",
+        action="compare query vectors with key vectors",
+        duration_seconds=4.0,
+    )
+
+    decision_attn = VisualRetryPolicy.evaluate_decision(
+        shot=attn_shot,
+        actual_modality=VisualModality.DIAGRAM,
+        issues=[VisualSemanticIssue.MECHANISM_NOT_EXPLAINED],
+        attempt_index=0,
+    )
+
+    assert decision_attn.action == VisualRetryAction.RERENDER
+    instruction_attn = decision_attn.corrected_instruction
+    assert instruction_attn is not None
+
+    # Must contain grounded factual terms from the shot
+    assert "query" in instruction_attn.lower()
+    assert "key" in instruction_attn.lower()
+    assert "attention" in instruction_attn.lower()
+
+    # Must NOT contain invented generic mechanism nodes
+    banned_generic_nodes = [
+        "Log & Index",
+        "State Verification",
+        "Database",
+        "API Gateway",
+        "Worker",
+        "Input Source",
+        "Final Output",
+        "Processing Pipeline",
+    ]
+    for banned in banned_generic_nodes:
+        assert banned not in instruction_attn, f"Invented generic node '{banned}' found in diagram instruction: {instruction_attn}"
+
+    # Fixture 2: Biological process (Photosynthesis light reactions)
+    bio_shot = ShotSpec(
+        shot_id="shot_photosynthesis",
+        scene_index=1,
+        beat_id="beat_02",
+        visual_modality=VisualModality.DIAGRAM,
+        requested_modality=VisualModality.DIAGRAM,
+        visual_intent=VisualIntent.SHOW_MECHANISM,
+        subject="Photosystem II Photolysis",
+        narration_segment="Light energy absorbed by P680 oxidizes water into molecular oxygen and protons while transferring electrons to plastoquinone.",
+        action="photons split water into oxygen and protons",
+        duration_seconds=4.0,
+    )
+
+    decision_bio = VisualRetryPolicy.evaluate_decision(
+        shot=bio_shot,
+        actual_modality=VisualModality.DIAGRAM,
+        issues=[VisualSemanticIssue.VISUAL_INTENT_MISMATCH],
+        attempt_index=0,
+    )
+
+    assert decision_bio.action == VisualRetryAction.RERENDER
+    instruction_bio = decision_bio.corrected_instruction
+    assert instruction_bio is not None
+
+    assert "water" in instruction_bio.lower()
+    assert "oxygen" in instruction_bio.lower()
+    for banned in banned_generic_nodes:
+        assert banned not in instruction_bio, f"Invented generic node '{banned}' found in bio diagram instruction: {instruction_bio}"
+
+    # Fixture 3: Existing sequence preservation with directives
+    seq_shot = ShotSpec(
+        shot_id="shot_explicit_seq",
+        scene_index=2,
+        beat_id="beat_03",
+        visual_modality=VisualModality.DIAGRAM,
+        requested_modality=VisualModality.DIAGRAM,
+        visual_intent=VisualIntent.SHOW_MECHANISM,
+        subject="Compilation Pipeline",
+        narration_segment="Source code passes through parser and code generator.",
+        duration_seconds=3.0,
+        diagram_instruction="Lexer -> Parser -> AST -> LLVM IR -> Machine Code",
+    )
+
+    decision_seq = VisualRetryPolicy.evaluate_decision(
+        shot=seq_shot,
+        actual_modality=VisualModality.DIAGRAM,
+        issues=[VisualSemanticIssue.MECHANISM_NOT_EXPLAINED],
+        attempt_index=0,
+    )
+
+    assert decision_seq.action == VisualRetryAction.RERENDER
+    instruction_seq = decision_seq.corrected_instruction
+    assert "Lexer -> Parser -> AST -> LLVM IR -> Machine Code" in instruction_seq
+    assert "directional arrows" in instruction_seq.lower()
+    for banned in ["Log & Index", "State Verification", "Database", "API Gateway"]:
+        assert banned not in instruction_seq
+
+
+# ==============================================================================
+# Regression Test C: Non-Actionable Issue Does Not Retry
+# ==============================================================================
+
+def test_non_actionable_issues_return_no_retry(tmp_path: Path):
+    """When a candidate is rejected with issues that are not actionable for its actual
+    modality, the retry policy returns NO_RETRY rather than blindly retrying."""
+    # 1. DIAGRAM + TEXT_REPEATS_NARRATION -> NO_RETRY
+    diag_shot = ShotSpec(
+        shot_id="shot_diag_non_actionable",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.DIAGRAM,
+        requested_modality=VisualModality.DIAGRAM,
+        visual_intent=VisualIntent.SHOW_MECHANISM,
+        subject="Neural Network",
+        narration_segment="Neural network weights.",
+        duration_seconds=3.0,
+    )
+    decision_diag = VisualRetryPolicy.evaluate_decision(
+        shot=diag_shot,
+        actual_modality=VisualModality.DIAGRAM,
+        issues=[VisualSemanticIssue.TEXT_REPEATS_NARRATION],
+        attempt_index=0,
+    )
+    assert decision_diag.action == VisualRetryAction.NO_RETRY
+    assert "contains no retryable issue for actual modality diagram" in decision_diag.reason.lower()
+
+    # 2. STOCK_VIDEO + EVIDENCE_UNREADABLE -> NO_RETRY
+    stock_shot = ShotSpec(
+        shot_id="shot_stock_non_actionable",
+        scene_index=1,
+        beat_id="beat_02",
+        visual_modality=VisualModality.STOCK_VIDEO,
+        requested_modality=VisualModality.STOCK_VIDEO,
+        visual_intent=VisualIntent.ESTABLISH_CONTEXT,
+        subject="Office Work",
+        narration_segment="People working in an office.",
+        duration_seconds=3.0,
+    )
+    decision_stock = VisualRetryPolicy.evaluate_decision(
+        shot=stock_shot,
+        actual_modality=VisualModality.STOCK_VIDEO,
+        issues=[VisualSemanticIssue.EVIDENCE_UNREADABLE],
+        attempt_index=0,
+    )
+    assert decision_stock.action == VisualRetryAction.NO_RETRY
+    assert "contains no retryable issue for actual modality stock_video" in decision_stock.reason.lower()
+
+    # 3. GENERATED_IMAGE + DATA_UNREADABLE -> NO_RETRY
+    gen_shot = ShotSpec(
+        shot_id="shot_gen_non_actionable",
+        scene_index=2,
+        beat_id="beat_03",
+        visual_modality=VisualModality.GENERATED_IMAGE,
+        requested_modality=VisualModality.GENERATED_IMAGE,
+        visual_intent=VisualIntent.ESTABLISH_CONTEXT,
+        subject="City Skyline",
+        narration_segment="Skyline at sunset.",
+        duration_seconds=3.0,
+        generation_prompt="City skyline at sunset",
+    )
+    decision_gen = VisualRetryPolicy.evaluate_decision(
+        shot=gen_shot,
+        actual_modality=VisualModality.GENERATED_IMAGE,
+        issues=[VisualSemanticIssue.DATA_UNREADABLE],
+        attempt_index=0,
+    )
+    assert decision_gen.action == VisualRetryAction.NO_RETRY
+    assert "contains no retryable issue for actual modality generated_image" in decision_gen.reason.lower()
+
+    # 4. Orchestration level verification: provider call count remains 1, retry_count == 0
+    img = tmp_path / "skyline.png"
+    Image.new("RGB", (320, 240), color=(10, 20, 50)).save(img)
+    sha = hashlib.sha256(img.read_bytes()).hexdigest()
+
+    mock_gflow = MagicMock()
+    mock_gflow.generate_image.return_value = (str(img), sha, {})
+
+    backend = SequentialMockBackend([
+        {"verdict": VisualSemanticVerdict.REJECT, "issues": [VisualSemanticIssue.DATA_UNREADABLE], "reason": "Data labels unreadable"},
+    ])
+
+    profile = ChannelCreativeProfile.production_profile(name="non_actionable_prof")
+    profile.semantic_qa_mode = "ADVISORY"
+    director = AutoDirectorService(profile=profile, gflow_provider=mock_gflow, reasoning_backend=backend)
+    evaluator = VisualSemanticEvaluator(backend=backend)
+    director.acquisition_router.semantic_judge = VisualCandidateJudge(evaluator=evaluator)
+
+    asset_res = director._generate_shot_asset(
+        shot=gen_shot,
+        shot_index=2,
+        output_dir=tmp_path,
+        script_title="City View",
+        channel_name="City Channel",
+    )
+
+    assert mock_gflow.generate_image.call_count == 1
+    assert asset_res.retry_attempted is False
+    assert asset_res.retry_count == 0
+    assert asset_res.retry_action == VisualRetryAction.NO_RETRY.value
+
+
+# ==============================================================================
+# Regression Test D: Initial Rejection Audit Survives Successful Retry
+# ==============================================================================
+
+def test_initial_rejection_audit_survives_successful_retry_on_timeline(tmp_path: Path):
+    """When Attempt 0 is rejected and Attempt 1 succeeds, the final semantic_audit
+    must retain the Attempt 0 rejection metadata (verdict, issues, reason, candidate_id, sha)
+    and propagate cleanly to TimelineShot.asset_semantic_qa."""
+    img_a = tmp_path / "attempt_0.png"
+    img_b = tmp_path / "attempt_1.png"
+    Image.new("RGB", (320, 240), color=(10, 10, 10)).save(img_a)
+    Image.new("RGB", (320, 240), color=(20, 20, 20)).save(img_b)
+    sha_a = hashlib.sha256(img_a.read_bytes()).hexdigest()
+    sha_b = hashlib.sha256(img_b.read_bytes()).hexdigest()
+
+    mock_gflow = MagicMock()
+    mock_gflow.generate_image.side_effect = [
+        (str(img_a), sha_a, {}),
+        (str(img_b), sha_b, {}),
+    ]
+
+    backend = SequentialMockBackend([
+        {
+            "verdict": VisualSemanticVerdict.REJECT,
+            "issues": [VisualSemanticIssue.SUBJECT_MISMATCH],
+            "reason": "Attempt 0 wrong subject",
+        },
+        {
+            "verdict": VisualSemanticVerdict.ACCEPT,
+            "issues": [],
+            "reason": "Attempt 1 correct subject",
+        },
+    ])
+
+    profile = ChannelCreativeProfile.production_profile(name="audit_trail_prof")
+    director = AutoDirectorService(profile=profile, gflow_provider=mock_gflow, reasoning_backend=backend)
+    evaluator = VisualSemanticEvaluator(backend=backend)
+    director.acquisition_router.semantic_judge = VisualCandidateJudge(evaluator=evaluator)
+
+    shot = ShotSpec(
+        shot_id="shot_audit_trail",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.GENERATED_IMAGE,
+        requested_modality=VisualModality.GENERATED_IMAGE,
+        visual_intent=VisualIntent.ESTABLISH_CONTEXT,
+        subject="Robotic Arm",
+        narration_segment="Precision robotic arm moves silicon wafer.",
+        duration_seconds=3.0,
+        generation_prompt="Robotic arm assembly line",
+    )
+
+    script = Script(
+        id="script_audit_trail",
+        title="Robotics",
+        hook="Robots in manufacturing.",
+        total_word_count=30,
+        estimated_duration_seconds=3.0,
+    )
+    storyboard = Storyboard(
+        project_id="proj_audit_trail",
+        total_duration=3.0,
+        shots=[shot],
+    )
+    director.planner.plan_storyboard = MagicMock(return_value=storyboard)
+
+    timeline, _ = director.plan_and_render_timeline(
+        project_id="proj_audit_trail",
+        script=script,
+        channel_name="Tech Channel",
+        total_audio_duration=3.0,
+        output_dir=tmp_path,
+    )
+
+    t_shot = timeline.shots[0]
+    audit = t_shot.asset_semantic_qa
+    assert audit is not None
+    assert audit["verdict"] == "ACCEPT"
+
+    # Retry provenance
+    retry_meta = audit.get("retry")
+    assert retry_meta is not None
+    assert retry_meta["attempted"] is True
+    assert retry_meta["count"] == 1
+    assert retry_meta["action"] == VisualRetryAction.REGENERATE.value
+    assert "Regenerating" in retry_meta["decision_reason"]
+
+    # Initial rejection audit reconstructed
+    init_rej = retry_meta.get("initial_rejection")
+    assert init_rej is not None
+    assert init_rej["verdict"] == "REJECT"
+    assert VisualSemanticIssue.SUBJECT_MISMATCH.value in init_rej["issues"]
+    assert init_rej["reason"] == "Attempt 0 wrong subject"
+    assert init_rej["candidate_sha256"] == sha_a
+
+
+# ==============================================================================
+# Regression Test E: Trust Failure Does Not Retry Through Orchestration
+# ==============================================================================
+
+def test_trust_integrity_failure_does_not_retry_through_orchestration(tmp_path: Path):
+    """When a candidate fails security/integrity checks (e.g. VISUAL_ASSET_SHA_MISMATCH),
+    the Director fails closed immediately. Corrective retry provider invocation count is 0."""
+    img = tmp_path / "tampered.png"
+    Image.new("RGB", (320, 240), color=(100, 20, 30)).save(img)
+    actual_sha = hashlib.sha256(img.read_bytes()).hexdigest()
+    declared_tampered_sha = "0" * 64
+
+    mock_gflow = MagicMock()
+    # Provider returns declared SHA that does not match disk content
+    mock_gflow.generate_image.return_value = (str(img), declared_tampered_sha, {})
+
+    backend = SequentialMockBackend([
+        {"verdict": VisualSemanticVerdict.ACCEPT, "issues": [], "reason": "Should never evaluate tampered asset"},
+    ])
+
+    profile = ChannelCreativeProfile.production_profile(name="trust_fail_prof")
+    profile.semantic_qa_mode = "REQUIRED"
+    director = AutoDirectorService(profile=profile, gflow_provider=mock_gflow, reasoning_backend=backend)
+    evaluator = VisualSemanticEvaluator(backend=backend)
+    director.acquisition_router.semantic_judge = VisualCandidateJudge(evaluator=evaluator)
+
+    shot = ShotSpec(
+        shot_id="shot_sha_tampered",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.GENERATED_IMAGE,
+        requested_modality=VisualModality.GENERATED_IMAGE,
+        visual_intent=VisualIntent.ESTABLISH_CONTEXT,
+        subject="Security Gate",
+        narration_segment="Integrity verification gate.",
+        duration_seconds=3.0,
+        generation_prompt="Security gate illustration",
+    )
+
+    with pytest.raises(VisualSemanticQAError, match="VISUAL_ASSET_SHA_MISMATCH"):
+        director._generate_shot_asset(
+            shot=shot,
+            shot_index=0,
+            output_dir=tmp_path,
+            script_title="Security",
+            channel_name="Security Channel",
+        )
+
+    # Provider called once for initial asset; 0 corrective retries executed
+    assert mock_gflow.generate_image.call_count == 1
+    # Backend never called because integrity precheck failed closed before semantic QA
+    assert backend.invocation_count == 0
