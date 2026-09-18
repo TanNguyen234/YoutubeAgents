@@ -689,7 +689,7 @@ class AutoDirectorService:
                             f"Visual Semantic QA rejected all candidates for shot '{shot_id}'. FAIL_CLOSED active."
                         )
                 if selected and selected.source_type != VisualSourceType.FALLBACK_CARD:
-                    actual_mod = VisualModality.SCREEN_CAPTURE if selected.source_type in (VisualSourceType.LOCAL_WEB_APP, VisualSourceType.WEB_PAGE, VisualSourceType.RESEARCH_SOURCE) else VisualModality.DIAGRAM
+                    actual_mod = selected.actual_modality or acq_res.actual_modality or (VisualModality.SCREEN_CAPTURE if selected.source_type in (VisualSourceType.LOCAL_WEB_APP, VisualSourceType.WEB_PAGE, VisualSourceType.RESEARCH_SOURCE) else VisualModality.DIAGRAM)
                     self.asset_attempts.append(
                         AssetGenerationAttempt(
                             shot_id=shot_id,

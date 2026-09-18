@@ -1800,4 +1800,375 @@ def test_selected_result_actual_modality_matches_judged_modality(tmp_image: Path
     assert res.actual_modality == VisualModality.DIAGRAM
 
 
+def test_remote_screen_capture_candidate_actual_modality_is_screen_capture(tmp_image: Path, tmp_path: Path):
+    """Remote trusted SCREEN_CAPTURE retains actual_modality = SCREEN_CAPTURE and playwright_remote_screen_capture."""
+    from unittest.mock import MagicMock
+    from app.domain.models import ResearchDossier, ResearchSource
+
+    sha = compute_file_sha(tmp_image)
+    mock_capture = MagicMock()
+    mock_cand = VisualAssetCandidate(
+        candidate_id="cand_remote_sc",
+        source_type=VisualSourceType.RESEARCH_SOURCE,
+        file_path=str(tmp_image),
+        source_url="https://example.com/app",
+        content_sha256=sha,
+        width=1080,
+        height=1920,
+        acquisition_method="playwright_web_evidence",
+        is_synthetic=False,
+        actual_modality=VisualModality.DOCUMENT_EVIDENCE,  # web_capture defaults to DOCUMENT_EVIDENCE
+    )
+    mock_capture.capture_evidence.return_value = (mock_cand, [])
+
+    dossier = ResearchDossier(
+        id="dossier_01",
+        summary="Test dossier",
+        topic_id="t_01",
+        sources=[
+            ResearchSource(
+                id="src_01",
+                source_id="src_01",
+                title="App UI",
+                url="https://example.com/app",
+                content_sha256=sha,
+            )
+        ],
+    )
+
+    mock_backend = MockVisualReasoningBackend(structured_responses=[
+        RawVisualEvaluationResponse(
+            candidate_id="cand_remote_sc",
+            shot_id="shot_sc_01",
+            candidate_sha256=sha,
+            verdict=VisualSemanticVerdict.ACCEPT,
+            semantic_relevance=0.9,
+            visual_intent_match=0.9,
+            subject_match=0.9,
+            readability=0.9,
+            composition_quality=0.9,
+            information_value=0.9,
+            interface_state_match=0.85,
+            generic_slop_score=0.05,
+            concise_reason="Valid remote UI capture",
+        )
+    ])
+    evaluator = VisualSemanticEvaluator(backend=mock_backend)
+    judge = VisualCandidateJudge(evaluator=evaluator)
+    router = VisualAcquisitionRouter(
+        web_capture=mock_capture,
+        semantic_judge=judge,
+        qa_mode=VisualSemanticQAMode.REQUIRED,
+    )
+
+    shot = ShotSpec(
+        shot_id="shot_sc_01",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.SCREEN_CAPTURE,
+        requested_modality=VisualModality.SCREEN_CAPTURE,
+        visual_intent=VisualIntent.SHOW_INTERFACE,
+        subject="Remote Dashboard UI",
+        narration_segment="We see the remote dashboard interface with real-time stats.",
+        duration_seconds=3.0,
+    )
+    req = VisualAcquisitionRequest(
+        project_id="p_sc",
+        shot_id="shot_sc_01",
+        modality=VisualModality.SCREEN_CAPTURE,
+        visual_intent=VisualIntent.SHOW_INTERFACE,
+        subject="Remote Dashboard UI",
+        target_url="https://example.com/app",
+    )
+
+    res = router.acquire_visual(req, tmp_path, shot=shot, dossier=dossier, qa_mode=VisualSemanticQAMode.REQUIRED)
+    assert res.selected_candidate is not None
+    assert res.selected_candidate.actual_modality == VisualModality.SCREEN_CAPTURE
+    assert res.selected_candidate.acquisition_method == "playwright_remote_screen_capture"
+    assert res.actual_modality == VisualModality.SCREEN_CAPTURE
+
+
+def test_remote_screen_capture_is_judged_with_ui_state_rubric(tmp_image: Path, tmp_path: Path):
+    """Remote SCREEN_CAPTURE is evaluated against SCREEN_CAPTURE rubric requiring interface_state_match, not evidence_visibility."""
+    from unittest.mock import MagicMock
+    from app.domain.models import ResearchDossier, ResearchSource
+
+    sha = compute_file_sha(tmp_image)
+    mock_capture = MagicMock()
+    mock_cand = VisualAssetCandidate(
+        candidate_id="cand_remote_sc_rubric",
+        source_type=VisualSourceType.RESEARCH_SOURCE,
+        file_path=str(tmp_image),
+        source_url="https://example.com/app",
+        content_sha256=sha,
+        width=1080,
+        height=1920,
+        acquisition_method="playwright_web_evidence",
+        is_synthetic=False,
+        actual_modality=VisualModality.DOCUMENT_EVIDENCE,
+    )
+    mock_capture.capture_evidence.return_value = (mock_cand, [])
+
+    dossier = ResearchDossier(
+        id="dossier_01",
+        summary="Test dossier",
+        topic_id="t_01",
+        sources=[
+            ResearchSource(
+                id="src_01",
+                source_id="src_01",
+                title="App UI",
+                url="https://example.com/app",
+                content_sha256=sha,
+            )
+        ],
+    )
+
+    judged_modalities = []
+    # Response has interface_state_match=0.85, but evidence_visibility=None.
+    # If evaluated as DOCUMENT_EVIDENCE, it would hard reject with EVIDENCE_NOT_VISIBLE.
+    # Because it is evaluated as SCREEN_CAPTURE, it accepts.
+    mock_backend = MockVisualReasoningBackend(structured_responses=[
+        RawVisualEvaluationResponse(
+            candidate_id="cand_remote_sc_rubric",
+            shot_id="shot_sc_rubric",
+            candidate_sha256=sha,
+            verdict=VisualSemanticVerdict.ACCEPT,
+            semantic_relevance=0.9,
+            visual_intent_match=0.9,
+            subject_match=0.9,
+            readability=0.9,
+            composition_quality=0.9,
+            information_value=0.9,
+            interface_state_match=0.85,
+            evidence_visibility=None,
+            generic_slop_score=0.05,
+            concise_reason="Valid interface capture",
+        )
+    ])
+    evaluator = VisualSemanticEvaluator(backend=mock_backend)
+    orig_eval = evaluator.evaluate_candidate
+    def spy_eval(candidate, shot, **kwargs):
+        judged_modalities.append(shot.visual_modality)
+        return orig_eval(candidate, shot, **kwargs)
+    evaluator.evaluate_candidate = spy_eval
+
+    judge = VisualCandidateJudge(evaluator=evaluator)
+    router = VisualAcquisitionRouter(
+        web_capture=mock_capture,
+        semantic_judge=judge,
+        qa_mode=VisualSemanticQAMode.REQUIRED,
+    )
+
+    shot = ShotSpec(
+        shot_id="shot_sc_rubric",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.SCREEN_CAPTURE,
+        requested_modality=VisualModality.SCREEN_CAPTURE,
+        visual_intent=VisualIntent.SHOW_INTERFACE,
+        subject="Remote UI",
+        narration_segment="The app interface appears.",
+        duration_seconds=3.0,
+    )
+    req = VisualAcquisitionRequest(
+        project_id="p_sc",
+        shot_id="shot_sc_rubric",
+        modality=VisualModality.SCREEN_CAPTURE,
+        visual_intent=VisualIntent.SHOW_INTERFACE,
+        subject="Remote UI",
+        target_url="https://example.com/app",
+    )
+
+    res = router.acquire_visual(req, tmp_path, shot=shot, dossier=dossier, qa_mode=VisualSemanticQAMode.REQUIRED)
+    assert len(judged_modalities) == 1
+    assert judged_modalities[0] == VisualModality.SCREEN_CAPTURE
+    assert res.selected_candidate_id == "cand_remote_sc_rubric"
+    assert res.actual_modality == VisualModality.SCREEN_CAPTURE
+
+
+def test_remote_screen_capture_missing_interface_state_is_rejected(tmp_image: Path, tmp_path: Path):
+    """Remote SCREEN_CAPTURE with interface_state_match < 0.70 is rejected with UI_STATE_NOT_SHOWN."""
+    from unittest.mock import MagicMock
+    from app.domain.models import ResearchDossier, ResearchSource
+
+    sha = compute_file_sha(tmp_image)
+    mock_capture = MagicMock()
+    mock_cand = VisualAssetCandidate(
+        candidate_id="cand_remote_sc_low_ui",
+        source_type=VisualSourceType.RESEARCH_SOURCE,
+        file_path=str(tmp_image),
+        source_url="https://example.com/app",
+        content_sha256=sha,
+        width=1080,
+        height=1920,
+        acquisition_method="playwright_web_evidence",
+        is_synthetic=False,
+        actual_modality=VisualModality.DOCUMENT_EVIDENCE,
+    )
+    mock_capture.capture_evidence.return_value = (mock_cand, [])
+
+    dossier = ResearchDossier(
+        id="dossier_01",
+        summary="Test dossier",
+        topic_id="t_01",
+        sources=[
+            ResearchSource(
+                id="src_01",
+                source_id="src_01",
+                title="App UI",
+                url="https://example.com/app",
+                content_sha256=sha,
+            )
+        ],
+    )
+
+    # interface_state_match is 0.40 (< 0.70), should trigger UI_STATE_NOT_SHOWN and REJECT
+    mock_backend = MockVisualReasoningBackend(structured_responses=[
+        RawVisualEvaluationResponse(
+            candidate_id="cand_remote_sc_low_ui",
+            shot_id="shot_sc_low",
+            candidate_sha256=sha,
+            verdict=VisualSemanticVerdict.ACCEPT,
+            semantic_relevance=0.9,
+            visual_intent_match=0.9,
+            subject_match=0.9,
+            readability=0.9,
+            composition_quality=0.9,
+            information_value=0.9,
+            interface_state_match=0.40,
+            generic_slop_score=0.05,
+            concise_reason="UI state missing or obscured",
+        )
+    ])
+    evaluator = VisualSemanticEvaluator(backend=mock_backend)
+    judge = VisualCandidateJudge(evaluator=evaluator)
+    router = VisualAcquisitionRouter(
+        web_capture=mock_capture,
+        semantic_judge=judge,
+        qa_mode=VisualSemanticQAMode.REQUIRED,
+    )
+
+    shot = ShotSpec(
+        shot_id="shot_sc_low",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.SCREEN_CAPTURE,
+        requested_modality=VisualModality.SCREEN_CAPTURE,
+        visual_intent=VisualIntent.SHOW_INTERFACE,
+        subject="Remote UI Low",
+        narration_segment="The app interface appears.",
+        duration_seconds=3.0,
+    )
+    req = VisualAcquisitionRequest(
+        project_id="p_sc",
+        shot_id="shot_sc_low",
+        modality=VisualModality.SCREEN_CAPTURE,
+        visual_intent=VisualIntent.SHOW_INTERFACE,
+        subject="Remote UI Low",
+        target_url="https://example.com/app",
+    )
+
+    res = router.acquire_visual(req, tmp_path, shot=shot, dossier=dossier, qa_mode=VisualSemanticQAMode.REQUIRED)
+    assert res.selected_candidate_id is None
+    assert "SEMANTIC_QA_REJECTED_ALL" in res.failure_reasons
+
+
+def test_document_evidence_still_uses_document_rubric(tmp_image: Path, tmp_path: Path):
+    """DOCUMENT_EVIDENCE still evaluates candidate using DOCUMENT_EVIDENCE rubric requiring evidence_visibility >= 0.80."""
+    from unittest.mock import MagicMock
+    from app.domain.models import ResearchDossier, ResearchSource
+
+    sha = compute_file_sha(tmp_image)
+    mock_capture = MagicMock()
+    mock_cand = VisualAssetCandidate(
+        candidate_id="cand_doc_rubric",
+        source_type=VisualSourceType.RESEARCH_SOURCE,
+        file_path=str(tmp_image),
+        source_url="https://example.com/doc",
+        content_sha256=sha,
+        width=1080,
+        height=1920,
+        acquisition_method="playwright_web_evidence",
+        is_synthetic=False,
+        actual_modality=VisualModality.DOCUMENT_EVIDENCE,
+    )
+    mock_capture.capture_evidence.return_value = (mock_cand, [])
+
+    dossier = ResearchDossier(
+        id="dossier_01",
+        summary="Test dossier",
+        topic_id="t_01",
+        sources=[
+            ResearchSource(
+                id="src_doc",
+                source_id="src_doc",
+                title="Doc Source",
+                url="https://example.com/doc",
+                content_sha256=sha,
+            )
+        ],
+    )
+
+    # Response has evidence_visibility=0.40 (< 0.80), which hard rejects DOCUMENT_EVIDENCE
+    mock_backend = MockVisualReasoningBackend(structured_responses=[
+        RawVisualEvaluationResponse(
+            candidate_id="cand_doc_rubric",
+            shot_id="shot_doc_rubric",
+            candidate_sha256=sha,
+            verdict=VisualSemanticVerdict.ACCEPT,
+            semantic_relevance=0.9,
+            visual_intent_match=0.9,
+            subject_match=0.9,
+            readability=0.9,
+            composition_quality=0.9,
+            information_value=0.9,
+            evidence_visibility=0.40,
+            generic_slop_score=0.05,
+            concise_reason="Excerpt not visible",
+        )
+    ])
+    evaluator = VisualSemanticEvaluator(backend=mock_backend)
+    judge = VisualCandidateJudge(evaluator=evaluator)
+    router = VisualAcquisitionRouter(
+        web_capture=mock_capture,
+        semantic_judge=judge,
+        qa_mode=VisualSemanticQAMode.REQUIRED,
+    )
+
+    from app.media.acquisition.models import EvidenceBinding
+    shot = ShotSpec(
+        shot_id="shot_doc_rubric",
+        scene_index=0,
+        beat_id="beat_01",
+        visual_modality=VisualModality.DOCUMENT_EVIDENCE,
+        requested_modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE,
+        subject="Doc Subject",
+        narration_segment="Cited in the official specification.",
+        duration_seconds=3.0,
+        evidence_binding=EvidenceBinding(
+            source_ref="src_doc",
+            claim_id="c1",
+            source_url="https://example.com/doc",
+            source_excerpt="Specified in section 4",
+            source_title="Spec",
+        ),
+    )
+    req = VisualAcquisitionRequest(
+        project_id="p_doc",
+        shot_id="shot_doc_rubric",
+        modality=VisualModality.DOCUMENT_EVIDENCE,
+        visual_intent=VisualIntent.SHOW_EVIDENCE,
+        subject="Doc Subject",
+        target_url="https://example.com/doc",
+        evidence_binding=shot.evidence_binding,
+    )
+
+    res = router.acquire_visual(req, tmp_path, shot=shot, dossier=dossier, qa_mode=VisualSemanticQAMode.REQUIRED)
+    assert res.selected_candidate_id is None
+    assert "SEMANTIC_QA_REJECTED_ALL" in res.failure_reasons
+
+
+
 

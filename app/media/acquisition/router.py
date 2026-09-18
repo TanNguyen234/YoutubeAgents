@@ -382,6 +382,9 @@ class VisualAcquisitionRouter:
                                 output_path=target_path,
                                 trusted_urls=trusted_urls,
                             )
+                            if cand:
+                                cand.actual_modality = VisualModality.SCREEN_CAPTURE
+                                cand.acquisition_method = "playwright_remote_screen_capture"
                 if cand:
                     candidates.append(cand)
                 else:

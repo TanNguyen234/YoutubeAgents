@@ -34,7 +34,7 @@ class VideoFrameSampler:
     """Samples representative frames from video candidates or wraps static image candidates."""
 
     def __init__(self, temp_dir: Optional[Path] = None):
-        self.temp_dir = temp_dir or Path(os.environ.get("TEMP", "/tmp")) / "youtube_agents_qa_frames"
+        self.temp_dir = (temp_dir or Path(os.environ.get("TEMP", "/tmp")) / "youtube_agents_qa_frames").resolve()
         self.temp_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -157,10 +157,11 @@ class VideoFrameSampler:
         if sample.sampling_method == "direct_image":
             return  # Never delete original static images!
 
+        resolved_temp = self.temp_dir.resolve()
         for p_str in sample.sample_paths:
             try:
-                p = Path(p_str)
-                if p.exists() and self.temp_dir in p.parents:
+                p = Path(p_str).resolve()
+                if p.exists() and resolved_temp in p.parents:
                     p.unlink(missing_ok=True)
             except Exception as e:
                 logger.debug("Failed to clean temporary sample %s: %s", p_str, e)

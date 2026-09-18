@@ -586,13 +586,19 @@ def test_generated_image_wrong_provider_hash_does_not_enter_semantic_cache(tmp_p
 
 def test_real_generated_video_integration(tmp_path: Path):
     """AutoDirectorService._generate_shot_asset() with GENERATED_VIDEO invokes real frame sampling
-    on a real MP4 fixture, verifying synthetic provenance, 3 real decoded frames, and semantic QA invocation."""
+    on a real MP4 fixture, verifying synthetic provenance, 3 real decoded frames during invocation,
+    and proper temporary frame cleanup afterwards."""
     ffmpeg_bin = shutil.which("ffmpeg")
     assert ffmpeg_bin is not None
     video_file = tmp_path / "gflow_veo.mp4"
+    # Generate 3-second multi-colored video: 1s red, 1s green, 1s blue
     cmd = [
         ffmpeg_bin, "-y",
-        "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=3.0",
+        "-f", "lavfi", "-i", "color=c=red:s=320x240:d=1.0",
+        "-f", "lavfi", "-i", "color=c=green:s=320x240:d=1.0",
+        "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=1.0",
+        "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+        "-map", "[v]",
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         str(video_file),
@@ -603,7 +609,45 @@ def test_real_generated_video_integration(tmp_path: Path):
     mock_gflow = MagicMock()
     mock_gflow.generate_video.return_value = (str(video_file), actual_sha, {"model": "veo-2"})
 
-    backend = _make_accepting_backend()
+    class RecordingMockBackend:
+        def __init__(self, verdict=VisualSemanticVerdict.ACCEPT, issues=None):
+            self.verdict = verdict
+            self.issues = issues or []
+            self.observed_paths = []
+            self.recorded_frame_hashes = []
+            self.invocations = []
+
+        def evaluate_visual(self, prompt, image_paths, schema_cls):
+            assert len(image_paths) == 3, f"Expected 3 image paths, got {len(image_paths)}"
+            hashes = []
+            for p_str in image_paths:
+                p = Path(p_str)
+                assert p.exists(), f"Sampled frame must exist during evaluation: {p_str}"
+                assert p.stat().st_size > 0, f"Sampled frame must be non-empty: {p_str}"
+                hashes.append(hashlib.sha256(p.read_bytes()).hexdigest())
+
+            self.observed_paths = list(image_paths)
+            self.recorded_frame_hashes = hashes
+            self.invocations.append({"prompt": prompt, "image_paths": list(image_paths)})
+
+            return schema_cls(
+                candidate_id="final_shot_veo_01",
+                shot_id="shot_veo_01",
+                candidate_sha256=actual_sha,
+                verdict=self.verdict,
+                semantic_relevance=0.92,
+                visual_intent_match=0.90,
+                subject_match=0.91,
+                action_match=0.88,
+                readability=0.85,
+                composition_quality=0.89,
+                information_value=0.87,
+                generic_slop_score=0.08,
+                issues=self.issues,
+                concise_reason="Valid generated video showing robotic arm",
+            )
+
+    backend = RecordingMockBackend()
     profile = ChannelCreativeProfile(name="gflow_vid_prof", semantic_qa_mode="REQUIRED")
     director = AutoDirectorService(profile=profile, gflow_provider=mock_gflow, reasoning_backend=backend)
 
@@ -636,15 +680,20 @@ def test_real_generated_video_integration(tmp_path: Path):
     assert asset_res.semantic_audit["verdict"] == "ACCEPT"
     assert len(backend.invocations) == 1
 
-    # Verify frame sampler decoded 3 real frames
-    call_images = backend.invocations[0]["image_paths"]
-    assert len(call_images) == 3
-    for f in call_images:
-        assert Path(f).exists()
-        assert Path(f).stat().st_size > 0
+    # Verify 3 paths were observed by backend and frames were non-empty
+    assert len(backend.observed_paths) == 3
+    assert len(backend.recorded_frame_hashes) == 3
+    # Frame hashes demonstrate real decoded sampling across distinct temporal sections
+    assert len(set(backend.recorded_frame_hashes)) == 3
+    for h in backend.recorded_frame_hashes:
+        assert len(h) == 64
+
+    # Crucial lifecycle check: temporary sampled frame files must be cleaned after evaluation
+    for p_str in backend.observed_paths:
+        assert not Path(p_str).exists(), f"Temporary frame {p_str} should have been cleaned after evaluation"
 
     # If REQUIRED assessment rejects, VisualSemanticQAError is raised
-    reject_backend = _make_rejecting_backend(VisualSemanticIssue.ACTION_MISMATCH)
+    reject_backend = RecordingMockBackend(verdict=VisualSemanticVerdict.REJECT, issues=[VisualSemanticIssue.ACTION_MISMATCH])
     director_reject = AutoDirectorService(profile=profile, gflow_provider=mock_gflow, reasoning_backend=reject_backend)
     with pytest.raises(VisualSemanticQAError, match="Visual Semantic QA REJECTED final asset"):
         director_reject._generate_shot_asset(
