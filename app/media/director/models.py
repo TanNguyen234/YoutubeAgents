@@ -267,6 +267,9 @@ class ShotAssetResult(BaseModel):
     evidence_claim_ids: List[str] = Field(default_factory=list, description="Linked verified claim IDs")
     semantic_qa_performed: bool = Field(default=False, description="Whether visual semantic QA was executed on this asset")
     semantic_audit: Optional[Dict[str, Any]] = Field(default=None, description="Detailed semantic QA evaluation report/audit dict")
+    retry_attempted: bool = Field(default=False, description="Whether a corrective retry was executed for this shot")
+    retry_action: Optional[str] = Field(default=None, description="Visual retry action executed (e.g. REGENERATE, RERENDER, SWITCH_TO_DIAGRAM)")
+    retry_count: int = Field(default=0, ge=0, description="Number of semantic corrective retries executed")
 
     def __iter__(self):
         """Allow tuple unpacking (path, sha256) for backward compatibility."""
@@ -309,6 +312,9 @@ class TimelineShot(BaseModel):
     asset_is_synthetic: bool = Field(default=False, description="Whether asset is AI-generated synthetic media")
     asset_evidence_claim_ids: List[str] = Field(default_factory=list, description="Linked verified claim IDs")
     asset_semantic_qa: Optional[Dict[str, Any]] = Field(default=None, description="Visual semantic QA audit summary for this shot asset")
+    asset_retry_attempted: bool = Field(default=False, description="Whether a corrective retry was executed for this shot")
+    asset_retry_action: Optional[str] = Field(default=None, description="Visual retry action executed")
+    asset_retry_count: int = Field(default=0, ge=0, description="Number of semantic corrective retries executed")
 
 
 
