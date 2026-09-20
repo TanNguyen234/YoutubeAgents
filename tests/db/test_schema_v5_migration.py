@@ -22,7 +22,7 @@ def test_schema_v5_creates_market_signal_snapshots_table(tmp_path: Path):
     init_database(db_path)
 
     conn = sqlite3.connect(db_path)
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 5
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == SCHEMA_VERSION
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()}
     assert "market_signal_snapshots" in tables
 
@@ -47,7 +47,7 @@ def test_schema_v5_creates_market_signal_snapshots_table(tmp_path: Path):
 
 
 def test_v5_migration_is_idempotent(tmp_path: Path):
-    """Re-running migrate_database on a v5 DB must be a safe no-op and preserve user_version=5."""
+    """Re-running migrate_database on a v5 DB must be a safe no-op and preserve user_version=SCHEMA_VERSION."""
     db_path = tmp_path / "test_v5_idempotent.db"
     init_database(db_path)
 
@@ -55,5 +55,5 @@ def test_v5_migration_is_idempotent(tmp_path: Path):
     migrate_database(db_path)
 
     conn = sqlite3.connect(db_path)
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 5
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == SCHEMA_VERSION
     conn.close()

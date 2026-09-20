@@ -155,13 +155,20 @@ Do NOT invent video IDs or search volume numbers.
         self,
         snapshots: List[MarketSignalSnapshot],
     ) -> Dict[str, Dict[str, float]]:
-        """Calculate normalized 0-10 demand, freshness, and competition opportunity scores across the batch."""
+        """Calculate normalized 0-10 demand, freshness, and competition opportunity scores.
+
+        CRITICAL INVARIANT (Blocker 2):
+        Batch-relative demand normalization must use ONLY viable snapshots
+        (sample_size >= min_valid_sample and confidence == 'HIGH').
+        INSUFFICIENT_SIGNAL candidates are strictly excluded from min/max demand bounds
+        so that extreme outliers cannot distort viable candidate scores, ranks, or winners.
+        """
         scores: Dict[str, Dict[str, float]] = {}
 
         if not snapshots:
             return scores
 
-        # Calculate raw demand metrics
+        # Calculate raw demand metrics for all snapshots
         raw_demands: Dict[str, float] = {}
         for s in snapshots:
             # 70% median view velocity + 30% 75th percentile view velocity
@@ -169,18 +176,32 @@ Do NOT invent video IDs or search volume numbers.
             vpd_p75 = float(s.p75_views_per_day)
             raw_demands[s.id] = (0.70 * vpd_med) + (0.30 * vpd_p75)
 
-        demand_vals = list(raw_demands.values())
-        min_demand = min(demand_vals) if demand_vals else 0.0
-        max_demand = max(demand_vals) if demand_vals else 0.0
-        demand_range = max_demand - min_demand
+        # Viable scoring cohort: strictly meeting evidence thresholds
+        viable_snapshots = [
+            s for s in snapshots
+            if s.sample_size >= self.min_valid_sample and s.confidence == "HIGH"
+        ]
+
+        # Compute batch normalization bounds ONLY from the viable cohort
+        if viable_snapshots:
+            viable_demands = [raw_demands[s.id] for s in viable_snapshots]
+            min_demand = min(viable_demands)
+            max_demand = max(viable_demands)
+            demand_range = max_demand - min_demand
+        else:
+            min_demand = 0.0
+            max_demand = 0.0
+            demand_range = 0.0
 
         for s in snapshots:
-            # 1. Demand Proxy (0-10)
             raw_d = raw_demands[s.id]
-            if demand_range > 0 and len(snapshots) > 1:
+            is_viable = s.sample_size >= self.min_valid_sample and s.confidence == "HIGH"
+
+            # 1. Demand Proxy (0-10)
+            if is_viable and demand_range > 0 and len(viable_snapshots) > 1:
                 demand_score = 3.0 + (7.0 * (raw_d - min_demand) / demand_range)
             else:
-                # Logarithmic scale fallback for single candidate or equal demand
+                # Logarithmic scale fallback for single viable candidate, identical demands, or insufficient candidates
                 demand_score = math.log10(max(1.0, raw_d)) * 2.0 if raw_d > 0 else 1.0
             demand_score = round(min(10.0, max(0.0, demand_score)), 2)
 
@@ -391,8 +412,11 @@ Do NOT invent video IDs or search volume numbers.
                 )
             )
 
-        # Step 8: Deterministic ranking by opportunity_score descending
-        candidate_opportunities.sort(key=lambda c: c.opportunity_score, reverse=True)
+        # Step 8: Deterministic ranking: viable (HIGH confidence) candidates first, then by opportunity_score descending
+        candidate_opportunities.sort(
+            key=lambda c: (1 if c.confidence == "HIGH" else 0, c.opportunity_score),
+            reverse=True,
+        )
 
         # Step 9: Winner selection with confidence gate enforcement
         selected_winner: Optional[TopicOpportunity] = None
@@ -423,4 +447,9 @@ Do NOT invent video IDs or search volume numbers.
             selected_topic=selected_winner,
             selection_reason=selection_reason,
         )
+
+        # Step 10: Persist durable opportunity portfolio record to SQLite
+        if self.repository:
+            self.repository.save_opportunity_portfolio(portfolio)
+
         return portfolio

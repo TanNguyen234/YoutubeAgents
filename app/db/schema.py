@@ -3,9 +3,9 @@
 from pathlib import Path
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
-SCHEMA_V5_SQL = """
+SCHEMA_V6_SQL = """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS channels (
@@ -310,12 +310,28 @@ CREATE TABLE IF NOT EXISTS market_signal_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_market_signals_batch ON market_signal_snapshots(batch_id);
 CREATE INDEX IF NOT EXISTS idx_market_signals_query ON market_signal_snapshots(channel_id, query);
+
+CREATE TABLE IF NOT EXISTS opportunity_portfolios (
+    batch_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    candidates_json TEXT NOT NULL,
+    selected_topic_json TEXT,
+    selection_reason TEXT,
+    market_signal_ids_json TEXT NOT NULL,
+    formula_version TEXT NOT NULL DEFAULT 'v1.0',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_opportunity_portfolios_channel ON opportunity_portfolios(channel_id);
 """
 
 # Backwards compatibility aliases
-SCHEMA_V4_SQL = SCHEMA_V5_SQL
-SCHEMA_V3_SQL = SCHEMA_V5_SQL
-SCHEMA_V2_SQL = SCHEMA_V5_SQL
+SCHEMA_V5_SQL = SCHEMA_V6_SQL
+SCHEMA_V4_SQL = SCHEMA_V6_SQL
+SCHEMA_V3_SQL = SCHEMA_V6_SQL
+SCHEMA_V2_SQL = SCHEMA_V6_SQL
 
 
 def migrate_database(db_path: Path) -> None:
@@ -344,8 +360,8 @@ def migrate_database(db_path: Path) -> None:
         user_table_count = cursor.fetchone()[0]
 
         if current_version == 0 and user_table_count == 0:
-            # Truly empty/new database: apply full v4 schema directly
-            conn.executescript(SCHEMA_V4_SQL)
+            # Truly empty/new database: apply full v6 schema directly
+            conn.executescript(SCHEMA_V6_SQL)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()
             return
@@ -467,13 +483,20 @@ def migrate_database(db_path: Path) -> None:
 
         # 4. Migrate v4 to v5: market_signal_snapshots
         if current_version < 5:
-            conn.executescript(SCHEMA_V5_SQL)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.executescript(SCHEMA_V6_SQL)
+            conn.execute("PRAGMA user_version = 5;")
             conn.commit()
             current_version = 5
+
+        # 5. Migrate v5 to v6: opportunity_portfolios
+        if current_version < 6:
+            conn.executescript(SCHEMA_V6_SQL)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.commit()
+            current_version = 6
         else:
-            # Current v5 idempotent check
-            conn.executescript(SCHEMA_V5_SQL)
+            # Current v6 idempotent check
+            conn.executescript(SCHEMA_V6_SQL)
             cursor.execute("PRAGMA table_info(topic_candidates);")
             tc_cols = {row[1] for row in cursor.fetchall()}
             if tc_cols and "score_breakdown_json" not in tc_cols:

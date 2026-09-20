@@ -213,17 +213,25 @@ class YouTubeMarketSignalService:
         close_client = self._custom_client is None
 
         try:
-            resp = client.get(
-                f"{YOUTUBE_API_BASE}/search",
-                params=search_params,
-                headers=auth_headers,
-            )
+            try:
+                resp = client.get(
+                    f"{YOUTUBE_API_BASE}/search",
+                    params=search_params,
+                    headers=auth_headers,
+                )
+            except (httpx.RequestError, httpx.TransportError) as exc:
+                raise YouTubeMarketSignalError(
+                    f"YouTube search.list transport failure: {exc}"
+                ) from exc
+
+            # HTTP response received, including 4xx/5xx -> record request quota usage
+            if self.quota_manager:
+                self.quota_manager.record_spend("search.list")
+
             if resp.status_code != 200:
                 raise YouTubeMarketSignalError(
                     f"YouTube search.list failed ({resp.status_code}): {resp.text}"
                 )
-            if self.quota_manager:
-                self.quota_manager.record_spend("search.list")
 
             search_data = resp.json()
             items = search_data.get("items", [])
@@ -249,17 +257,25 @@ class YouTubeMarketSignalService:
                 "id": ",".join(video_ids),
             }
 
-            v_resp = client.get(
-                f"{YOUTUBE_API_BASE}/videos",
-                params=videos_params,
-                headers=auth_headers,
-            )
+            try:
+                v_resp = client.get(
+                    f"{YOUTUBE_API_BASE}/videos",
+                    params=videos_params,
+                    headers=auth_headers,
+                )
+            except (httpx.RequestError, httpx.TransportError) as exc:
+                raise YouTubeMarketSignalError(
+                    f"YouTube videos.list transport failure: {exc}"
+                ) from exc
+
+            # HTTP response received, including 4xx/5xx -> record request quota usage
+            if self.quota_manager:
+                self.quota_manager.record_spend("videos.list")
+
             if v_resp.status_code != 200:
                 raise YouTubeMarketSignalError(
                     f"YouTube videos.list failed ({v_resp.status_code}): {v_resp.text}"
                 )
-            if self.quota_manager:
-                self.quota_manager.record_spend("videos.list")
 
             v_data = v_resp.json()
             v_items = v_data.get("items", [])

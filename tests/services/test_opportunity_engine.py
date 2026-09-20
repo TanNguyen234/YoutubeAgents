@@ -10,6 +10,7 @@ from pathlib import Path
 import tempfile
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
+import httpx
 import pytest
 
 from app.core.backend import ReasoningBackend
@@ -622,16 +623,16 @@ def test_h_duplicate_filter_before_expensive_validation(channel, test_repo):
 # Test I — Quota Exhaustion
 # ------------------------------------------------------------------------------
 def test_i_quota_exhaustion(test_repo, channel):
-    """Assert search is blocked and raises InsufficientQuotaError when quota budget is exhausted."""
-    quota_mgr = QuotaBudgetManager(test_repo, daily_limit=50)
-    # search.list costs 100 units, but daily_limit is only 50
+    """Assert search is blocked and raises InsufficientQuotaError when search quota budget is exhausted."""
+    quota_mgr = QuotaBudgetManager(test_repo, search_daily_limit=0)
+    # search.list requires 1 search unit, but search_daily_limit is 0
     service = YouTubeMarketSignalService(
         repository=test_repo,
         quota_manager=quota_mgr,
         api_key="fake-test-key",
     )
 
-    with pytest.raises(InsufficientQuotaError, match="Insufficient daily YouTube API quota"):
+    with pytest.raises(InsufficientQuotaError, match="search"):
         service.fetch_market_observations(query="Test Query")
 
 
@@ -827,3 +828,416 @@ def test_l_no_real_signal_no_fake_success(test_repo, channel):
 
     with pytest.raises(YouTubeMarketSignalError, match="YouTube search.list failed"):
         service.fetch_market_observations(query="Any Query")
+
+
+# ------------------------------------------------------------------------------
+# Blocker 2 Tests — Viable Cohort Normalization Invariant
+# ------------------------------------------------------------------------------
+def test_insufficient_signal_high_outlier_does_not_distort_viable_normalization():
+    """Prove that an INSUFFICIENT_SIGNAL candidate with an extreme high demand outlier
+    cannot alter the scores, ranks, or normalization bounds of HIGH-confidence viable candidates."""
+    engine = OpportunityEngine()
+    now = datetime.now(timezone.utc)
+
+    # Candidate A: HIGH confidence, viable sample = 10, vpd = 100.0
+    snap_a = MarketSignalSnapshot(
+        id="mss-a",
+        batch_id="b1",
+        channel_id="chan-01",
+        query="Topic A",
+        collected_at=now,
+        sample_size=10,
+        confidence="HIGH",
+        median_views_per_day=100.0,
+        p75_views_per_day=100.0,
+        recent_share_30d=0.5,
+        recent_video_count_7d=2,
+        recent_video_count_30d=5,
+        unique_creator_count=5,
+        top_creator_share=0.2,
+    )
+
+    # Candidate B: HIGH confidence, viable sample = 10, vpd = 90.0
+    snap_b = MarketSignalSnapshot(
+        id="mss-b",
+        batch_id="b1",
+        channel_id="chan-01",
+        query="Topic B",
+        collected_at=now,
+        sample_size=10,
+        confidence="HIGH",
+        median_views_per_day=90.0,
+        p75_views_per_day=90.0,
+        recent_share_30d=0.5,
+        recent_video_count_7d=2,
+        recent_video_count_30d=5,
+        unique_creator_count=5,
+        top_creator_share=0.2,
+    )
+
+    scores_before = engine.compute_deterministic_market_scores([snap_a, snap_b])
+
+    # Candidate C: INSUFFICIENT_SIGNAL (sample = 1), extreme viral outlier vpd = 100,000.0
+    snap_c = MarketSignalSnapshot(
+        id="mss-c-outlier-high",
+        batch_id="b1",
+        channel_id="chan-01",
+        query="Topic C Outlier",
+        collected_at=now,
+        sample_size=1,
+        confidence="INSUFFICIENT_SIGNAL",
+        median_views_per_day=100000.0,
+        p75_views_per_day=100000.0,
+        recent_share_30d=1.0,
+        recent_video_count_7d=1,
+        recent_video_count_30d=1,
+        unique_creator_count=1,
+        top_creator_share=1.0,
+    )
+
+    scores_after = engine.compute_deterministic_market_scores([snap_a, snap_b, snap_c])
+
+    # Invariant: A and B scores must remain 100% identical
+    assert scores_before["mss-a"]["demand"] == scores_after["mss-a"]["demand"]
+    assert scores_before["mss-b"]["demand"] == scores_after["mss-b"]["demand"]
+    assert scores_before["mss-a"]["freshness"] == scores_after["mss-a"]["freshness"]
+    assert scores_before["mss-b"]["freshness"] == scores_after["mss-b"]["freshness"]
+    assert scores_before["mss-a"]["competition"] == scores_after["mss-a"]["competition"]
+    assert scores_before["mss-b"]["competition"] == scores_after["mss-b"]["competition"]
+    assert scores_after["mss-a"]["demand"] > scores_after["mss-b"]["demand"]
+
+
+def test_insufficient_signal_low_outlier_does_not_distort_viable_normalization():
+    """Prove that an INSUFFICIENT_SIGNAL candidate with an extreme low outlier
+    cannot alter the scores, ranks, or normalization bounds of HIGH-confidence viable candidates."""
+    engine = OpportunityEngine()
+    now = datetime.now(timezone.utc)
+
+    snap_a = MarketSignalSnapshot(
+        id="mss-a",
+        batch_id="b1",
+        channel_id="chan-01",
+        query="Topic A",
+        collected_at=now,
+        sample_size=10,
+        confidence="HIGH",
+        median_views_per_day=100.0,
+        p75_views_per_day=100.0,
+    )
+    snap_b = MarketSignalSnapshot(
+        id="mss-b",
+        batch_id="b1",
+        channel_id="chan-01",
+        query="Topic B",
+        collected_at=now,
+        sample_size=10,
+        confidence="HIGH",
+        median_views_per_day=90.0,
+        p75_views_per_day=90.0,
+    )
+    scores_before = engine.compute_deterministic_market_scores([snap_a, snap_b])
+
+    # Candidate D: INSUFFICIENT_SIGNAL, extremely low velocity (vpd = 0.001)
+    snap_d = MarketSignalSnapshot(
+        id="mss-d-outlier-low",
+        batch_id="b1",
+        channel_id="chan-01",
+        query="Topic D Low",
+        collected_at=now,
+        sample_size=1,
+        confidence="INSUFFICIENT_SIGNAL",
+        median_views_per_day=0.001,
+        p75_views_per_day=0.001,
+    )
+    scores_after = engine.compute_deterministic_market_scores([snap_a, snap_b, snap_d])
+
+    assert scores_before["mss-a"]["demand"] == scores_after["mss-a"]["demand"]
+    assert scores_before["mss-b"]["demand"] == scores_after["mss-b"]["demand"]
+
+
+def test_zero_viable_candidates_persists_portfolio_and_remains_blocked(test_repo, channel):
+    """When no candidates meet the evidence threshold, selected_topic is None,
+    the run is flagged INSUFFICIENT_SIGNAL, and the audit decision is persisted to SQLite."""
+    test_repo.save_channel(channel)
+    backend = MockReasoningBackend(
+        hypotheses=[
+            OpportunityHypothesis(
+                keyword="Niche Obscure Pattern",
+                angle="Angle 1",
+                rationale="Rationale 1",
+                supporting_video_ids=["v1"],
+            )
+        ]
+    )
+    mock_market = MagicMock(spec=YouTubeMarketSignalService)
+    mock_market.fetch_market_observations.return_value = (
+        [MarketVideoObservation(video_id="v1", title="T1", channel_id="c1", channel_title="C1", published_at=datetime.now(timezone.utc), view_count=100)],
+        10,
+    )
+    mock_market.get_market_signal_snapshot.return_value = MarketSignalSnapshot(
+        id="mss-obscure",
+        batch_id="b-obscure",
+        channel_id=channel.id,
+        query="Niche Obscure Pattern",
+        collected_at=datetime.now(timezone.utc),
+        sample_size=2,  # < 5
+        confidence="INSUFFICIENT_SIGNAL",
+    )
+
+    engine = OpportunityEngine(
+        repository=test_repo,
+        market_signal_service=mock_market,
+        backend=backend,
+    )
+    portfolio = engine.discover_opportunities(channel=channel, seed_queries=["Niche Obscure"])
+
+    assert portfolio.selected_topic is None
+    assert "No candidate met the minimum market evidence threshold" in portfolio.selection_reason
+    assert portfolio.candidates[0].confidence == "INSUFFICIENT_SIGNAL"
+
+    # Must be durable in SQLite
+    persisted = test_repo.get_opportunity_portfolio(portfolio.batch_id)
+    assert persisted is not None
+    assert persisted.selected_topic is None
+    assert "No candidate met" in persisted.selection_reason
+
+
+# ------------------------------------------------------------------------------
+# Blocker 3 Tests — Durability, Reconstruction, and Traceability
+# ------------------------------------------------------------------------------
+def test_opportunity_portfolio_persistence_round_trip(tmp_path: Path):
+    """Assert OpportunityPortfolio round-trips cleanly across simulated process restart (new SQLiteRepository)."""
+    db_file = tmp_path / "portfolio_durable.db"
+    init_database(db_file)
+    repo1 = SQLiteRepository(db_file)
+
+    chan = Channel(id="c-dur-1", title="Durability Test", handle="@dur", niche="DB", target_audience="Engineers")
+    repo1.save_channel(chan)
+
+    winner = TopicOpportunity(
+        keyword="Durable Winner",
+        angle="Process Restart Proof",
+        opportunity_score=8.75,
+        demand=9.0,
+        freshness=8.5,
+        competition=8.0,
+        channel_fit=9.0,
+        originality=9.0,
+        historical_fit=None,
+        market_signal_id="mss-dur-01",
+        confidence="HIGH",
+        score_reasons={"demand": "High velocity"},
+        rationale="Strong market opportunity",
+        supporting_video_ids=["vid_alpha", "vid_beta"],
+    )
+    runner_up = TopicOpportunity(
+        keyword="Runner Up",
+        angle="Alternative Angle",
+        opportunity_score=7.10,
+        demand=7.0,
+        freshness=7.0,
+        competition=7.0,
+        channel_fit=8.0,
+        originality=7.0,
+        historical_fit=None,
+        market_signal_id="mss-dur-02",
+        confidence="HIGH",
+    )
+
+    portfolio = OpportunityPortfolio(
+        batch_id="batch-dur-001",
+        channel_id="c-dur-1",
+        generated_at=datetime(2026, 9, 20, 12, 0, 0, tzinfo=timezone.utc),
+        candidates=[winner, runner_up],
+        selected_topic=winner,
+        selection_reason="Selected 'Durable Winner' due to highest composite score.",
+    )
+
+    repo1.save_opportunity_portfolio(portfolio)
+
+    # Process restart simulation: create fresh SQLiteRepository instance on same DB file
+    repo2 = SQLiteRepository(db_file)
+    loaded = repo2.get_opportunity_portfolio("batch-dur-001")
+
+    assert loaded is not None
+    assert loaded.batch_id == "batch-dur-001"
+    assert loaded.channel_id == "c-dur-1"
+    assert loaded.generated_at == datetime(2026, 9, 20, 12, 0, 0, tzinfo=timezone.utc)
+    assert len(loaded.candidates) == 2
+
+    # Check winner preservation
+    assert loaded.selected_topic is not None
+    assert loaded.selected_topic.keyword == "Durable Winner"
+    assert loaded.selected_topic.opportunity_score == 8.75
+    assert loaded.selected_topic.market_signal_id == "mss-dur-01"
+    assert loaded.selected_topic.supporting_video_ids == ["vid_alpha", "vid_beta"]
+    assert loaded.selected_topic.score_reasons.get("demand") == "High velocity"
+    assert loaded.selection_reason == "Selected 'Durable Winner' due to highest composite score."
+
+    # Check referenced market_signal_ids
+    signal_ids = repo2.get_portfolio_market_signal_ids("batch-dur-001")
+    assert signal_ids == ["mss-dur-01", "mss-dur-02"]
+
+
+def test_end_to_end_decision_audit_real_sqlite_and_snapshots(tmp_path: Path):
+    """Assert real OpportunityEngine + real YouTubeMarketSignalService logic (with mock HTTP transport)
+    persists real MarketSignalSnapshot records and real OpportunityPortfolio, traceable after process restart."""
+    db_file = tmp_path / "e2e_audit.db"
+    init_database(db_file)
+    repo = SQLiteRepository(db_file)
+
+    chan = Channel(
+        id="c-e2e",
+        title="AI Engineering Daily",
+        handle="@ai_eng",
+        niche="Local AI Agents",
+        target_audience="Software Engineers",
+    )
+    repo.save_channel(chan)
+
+    backend = MockReasoningBackend(
+        hypotheses=[
+            OpportunityHypothesis(
+                keyword="Local LLM Tool Calling",
+                angle="Native Function Calling",
+                rationale="High demand",
+                supporting_video_ids=["vid_001"],
+            )
+        ],
+        channel_fit=9.0,
+    )
+
+    def mock_http(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if "/search" in url_str:
+            items = [
+                {
+                    "id": {"videoId": f"vid_00{i}"},
+                    "snippet": {
+                        "title": f"Video {i}",
+                        "channelId": f"chan_{i}",
+                        "channelTitle": f"Creator {i}",
+                        "publishedAt": "2026-09-15T00:00:00Z",
+                    },
+                }
+                for i in range(1, 8)
+            ]
+            return httpx.Response(status_code=200, json={"items": items, "pageInfo": {"totalResults": 5000}})
+        elif "/videos" in url_str:
+            v_items = [
+                {
+                    "id": f"vid_00{i}",
+                    "snippet": {
+                        "title": f"Video {i}",
+                        "channelId": f"chan_{i}",
+                        "channelTitle": f"Creator {i}",
+                        "publishedAt": "2026-09-15T00:00:00Z",
+                    },
+                    "statistics": {"viewCount": str(5000 * i), "likeCount": "100"},
+                    "contentDetails": {"duration": "PT10M"},
+                }
+                for i in range(1, 8)
+            ]
+            return httpx.Response(status_code=200, json={"items": v_items})
+        return httpx.Response(status_code=404)
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_http))
+    market_svc = YouTubeMarketSignalService(repository=repo, api_key="test-key", http_client=client)
+
+    engine = OpportunityEngine(repository=repo, market_signal_service=market_svc, backend=backend)
+    portfolio = engine.discover_opportunities(channel=chan, seed_queries=["Local LLM"])
+
+    assert portfolio.selected_topic is not None
+    winner_sig_id = portfolio.selected_topic.market_signal_id
+    assert winner_sig_id is not None
+
+    # Process restart simulation: open new SQLiteRepository on the DB file
+    repo_after_restart = SQLiteRepository(db_file)
+    reloaded_portfolio = repo_after_restart.get_opportunity_portfolio(portfolio.batch_id)
+
+    assert reloaded_portfolio is not None
+    assert reloaded_portfolio.selected_topic.keyword == "Local LLM Tool Calling"
+    assert reloaded_portfolio.selected_topic.market_signal_id == winner_sig_id
+
+    # Audit chain: Winner's market_signal_id MUST resolve to a real persisted MarketSignalSnapshot
+    referenced_snapshot = repo_after_restart.get_market_signal_snapshot(winner_sig_id)
+    assert referenced_snapshot is not None
+    assert referenced_snapshot.query == "Local LLM Tool Calling"
+    assert referenced_snapshot.sample_size == 7
+    assert referenced_snapshot.confidence == "HIGH"
+
+
+def test_cache_reuse_references_old_snapshot_without_mutation(tmp_path: Path):
+    """When a market signal snapshot is cached from an earlier batch, a subsequent discovery run
+    within TTL reuses the snapshot ID without mutating the original snapshot's batch_id."""
+    db_file = tmp_path / "cache_audit.db"
+    init_database(db_file)
+    repo = SQLiteRepository(db_file)
+
+    chan = Channel(id="c-cache", title="Cache Test", handle="@cache", niche="Fast Python", target_audience="Devs")
+    repo.save_channel(chan)
+
+    # Pre-populate an earlier snapshot with its own batch_id
+    early_snapshot = MarketSignalSnapshot(
+        id="mss-cached-historical",
+        batch_id="batch-early-999",
+        channel_id=chan.id,
+        query="Fast Python AsyncIO",
+        source="YOUTUBE_DATA_API_V3",
+        collected_at=datetime.now(timezone.utc),  # within 24h
+        sample_video_ids=["v1", "v2", "v3", "v4", "v5", "v6"],
+        sample_size=6,
+        confidence="HIGH",
+        median_views_per_day=500.0,
+        p75_views_per_day=800.0,
+        recent_share_30d=0.8,
+        unique_creator_count=5,
+        top_creator_share=0.2,
+    )
+    repo.save_market_signal_snapshot(early_snapshot)
+
+    backend = MockReasoningBackend(
+        hypotheses=[
+            OpportunityHypothesis(
+                keyword="Fast Python AsyncIO",
+                angle="Event Loop Tuning",
+                rationale="Great topic",
+                supporting_video_ids=["v1"],
+            )
+        ]
+    )
+
+    searched_queries: List[str] = []
+    def mock_http(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if "/search" in url_str:
+            searched_queries.append(str(request.url.params.get("q", "")))
+            # Seed search only
+            items = [{"id": {"videoId": "v1"}, "snippet": {"title": "Fast Python", "channelId": "c1", "channelTitle": "C1", "publishedAt": "2026-09-18T00:00:00Z"}}]
+            return httpx.Response(status_code=200, json={"items": items, "pageInfo": {"totalResults": 1000}})
+        elif "/videos" in url_str:
+            items = [{"id": "v1", "snippet": {"title": "Fast Python", "channelId": "c1", "channelTitle": "C1", "publishedAt": "2026-09-18T00:00:00Z"}, "statistics": {"viewCount": "5000"}, "contentDetails": {"duration": "PT5M"}}]
+            return httpx.Response(status_code=200, json={"items": items})
+        return httpx.Response(status_code=404)
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_http))
+    market_svc = YouTubeMarketSignalService(repository=repo, api_key="test-key", http_client=client)
+
+    engine = OpportunityEngine(repository=repo, market_signal_service=market_svc, backend=backend)
+    new_portfolio = engine.discover_opportunities(channel=chan, seed_queries=["Fast Python"])
+
+    # 1 seed search call was made, but candidate search for "Fast Python AsyncIO" was skipped due to cache hit
+    assert len(searched_queries) == 1
+    assert "Fast Python AsyncIO" not in searched_queries
+    assert new_portfolio.batch_id != "batch-early-999"
+    assert new_portfolio.selected_topic is not None
+    assert new_portfolio.selected_topic.market_signal_id == "mss-cached-historical"
+
+    # Crucial assertion: the cached snapshot's original batch_id in SQLite was NOT mutated
+    reloaded_snapshot = repo.get_market_signal_snapshot("mss-cached-historical")
+    assert reloaded_snapshot.batch_id == "batch-early-999"
+
+    # Process restart simulation: verify reloaded portfolio links to the unchanged snapshot
+    repo_restart = SQLiteRepository(db_file)
+    persisted_portfolio = repo_restart.get_opportunity_portfolio(new_portfolio.batch_id)
+    assert persisted_portfolio.selected_topic.market_signal_id == "mss-cached-historical"

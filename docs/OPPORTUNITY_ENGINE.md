@@ -36,15 +36,17 @@
          ├─► Resolve Seed Queries (Max 2 seed queries)
          │
          ├─► YouTube search.list (Max 10 results per query)
-         │     └─► 100 quota units per call
+         │     └─► 1 call/unit in dedicated Search Queries bucket (limit: 100/day)
          │
          ├─► YouTube videos.list (Statistics, ContentDetails, Snippet)
-         │     └─► 1 quota unit per call
+         │     └─► 1 unit in General Data API bucket (limit: 10,000/day)
          │
          ├─► Normalize MarketVideoObservation:
          │     [video_id, title, channel_id, published_at, view_count, duration]
          │
-         └─► Calculate Derived Metrics & Persist MarketSignalSnapshot (Schema v5)
+         ├─► Calculate Derived Metrics & Persist MarketSignalSnapshot (Schema v6)
+         │
+         └─► Build & Persist OpportunityPortfolio (opportunity_portfolios table, Schema v6)
   ```
 
 ---
@@ -58,9 +60,14 @@ $$\text{views\_per\_day}_i = \frac{\text{view\_count}_i}{\text{age\_days}_i}$$
 ### 1. Demand Proxy (0.0 – 10.0 scale)
 Combines median and 75th-percentile velocity to dampen extreme viral outliers while rewarding strong baseline velocity:
 $$\text{raw\_demand} = 0.70 \times \text{median}(\text{views\_per\_day}) + 0.30 \times P_{75}(\text{views\_per\_day})$$
-Normalized batch-relatively across candidates in the portfolio:
-$$\text{Demand Score} = 3.0 + 7.0 \times \frac{\text{raw\_demand} - \min(\text{raw\_demand})}{\max(\text{raw\_demand}) - \min(\text{raw\_demand})}$$
-*(For single candidates or identical velocities, logarithmic damping is applied: $\min(10.0, \max(1.0, \log_{10}(\text{raw\_demand}) \times 2.0))$.)*
+
+> [!IMPORTANT]
+> **Viable Cohort Normalization (Anti-Distortion Invariant)**:
+> Batch-relative normalization bounds ($\min(\text{raw\_demand})$ and $\max(\text{raw\_demand})$) are computed strictly from **viable candidates** ($N \ge 5$ and `confidence == "HIGH"`).
+> Candidates with `INSUFFICIENT_SIGNAL` are completely excluded from these min/max bounds so that extreme outliers cannot distort viable candidate scores, ranks, or winners.
+> Viable candidates are scaled across the viable cohort:
+$$\text{Demand Score} = 3.0 + 7.0 \times \frac{\text{raw\_demand} - \min_{\text{viable}}(\text{raw\_demand})}{\max_{\text{viable}}(\text{raw\_demand}) - \min_{\text{viable}}(\text{raw\_demand})}$$
+*(For single viable candidates, equal velocities, or insufficient candidates, logarithmic scaling applies: $\min(10.0, \max(1.0, \log_{10}(\text{raw\_demand}) \times 2.0))$.)*
 
 ### 2. Freshness / Trend Momentum Proxy (0.0 – 10.0 scale)
 Reflects current publishing activity and velocity momentum:
@@ -102,36 +109,60 @@ $$\text{Composite Score} = \frac{\sum_{d \in \text{active}} w_d \times S_d}{\sum
 | **competition** | Deterministic code (`YouTubeMarketSignalService`) | ❌ **FORBIDDEN** |
 | **views_per_day / view_count** | Deterministic API measurements | ❌ **FORBIDDEN** |
 | **historical_fit** | Deterministic analytics code (`StrategyFeedbackLoop`) | ❌ **FORBIDDEN** |
-| **supporting_video_ids** | Observed YouTube video IDs (server-validated) | ❌ Cannot invent new IDs |
+| **supporting_video_ids** | Observed YouTube video IDs (server-validated) | ❌ Cannot invent IDs; unobserved IDs are stripped |
 | **channel_fit** | Reasoning Model (`TopicEvaluator`) | ✅ Allowed (0–10 scale) |
 | **angle / viewer_question** | Reasoning Model (`OpportunityHypothesis`) | ✅ Allowed |
 | **editorial rationale** | Reasoning Model (`EditorialEvaluationOutput`) | ✅ Allowed |
 
+> [!NOTE]
+> **Provenance & Duration Handling**:
+> - `supporting_video_ids`: Server-side provenance validation filters/strips any hallucinated/unobserved video IDs, keeping verified IDs.
+> - `duration_seconds`: Video duration is parsed and recorded for observability; no arbitrary short-filtering is applied in this phase.
+
 ---
 
-## 5. Quota Governance & Economics
+## 5. Quota Governance & Granular Buckets
 
-- `search.list` cost: **100 units**
-- `videos.list` cost: **1 unit**
-- **Default Budget per Discovery Run**:
-  - 1–2 seed queries: $2 \times 100 = 200$ units.
-  - 1–2 video batches: $2 \times 1 = 2$ units.
-  - Candidate specific measurements (max 5 candidates): $5 \times 101 = 505$ units.
-  - Total standard discovery cycle: $\approx 707$ units (well within daily free quota of 10,000 units).
-- **Pre-flight Quota Checks**: `QuotaBudgetManager.ensure_budget()` executes before any external API request. If remaining quota is insufficient, execution fails explicitly with `InsufficientQuotaError` / `BLOCKED`. Dummy metrics are never returned.
+YouTube Data API v3 enforces separate dedicated quota buckets:
+
+1. **Search Queries Bucket**:
+   - Dedicated daily limit: **100 calls/day**.
+   - `search.list` consumes **1 call/unit** in this dedicated bucket.
+   - Does **NOT** consume or drain the General Data API unit budget.
+2. **Video Upload Bucket**:
+   - Dedicated daily limit: **100 calls/day**.
+   - `videos.insert` consumes **1 call/unit** in this dedicated bucket.
+3. **General Data API Bucket**:
+   - Default daily total: **10,000 units/day**.
+   - `videos.list` consumes **1 unit/call** in this bucket.
+   - Other ordinary endpoints (`channels.list`, `thumbnails.set`, etc.) consume from this bucket per method costs.
+
+### Quota Accounting & HTTP Response Semantics
+- **HTTP Response Accounting**: Once an HTTP response is received from YouTube (including 4xx/5xx responses such as 400, 401, 403, 500), local quota accounting records the request in SQLite (`quota_usage_records`) per documented YouTube quota semantics.
+- **Transport / Network Failures**: Transport exceptions occurring before any HTTP response is returned (e.g. DNS failure, connection timeout, connection refused) do **NOT** record local quota usage, preventing false spend entries.
+- **Standard Discovery Run Cost**:
+  - Seed search (1–2 queries): 1–2 calls from the Search Queries bucket.
+  - Candidate measurement (max 5 candidates): at most 5 calls from the Search Queries bucket.
+  - Total Search Queries bucket spend: $\le 7$ calls out of 100/day.
+  - Total General bucket spend: $\le 7$ units (`videos.list`) out of 10,000/day.
+- **Pre-flight Enforcement**: `QuotaBudgetManager.ensure_budget(operation)` executes before each call. If remaining bucket quota is insufficient, execution halts with `InsufficientQuotaError` / `BLOCKED`. Dummy metrics are never returned.
 - **Cache TTL**: Market snapshots are cached for **24 hours** in SQLite (`market_signal_snapshots`), preventing duplicate quota spend during identical candidate evaluations.
 
 ---
 
-## 6. Confidence Gates & Insufficient Signal Handling
+## 6. Confidence Gates & Durable Portfolio Records
 
 - **Gate**: `MIN_VALID_VIDEO_SAMPLE = 5`.
 - If a candidate query yields fewer than 5 valid video observations:
-  - `confidence = "INSUFFICIENT_SIGNAL"`
-  - The candidate is flagged as unverified.
+  - `confidence = "INSUFFICIENT_SIGNAL"`.
+  - The candidate is strictly excluded from batch-relative demand normalization and cannot alter viable candidate scores.
 - **Portfolio Winner Selection**:
   - Only candidates with `confidence == "HIGH"` are eligible for `selected_topic`.
   - If all candidates fail the evidence threshold:
     - `selected_topic = None`
     - `selection_reason = "No candidate met minimum market evidence threshold (MIN_VALID_VIDEO_SAMPLE=5). All candidates marked INSUFFICIENT_SIGNAL."`
     - Upstream automation becomes `BLOCKED` instead of guessing an arbitrary winner.
+- **Process-Restart Durability (Schema v6)**:
+  - Complete portfolio decisions (including candidates, scores, rank, angles, winner, selection reason, and referenced `market_signal_ids`) are persisted to SQLite table `opportunity_portfolios`.
+  - When reloaded via `repository.get_opportunity_portfolio(batch_id)`, the exact decision and its supporting `MarketSignalSnapshot` records can be fully reconstructed.
+  - Reusing a cached snapshot from an earlier batch preserves the original snapshot ownership; the new portfolio references the cached snapshot ID without duplicate snapshot records.

@@ -32,6 +32,7 @@ from app.domain.models import (
     EditorialSlot,
     FactCheckReport,
     MarketSignalSnapshot,
+    OpportunityPortfolio,
     PublicationJob,
     QualityResult,
     QuotaUsageRecord,
@@ -45,6 +46,7 @@ from app.domain.models import (
     ThumbnailPackage,
     TitleVariant,
     TopicCandidate,
+    TopicOpportunity,
     TopicScoreBreakdown,
     VideoProject,
 )
@@ -1234,6 +1236,25 @@ class SQLiteRepository:
             ).fetchone()
             return int(row["total_spent"]) if row and row["total_spent"] is not None else 0
 
+    def get_daily_quota_spent_by_bucket(self, consumed_date: str, bucket: str) -> int:
+        with self._get_connection() as conn:
+            if bucket == "search":
+                row = conn.execute(
+                    "SELECT SUM(units_consumed) as total_spent FROM quota_usage_records WHERE consumed_date = ? AND operation = 'search.list';",
+                    (consumed_date,),
+                ).fetchone()
+            elif bucket == "upload":
+                row = conn.execute(
+                    "SELECT SUM(units_consumed) as total_spent FROM quota_usage_records WHERE consumed_date = ? AND operation = 'videos.insert';",
+                    (consumed_date,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT SUM(units_consumed) as total_spent FROM quota_usage_records WHERE consumed_date = ? AND operation NOT IN ('search.list', 'videos.insert');",
+                    (consumed_date,),
+                ).fetchone()
+            return int(row["total_spent"]) if row and row["total_spent"] is not None else 0
+
     def get_quota_history(self, consumed_date: Optional[str] = None) -> List[QuotaUsageRecord]:
         with self._get_connection() as conn:
             if consumed_date:
@@ -1366,4 +1387,87 @@ class SQLiteRepository:
             if age_seconds <= (ttl_hours * 3600.0):
                 return snapshot
             return None
+
+    # --- Opportunity Portfolio Operations ---
+    def save_opportunity_portfolio(self, portfolio: OpportunityPortfolio) -> None:
+        signal_ids: List[str] = []
+        for c in portfolio.candidates:
+            if c.market_signal_id and c.market_signal_id not in signal_ids:
+                signal_ids.append(c.market_signal_id)
+
+        candidates_json = json.dumps([c.model_dump(mode="json") for c in portfolio.candidates])
+        selected_json = (
+            json.dumps(portfolio.selected_topic.model_dump(mode="json"))
+            if portfolio.selected_topic
+            else None
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
+        gen_iso = portfolio.generated_at.isoformat() if portfolio.generated_at else now_iso
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO opportunity_portfolios (
+                    batch_id, channel_id, generated_at, candidates_json,
+                    selected_topic_json, selection_reason, market_signal_ids_json,
+                    formula_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    portfolio.batch_id,
+                    portfolio.channel_id,
+                    gen_iso,
+                    candidates_json,
+                    selected_json,
+                    portfolio.selection_reason,
+                    json.dumps(signal_ids),
+                    "v1.0",
+                    now_iso,
+                ),
+            )
+            conn.commit()
+
+    def _row_to_opportunity_portfolio(self, row: sqlite3.Row) -> OpportunityPortfolio:
+        candidates_raw = json.loads(row["candidates_json"]) if row["candidates_json"] else []
+        candidates = [TopicOpportunity.model_validate(c) for c in candidates_raw]
+        selected_raw = json.loads(row["selected_topic_json"]) if row["selected_topic_json"] else None
+        selected_topic = TopicOpportunity.model_validate(selected_raw) if selected_raw else None
+        return OpportunityPortfolio(
+            batch_id=row["batch_id"],
+            channel_id=row["channel_id"],
+            generated_at=datetime.fromisoformat(row["generated_at"]),
+            candidates=candidates,
+            selected_topic=selected_topic,
+            selection_reason=row["selection_reason"],
+        )
+
+    def get_opportunity_portfolio(self, batch_id: str) -> Optional[OpportunityPortfolio]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM opportunity_portfolios WHERE batch_id = ?;",
+                (batch_id,),
+            ).fetchone()
+            return self._row_to_opportunity_portfolio(row) if row else None
+
+    def get_latest_opportunity_portfolio(self, channel_id: str) -> Optional[OpportunityPortfolio]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM opportunity_portfolios
+                WHERE channel_id = ?
+                ORDER BY generated_at DESC LIMIT 1;
+                """,
+                (channel_id,),
+            ).fetchone()
+            return self._row_to_opportunity_portfolio(row) if row else None
+
+    def get_portfolio_market_signal_ids(self, batch_id: str) -> List[str]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT market_signal_ids_json FROM opportunity_portfolios WHERE batch_id = ?;",
+                (batch_id,),
+            ).fetchone()
+            if row and row["market_signal_ids_json"]:
+                return json.loads(row["market_signal_ids_json"])
+            return []
 
