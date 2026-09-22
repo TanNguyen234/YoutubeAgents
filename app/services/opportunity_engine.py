@@ -232,6 +232,15 @@ Do NOT invent video IDs or search volume numbers.
 
         return scores
 
+    def _finalize_portfolio(
+        self,
+        portfolio: OpportunityPortfolio,
+    ) -> OpportunityPortfolio:
+        """Persist terminal portfolio decision to repository if configured and return it."""
+        if self.repository:
+            self.repository.save_opportunity_portfolio(portfolio)
+        return portfolio
+
     def discover_opportunities(
         self,
         channel: Channel,
@@ -254,12 +263,14 @@ Do NOT invent video IDs or search volume numbers.
         # Step 2: Resolve seed queries
         seeds = self._resolve_seed_queries(channel, seed_queries)
         if not seeds:
-            return OpportunityPortfolio(
-                batch_id=batch_id,
-                channel_id=channel.id,
-                candidates=[],
-                selected_topic=None,
-                selection_reason="No seed queries or channel niche could be determined for discovery.",
+            return self._finalize_portfolio(
+                OpportunityPortfolio(
+                    batch_id=batch_id,
+                    channel_id=channel.id,
+                    candidates=[],
+                    selected_topic=None,
+                    selection_reason="No seed queries or channel niche could be determined for discovery.",
+                )
             )
 
         # Step 2: Collect initial seed market observations
@@ -284,12 +295,14 @@ Do NOT invent video IDs or search volume numbers.
         # Step 3: Propose structured topic hypotheses grounded in observed videos
         hypotheses = self._generate_topic_hypotheses(channel, unique_seed_obs)
         if not hypotheses:
-            return OpportunityPortfolio(
-                batch_id=batch_id,
-                channel_id=channel.id,
-                candidates=[],
-                selected_topic=None,
-                selection_reason="No valid topic hypotheses could be generated from market seed observations.",
+            return self._finalize_portfolio(
+                OpportunityPortfolio(
+                    batch_id=batch_id,
+                    channel_id=channel.id,
+                    candidates=[],
+                    selected_topic=None,
+                    selection_reason="No valid topic hypotheses could be generated from market seed observations.",
+                )
             )
 
         # Step 4: Early Duplicate Filtering before expensive candidate-specific queries
@@ -301,12 +314,14 @@ Do NOT invent video IDs or search volume numbers.
             surviving_hypotheses.append(h)
 
         if not surviving_hypotheses:
-            return OpportunityPortfolio(
-                batch_id=batch_id,
-                channel_id=channel.id,
-                candidates=[],
-                selected_topic=None,
-                selection_reason="All proposed hypotheses were rejected as duplicates of recent channel topics.",
+            return self._finalize_portfolio(
+                OpportunityPortfolio(
+                    batch_id=batch_id,
+                    channel_id=channel.id,
+                    candidates=[],
+                    selected_topic=None,
+                    selection_reason="All proposed hypotheses were rejected as duplicates of recent channel topics.",
+                )
             )
 
         # Step 5: Collect candidate-specific market signal snapshots
@@ -449,7 +464,4 @@ Do NOT invent video IDs or search volume numbers.
         )
 
         # Step 10: Persist durable opportunity portfolio record to SQLite
-        if self.repository:
-            self.repository.save_opportunity_portfolio(portfolio)
-
-        return portfolio
+        return self._finalize_portfolio(portfolio)

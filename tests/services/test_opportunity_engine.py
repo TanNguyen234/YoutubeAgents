@@ -1001,6 +1001,14 @@ def test_zero_viable_candidates_persists_portfolio_and_remains_blocked(test_repo
     assert persisted.selected_topic is None
     assert "No candidate met" in persisted.selection_reason
 
+    # Verify exactly one record written
+    with test_repo._get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM opportunity_portfolios WHERE batch_id = ?;",
+            (portfolio.batch_id,),
+        ).fetchone()
+        assert row["cnt"] == 1
+
 
 # ------------------------------------------------------------------------------
 # Blocker 3 Tests — Durability, Reconstruction, and Traceability
@@ -1166,6 +1174,14 @@ def test_end_to_end_decision_audit_real_sqlite_and_snapshots(tmp_path: Path):
     assert referenced_snapshot.sample_size == 7
     assert referenced_snapshot.confidence == "HIGH"
 
+    # Verify exactly one portfolio record was written for this run
+    with repo_after_restart._get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM opportunity_portfolios WHERE batch_id = ?;",
+            (portfolio.batch_id,),
+        ).fetchone()
+        assert row["cnt"] == 1
+
 
 def test_cache_reuse_references_old_snapshot_without_mutation(tmp_path: Path):
     """When a market signal snapshot is cached from an earlier batch, a subsequent discovery run
@@ -1241,3 +1257,169 @@ def test_cache_reuse_references_old_snapshot_without_mutation(tmp_path: Path):
     repo_restart = SQLiteRepository(db_file)
     persisted_portfolio = repo_restart.get_opportunity_portfolio(new_portfolio.batch_id)
     assert persisted_portfolio.selected_topic.market_signal_id == "mss-cached-historical"
+
+
+# ------------------------------------------------------------------------------
+# Terminal Early-Return Persistence Across Process Restart (Defect Closure)
+# ------------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "terminal_case,expected_reason_substr",
+    [
+        ("NO_SEEDS", "No seed queries or channel niche could be determined"),
+        ("NO_HYPOTHESES", "No valid topic hypotheses could be generated"),
+        ("ALL_DUPLICATES", "All proposed hypotheses were rejected as duplicates"),
+    ],
+)
+def test_terminal_early_returns_persisted_across_process_restart(
+    tmp_path: Path, terminal_case: str, expected_reason_substr: str
+):
+    """Assert all early-return terminal paths (NO_SEEDS, NO_HYPOTHESES, ALL_DUPLICATES)
+    persist an OpportunityPortfolio with selected_topic=None, which cleanly reloads
+    after process restart with exactly one portfolio record written to SQLite."""
+    db_file = tmp_path / f"terminal_{terminal_case.lower()}.db"
+    init_database(db_file)
+    repo = SQLiteRepository(db_file)
+
+    if terminal_case == "NO_SEEDS":
+        chan = Channel(
+            id="c-no-seeds",
+            title="No Seeds Channel",
+            handle="@noseeds",
+            niche="",
+            target_audience="General Audience",
+            default_tags=[],
+        )
+        repo.save_channel(chan)
+        backend = MockReasoningBackend()
+        mock_market = MagicMock(spec=YouTubeMarketSignalService)
+        engine = OpportunityEngine(repository=repo, market_signal_service=mock_market, backend=backend)
+        portfolio = engine.discover_opportunities(channel=chan, seed_queries=None, recent_topics=None)
+
+    elif terminal_case == "NO_HYPOTHESES":
+        chan = Channel(
+            id="c-no-hypo",
+            title="No Hypotheses Channel",
+            handle="@nohypo",
+            niche="AI Agents",
+            target_audience="Developers",
+            default_tags=["ai"],
+        )
+        repo.save_channel(chan)
+        backend = MockReasoningBackend(hypotheses=[])  # Zero hypotheses returned
+        mock_market = MagicMock(spec=YouTubeMarketSignalService)
+        seed_obs = [
+            MarketVideoObservation(
+                video_id="v_seed_01",
+                title="AI Agent Architecture",
+                channel_id="c_ext_01",
+                channel_title="Tech Guru",
+                published_at=datetime.now(timezone.utc) - timedelta(days=2),
+                view_count=5000,
+            )
+        ]
+        mock_market.fetch_market_observations.return_value = (seed_obs, 100)
+        engine = OpportunityEngine(repository=repo, market_signal_service=mock_market, backend=backend)
+        portfolio = engine.discover_opportunities(channel=chan, seed_queries=["AI Agents"], recent_topics=None)
+
+    elif terminal_case == "ALL_DUPLICATES":
+        chan = Channel(
+            id="c-all-dup",
+            title="All Duplicates Channel",
+            handle="@alldup",
+            niche="AI Agents",
+            target_audience="Developers",
+            default_tags=["ai"],
+        )
+        repo.save_channel(chan)
+        backend = MockReasoningBackend(
+            hypotheses=[
+                OpportunityHypothesis(
+                    keyword="Autonomous Coding Agents",
+                    angle="Self-Healing Loops",
+                    rationale="Great topic",
+                    supporting_video_ids=["v_seed_01"],
+                ),
+                OpportunityHypothesis(
+                    keyword="Python Agent Workflows",
+                    angle="State Machines",
+                    rationale="Solid angle",
+                    supporting_video_ids=["v_seed_01"],
+                ),
+            ]
+        )
+        mock_market = MagicMock(spec=YouTubeMarketSignalService)
+        seed_obs = [
+            MarketVideoObservation(
+                video_id="v_seed_01",
+                title="AI Agent Architecture",
+                channel_id="c_ext_01",
+                channel_title="Tech Guru",
+                published_at=datetime.now(timezone.utc) - timedelta(days=2),
+                view_count=5000,
+            )
+        ]
+        mock_market.fetch_market_observations.return_value = (seed_obs, 100)
+        engine = OpportunityEngine(repository=repo, market_signal_service=mock_market, backend=backend)
+
+        recent = ["autonomous coding agents", "python agent workflows"]
+        portfolio = engine.discover_opportunities(channel=chan, seed_queries=["AI Agents"], recent_topics=recent)
+
+        # Invariant for ALL_DUPLICATES: candidate-specific search MUST NOT be called (saves quota)
+        assert mock_market.get_market_signal_snapshot.call_count == 0
+
+    # In-memory return invariants
+    assert portfolio.selected_topic is None
+    assert portfolio.candidates == []
+    assert expected_reason_substr in portfolio.selection_reason
+
+    # Process restart simulation: open new SQLiteRepository on the DB file
+    repo_restart = SQLiteRepository(db_file)
+    reloaded = repo_restart.get_opportunity_portfolio(portfolio.batch_id)
+
+    # Invariants on reloaded portfolio after restart
+    assert reloaded is not None
+    assert reloaded.batch_id == portfolio.batch_id
+    assert reloaded.channel_id == chan.id
+    assert reloaded.selected_topic is None
+    assert reloaded.candidates == []
+    assert reloaded.selection_reason == portfolio.selection_reason
+    assert expected_reason_substr in reloaded.selection_reason
+
+    # Verify exactly one portfolio record was persisted in SQLite for this run
+    with repo_restart._get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM opportunity_portfolios WHERE batch_id = ?;",
+            (portfolio.batch_id,),
+        ).fetchone()
+        assert row["cnt"] == 1
+
+
+def test_operational_failures_propagate_without_creating_fake_portfolios(tmp_path: Path):
+    """Operational failures (API, network, quota) must raise typed exceptions and never
+    be swallowed into artificial OpportunityPortfolio(selected_topic=None) records."""
+    db_file = tmp_path / "op_failures.db"
+    init_database(db_file)
+    repo = SQLiteRepository(db_file)
+
+    chan = Channel(
+        id="c-fail-boundary",
+        title="Failure Boundary Test",
+        handle="@boundary",
+        niche="Python",
+        target_audience="Engineers",
+    )
+    repo.save_channel(chan)
+
+    mock_market = MagicMock(spec=YouTubeMarketSignalService)
+    mock_market.fetch_market_observations.side_effect = YouTubeMarketSignalError("YouTube API 503 Backend Error")
+
+    engine = OpportunityEngine(repository=repo, market_signal_service=mock_market)
+
+    # Must raise typed exception
+    with pytest.raises(YouTubeMarketSignalError, match="YouTube API 503 Backend Error"):
+        engine.discover_opportunities(channel=chan, seed_queries=["Python"])
+
+    # Must NOT have created any portfolio records in SQLite
+    with repo._get_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) as cnt FROM opportunity_portfolios;").fetchone()
+        assert row["cnt"] == 0
