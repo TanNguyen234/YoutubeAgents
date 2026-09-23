@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import httpx
 
 from app.core.backend import AntigravityCLIBackend, ReasoningBackend
 from app.db.repository import SQLiteRepository
@@ -15,6 +16,7 @@ from app.domain.enums import (
     VideoLifecycleState,
 )
 from app.domain.models import (
+    AnalyticsCollectionResult,
     AnalyticsSnapshot,
     Channel,
     ContentSeries,
@@ -58,6 +60,8 @@ from app.services.strategy_feedback import StrategyFeedbackLoop
 from app.services.thumbnail_designer import ThumbnailDesignerService
 from app.services.topic_evaluator import TopicEvaluator
 from app.services.topic_strategist import TopicStrategist
+from app.services.youtube_analytics_ingestion import YouTubeAnalyticsIngestionService
+from app.services.youtube_oauth import YouTubeOAuthManager
 from app.services.youtube_publisher import YouTubePublisherService
 
 
@@ -692,24 +696,19 @@ class BrainPipeline:
                     youtube_video_id=yt_id,
                     is_simulated=True,
                 )
-            elif yt_id and not yt_id.startswith("yt-dryrun-"):
-                # Initial production baseline capture with real YouTube video ID
-                analytics_snapshot = analytics_tracker.record_snapshot(
-                    project_id=project_id,
-                    views=0,
-                    watch_time_hours=0.0,
-                    ctr_percent=0.0,
-                    average_view_duration_seconds=0.0,
-                    retention_at_3s_percent=None,
-                    youtube_video_id=yt_id,
-                    is_simulated=False,
-                )
+                analytics_status = "COLLECTED"
             else:
-                # No verified YouTube video ID yet; do not invent fake analytics
+                # Post-upload: real performance data is not available immediately from YouTube Analytics API (24-48h lag).
+                # Do NOT invent fake zero baseline. Await genuine ingestion via refresh_project_analytics.
                 analytics_snapshot = None
+                analytics_status = "PENDING_REAL_DATA"
         elif project.state == VideoLifecycleState.BLOCKED:
             # Cleanly skip analytics on BLOCKED projects
             analytics_snapshot = None
+            analytics_status = "SKIPPED"
+        else:
+            analytics_snapshot = None
+            analytics_status = "SKIPPED"
 
         # 9. Stage 15: Strategy Feedback Loop
         strategy_feedback = StrategyFeedbackLoop(self.repo)
@@ -785,6 +784,7 @@ class BrainPipeline:
                 "error_message": pub_job.error_message if pub_job else None,
                 "mode": pub_mode,
             } if pub_job else None,
+            "analytics_status": analytics_status,
             "analytics_snapshot": {
                 "views": analytics_snapshot.views if analytics_snapshot else None,
                 "watch_time_hours": analytics_snapshot.watch_time_hours if analytics_snapshot else None,
@@ -798,3 +798,51 @@ class BrainPipeline:
             "strategy_analysis": strategy_analysis,
         }
 
+    def refresh_project_analytics(
+        self,
+        project_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        oauth_manager: Optional[YouTubeOAuthManager] = None,
+        http_client: Optional[httpx.Client] = None,
+    ) -> AnalyticsCollectionResult:
+        """Ingest authentic playback & retention observations for a published project."""
+        ingestion_service = YouTubeAnalyticsIngestionService(
+            oauth_manager=oauth_manager,
+            repository=self.repo,
+            http_client=http_client,
+        )
+        return ingestion_service.ingest_project_analytics(
+            project_id=project_id,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def refresh_channel_analytics(
+        self,
+        channel_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        oauth_manager: Optional[YouTubeOAuthManager] = None,
+        http_client: Optional[httpx.Client] = None,
+    ) -> List[AnalyticsCollectionResult]:
+        """Ingest authentic playback & retention observations for all published projects of a channel."""
+        projects = self.repo.list_video_projects_by_channel(channel_id)
+        results: List[AnalyticsCollectionResult] = []
+        ingestion_service = YouTubeAnalyticsIngestionService(
+            oauth_manager=oauth_manager,
+            repository=self.repo,
+            http_client=http_client,
+        )
+        for proj in projects:
+            if proj.state in (VideoLifecycleState.PUBLISHED, VideoLifecycleState.SCHEDULED):
+                res = ingestion_service.ingest_project_analytics(
+                    project_id=proj.id,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                results.append(res)
+        return results
+
+
+PipelineBrain = BrainPipeline

@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from app.db.repository import SQLiteRepository
-from app.domain.enums import VideoLifecycleState
-from app.domain.models import AnalyticsSnapshot, VideoProject
+from app.domain.enums import AnalyticsSource, VideoLifecycleState
+from app.domain.models import AnalyticsSnapshot, RetentionPoint, VideoProject
 
 
 class AnalyticsTrackerError(RuntimeError):
@@ -26,11 +26,17 @@ class YouTubeAnalyticsTracker:
         project_id: str,
         views: int,
         watch_time_hours: float,
-        ctr_percent: float,
-        average_view_duration_seconds: float,
+        ctr_percent: Optional[float] = None,
+        average_view_duration_seconds: float = 0.0,
         retention_at_3s_percent: Optional[float] = None,
         youtube_video_id: Optional[str] = None,
         is_simulated: bool = False,
+        source: Optional[AnalyticsSource] = None,
+        report_start_date: Optional[str] = None,
+        report_end_date: Optional[str] = None,
+        average_view_percentage: Optional[float] = None,
+        impressions: Optional[int] = None,
+        retention_curve: Optional[List[RetentionPoint]] = None,
     ) -> AnalyticsSnapshot:
         """Create and persist a performance snapshot for a project."""
         project = self.repo.get_video_project(project_id)
@@ -56,22 +62,31 @@ class YouTubeAnalyticsTracker:
             snapshot_type = "SIMULATED"
             if not video_id:
                 video_id = f"sim-{project_id[:8]}"
+            chosen_source = source or AnalyticsSource.SIMULATED
         else:
             snapshot_type = "REAL"
+            chosen_source = source or AnalyticsSource.YOUTUBE_ANALYTICS_API
             # Do NOT invent fake youtube video ID like yt-auto-...
 
+        ctr_val = max(0.0, min(100.0, float(ctr_percent))) if ctr_percent is not None else None
         snapshot_id = f"snap-{uuid4().hex[:8]}"
         snapshot = AnalyticsSnapshot(
             id=snapshot_id,
             project_id=project_id,
             youtube_video_id=video_id,
+            source=chosen_source,
             snapshot_type=snapshot_type,
             is_simulated=is_simulated,
+            report_start_date=report_start_date,
+            report_end_date=report_end_date,
             views=max(0, views),
             watch_time_hours=max(0.0, float(watch_time_hours)),
-            ctr_percent=max(0.0, min(100.0, float(ctr_percent))),
             average_view_duration_seconds=max(0.0, float(average_view_duration_seconds)),
+            average_view_percentage=average_view_percentage,
+            impressions=impressions,
+            ctr_percent=ctr_val,
             retention_at_3s_percent=retention_at_3s_percent,
+            retention_curve=retention_curve or [],
             captured_at=datetime.now(timezone.utc),
         )
 
