@@ -3,9 +3,10 @@
 from pathlib import Path
 import sqlite3
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
-SCHEMA_V6_SQL = """
+SCHEMA_V7_SQL = """
+
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS channels (
@@ -325,13 +326,30 @@ CREATE TABLE IF NOT EXISTS opportunity_portfolios (
 );
 
 CREATE INDEX IF NOT EXISTS idx_opportunity_portfolios_channel ON opportunity_portfolios(channel_id);
+
+CREATE TABLE IF NOT EXISTS packaging_tournaments (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    candidates_json TEXT NOT NULL,
+    selected_candidate_id TEXT,
+    selection_reason TEXT,
+    native_ab_eligible INTEGER NOT NULL DEFAULT 0,
+    scoring_version TEXT NOT NULL DEFAULT 'v1.0',
+    status TEXT NOT NULL DEFAULT 'COMPLETED',
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_packaging_tournaments_project ON packaging_tournaments(project_id);
 """
 
 # Backwards compatibility aliases
-SCHEMA_V5_SQL = SCHEMA_V6_SQL
-SCHEMA_V4_SQL = SCHEMA_V6_SQL
-SCHEMA_V3_SQL = SCHEMA_V6_SQL
-SCHEMA_V2_SQL = SCHEMA_V6_SQL
+SCHEMA_V6_SQL = SCHEMA_V7_SQL
+SCHEMA_V5_SQL = SCHEMA_V7_SQL
+SCHEMA_V4_SQL = SCHEMA_V7_SQL
+SCHEMA_V3_SQL = SCHEMA_V7_SQL
+SCHEMA_V2_SQL = SCHEMA_V7_SQL
+
 
 
 def migrate_database(db_path: Path) -> None:
@@ -360,11 +378,12 @@ def migrate_database(db_path: Path) -> None:
         user_table_count = cursor.fetchone()[0]
 
         if current_version == 0 and user_table_count == 0:
-            # Truly empty/new database: apply full v6 schema directly
-            conn.executescript(SCHEMA_V6_SQL)
+            # Truly empty/new database: apply full v7 schema directly
+            conn.executescript(SCHEMA_V7_SQL)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()
             return
+
 
         # 1. Migrate v0/v1 legacy databases to v2 structure
         if current_version < 2:
@@ -490,13 +509,20 @@ def migrate_database(db_path: Path) -> None:
 
         # 5. Migrate v5 to v6: opportunity_portfolios
         if current_version < 6:
-            conn.executescript(SCHEMA_V6_SQL)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.executescript(SCHEMA_V7_SQL)
+            conn.execute("PRAGMA user_version = 6;")
             conn.commit()
             current_version = 6
+
+        # 6. Migrate v6 to v7: packaging_tournaments
+        if current_version < 7:
+            conn.executescript(SCHEMA_V7_SQL)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.commit()
+            current_version = 7
         else:
-            # Current v6 idempotent check
-            conn.executescript(SCHEMA_V6_SQL)
+            # Current v7 idempotent check
+            conn.executescript(SCHEMA_V7_SQL)
             cursor.execute("PRAGMA table_info(topic_candidates);")
             tc_cols = {row[1] for row in cursor.fetchall()}
             if tc_cols and "score_breakdown_json" not in tc_cols:
@@ -540,6 +566,7 @@ def migrate_database(db_path: Path) -> None:
 
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()
+
 
 
 def init_database(db_path: Path) -> None:

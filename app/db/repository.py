@@ -13,6 +13,7 @@ from app.domain.enums import (
     ClaimVerificationVerdict,
     ContentFormat,
     EditorialSlotStatus,
+    PackagingTournamentStatus,
     PlatformFormat,
     PrivacyStatus,
     PublicationStatus,
@@ -33,6 +34,8 @@ from app.domain.models import (
     FactCheckReport,
     MarketSignalSnapshot,
     OpportunityPortfolio,
+    PackagingCandidate,
+    PackagingTournament,
     PublicationJob,
     QualityResult,
     QuotaUsageRecord,
@@ -50,6 +53,7 @@ from app.domain.models import (
     TopicScoreBreakdown,
     VideoProject,
 )
+
 
 
 class StateConcurrencyError(RuntimeError):
@@ -732,6 +736,24 @@ class SQLiteRepository:
                 audit_summary=r_row["audit_summary"],
                 created_at=datetime.fromisoformat(r_row["created_at"]),
             )
+
+    def get_claims_by_project(self, project_id: str) -> List[Claim]:
+        with self._get_connection() as conn:
+            c_rows = conn.execute("SELECT * FROM claims WHERE project_id = ?", (project_id,)).fetchall()
+            return [
+                Claim(
+                    id=c["id"],
+                    source_id=c["source_id"],
+                    statement=c["statement"],
+                    verified=bool(c["verified"]),
+                    verdict=ClaimVerificationVerdict(c["verdict"]),
+                    confidence_score=c["confidence_score"],
+                    cited_url=c["cited_url"],
+                    cited_excerpt=c["cited_excerpt"],
+                    notes=c["notes"],
+                )
+                for c in c_rows
+            ]
 
     # --- Publication & Queue Operations ---
     def save_publication_job(self, job: PublicationJob) -> None:
@@ -1471,3 +1493,61 @@ class SQLiteRepository:
                 return json.loads(row["market_signal_ids_json"])
             return []
 
+    # --- Packaging Tournament Operations ---
+    def save_packaging_tournament(self, tournament: PackagingTournament) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO packaging_tournaments (
+                    id, project_id, created_at, candidates_json, selected_candidate_id,
+                    selection_reason, native_ab_eligible, scoring_version, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    tournament.id,
+                    tournament.project_id,
+                    tournament.created_at.isoformat(),
+                    json.dumps([c.model_dump() for c in tournament.candidates]),
+                    tournament.selected_candidate_id,
+                    tournament.selection_reason,
+                    1 if tournament.native_ab_eligible else 0,
+                    tournament.scoring_version,
+                    tournament.status.value if hasattr(tournament.status, "value") else str(tournament.status),
+                ),
+            )
+            conn.commit()
+
+    def get_packaging_tournament(self, project_id: str) -> Optional[PackagingTournament]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM packaging_tournaments WHERE project_id = ? ORDER BY created_at DESC LIMIT 1;",
+                (project_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return self._row_to_packaging_tournament(row)
+
+    def get_packaging_tournament_by_id(self, tournament_id: str) -> Optional[PackagingTournament]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM packaging_tournaments WHERE id = ?;",
+                (tournament_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return self._row_to_packaging_tournament(row)
+
+    def _row_to_packaging_tournament(self, row: sqlite3.Row) -> PackagingTournament:
+        raw_candidates = json.loads(row["candidates_json"])
+        candidates = [PackagingCandidate(**c) for c in raw_candidates]
+        return PackagingTournament(
+            id=row["id"],
+            project_id=row["project_id"],
+            candidates=candidates,
+            selected_candidate_id=row["selected_candidate_id"],
+            selection_reason=row["selection_reason"],
+            native_ab_eligible=bool(row["native_ab_eligible"]),
+            scoring_version=row["scoring_version"],
+            status=PackagingTournamentStatus(row["status"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )

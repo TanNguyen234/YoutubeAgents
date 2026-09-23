@@ -22,6 +22,8 @@ class SEOOptimizerService:
         primary_keyword: str,
         series_context: Optional[Dict[str, Any]] = None,
         sources_summary: Optional[str] = None,
+        selected_title: Optional[str] = None,
+        title_variants: Optional[List[TitleVariant]] = None,
     ) -> SEOPackage:
         """Construct full high-conversion SEO packaging and persist to SQLite."""
         project = self.repository.get_video_project(project_id)
@@ -31,10 +33,11 @@ class SEOOptimizerService:
         channel = self.repository.get_channel(project.channel_id)
         handle = channel.handle if channel else "@YouTube"
 
-        # 1. Generate 3-Variant Titles
-        title_variants = self._build_title_variants(primary_keyword, series_context)
-        # Select direct value or curiosity as default selected_title
-        selected_title = title_variants[1].title
+        # 1. Title variants and selected title (favor tournament-grounded variants if provided)
+        if not title_variants:
+            title_variants = self._build_title_variants(primary_keyword, series_context)
+        if not selected_title:
+            selected_title = title_variants[1].title if len(title_variants) > 1 else title_variants[0].title
 
         # 2. Extract Chapters from Script Scenes
         chapters = self._extract_chapters(project)
@@ -74,8 +77,9 @@ class SEOOptimizerService:
     def _build_title_variants(
         self, primary_keyword: str, series_context: Optional[Dict[str, Any]] = None
     ) -> List[TitleVariant]:
-        """Generate 3 distinct psychological title angles (Curiosity Gap, Direct Value, Provocative Question)."""
+        """Emergency fallback title variants when reasoning model is bypassed or unavailable."""
         clean_kw = primary_keyword.strip()
+
 
         # Variant 1: Curiosity Gap
         v1_title = f"The Secret Truth About {clean_kw}"

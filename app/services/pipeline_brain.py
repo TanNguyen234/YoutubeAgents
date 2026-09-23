@@ -50,7 +50,9 @@ from app.services.seo_optimizer import SEOOptimizerService
 from app.domain.models import resolve_default_creative_brief
 from app.services.hook_strategy import HookTournamentService
 from app.services.opportunity_engine import OpportunityEngine
+from app.services.packaging_engine import PackagingEngineService
 from app.services.retention_planner import RetentionPlanner
+
 from app.services.script_retention import ScriptRetentionEvaluator
 from app.services.strategy_feedback import StrategyFeedbackLoop
 from app.services.thumbnail_designer import ThumbnailDesignerService
@@ -582,23 +584,40 @@ class BrainPipeline:
 
         thumb_output_dir = Path("output/projects") / project_id / "thumbnails"
         thumb_service = ThumbnailDesignerService(self.repo, thumb_output_dir)
-        bg_asset = None
-        for a in project.assets:
-            if (
-                a.asset_type in (AssetType.IMAGE, AssetType.SCENE_CARD)
-                and Path(a.file_path).exists()
-                and Path(a.file_path).suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
-            ):
-                bg_asset = Path(a.file_path)
-                break
 
-        headline_words = " ".join(keyword.split()[:4]).upper()
-        thumb_pkg = thumb_service.create_thumbnail_package(
-            project_id=project_id,
-            headline_text=headline_words,
-            background_image_path=str(bg_asset) if bg_asset else None,
-            series_badge=continuity.get("display_badge") if continuity else None,
+        packaging_service = PackagingEngineService(
+            repository=self.repo,
+            thumbnail_designer=thumb_service,
+            backend=self.backend,
+            output_dir=Path("output/projects"),
         )
+        tournament = packaging_service.run_tournament(
+            project_id=project_id,
+            primary_keyword=keyword,
+            series_context=continuity,
+        )
+
+        # Refresh seo_pkg and thumb_pkg to reflect tournament selection
+        seo_pkg = self.repo.get_seo_package(project_id) or seo_pkg
+        thumb_pkg = self.repo.get_thumbnail_package(project_id)
+        if not thumb_pkg:
+            bg_asset = None
+            for a in project.assets:
+                if (
+                    a.asset_type in (AssetType.IMAGE, AssetType.SCENE_CARD)
+                    and Path(a.file_path).exists()
+                    and Path(a.file_path).suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")
+                ):
+                    bg_asset = Path(a.file_path)
+                    break
+            headline_words = " ".join(keyword.split()[:4]).upper()
+            thumb_pkg = thumb_service.create_thumbnail_package(
+                project_id=project_id,
+                headline_text=headline_words,
+                background_image_path=str(bg_asset) if bg_asset else None,
+                series_badge=continuity.get("display_badge") if continuity else None,
+            )
+
 
         # 5. Stage 12: Human Review Gate
         review_service = HumanReviewGateService(self.repo)
@@ -724,6 +743,14 @@ class BrainPipeline:
                 "creative_profile": render_manifest.creative_profile,
                 "contains_synthetic_media": render_manifest.contains_synthetic_media,
             },
+            "packaging_tournament": {
+                "id": tournament.id,
+                "selected_candidate_id": tournament.selected_candidate_id,
+                "selection_reason": tournament.selection_reason,
+                "candidates_count": len(tournament.candidates),
+                "native_ab_eligible": tournament.native_ab_eligible,
+                "status": tournament.status.value,
+            } if tournament else None,
             "seo_package": {
                 "selected_title": seo_pkg.selected_title,
                 "primary_keyword": seo_pkg.primary_keyword,
@@ -738,6 +765,7 @@ class BrainPipeline:
                 "file_path_9_16": thumb_pkg.file_path_9_16,
                 "sha256": thumb_pkg.content_sha256,
             },
+
             "review_record": {
                 "operator": review_record.operator if review_record else None,
                 "action": review_record.action.value if review_record else None,
