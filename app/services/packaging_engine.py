@@ -41,7 +41,7 @@ class PackagingError(RuntimeError):
 
 class CandidateProposal(BaseModel):
     """Structured candidate proposed by reasoning model."""
-    id: str = Field(description="Candidate identifier: cand-1, cand-2, cand-3")
+    id: Optional[str] = Field(default=None, description="Optional candidate identifier from model (ignored by server: canonical server IDs are cand-1, cand-2, cand-3)")
     title: str = Field(description="Title string (must adhere to <= 100 characters)")
     title_strategy: str = Field(description="Strategic angle (e.g. DIRECT_VALUE, CONTRAST_MECHANISM, CURIOSITY_QUESTION)")
     thumbnail_headline: Optional[str] = Field(default=None, description="0 to 4 words punchy overlay text")
@@ -207,6 +207,12 @@ class PackagingEngineService:
             else:
                 raise PackagingError(f"PACKAGING_DIVERSITY_UNRESOLVED: {rechecked_reason}")
 
+        # Defense-in-depth: Candidate IDs must strictly match canonical positional IDs
+        expected_ids = ["cand-1", "cand-2", "cand-3"]
+        actual_ids = [c.id for c in candidates]
+        if actual_ids != expected_ids:
+            raise PackagingError(f"Candidate IDs must strictly match canonical positional IDs {expected_ids}, got {actual_ids}")
+
         # 3. Gate 1, 2, 3: Hard Constraints, Truth Grounding, and Asset Provenance
         project_assets = project.assets or []
         for cand in candidates:
@@ -355,7 +361,7 @@ PACKAGING REQUIREMENTS:
                 raw_list = output.candidates[:self.MAX_CANDIDATES]
                 return [
                     PackagingCandidate(
-                        id=c.id or f"cand-{i+1}",
+                        id=f"cand-{i+1}",
                         title=c.title.strip(),
                         title_strategy=c.title_strategy,
                         thumbnail_headline=c.thumbnail_headline.strip() if c.thumbnail_headline else None,
@@ -641,15 +647,15 @@ REQUIREMENTS FOR DIVERSITY CORRECTION:
             output = self.backend.generate_structured(prompt, PackagingGenerationOutput)
             if output and output.candidates and len(output.candidates) >= self.MAX_CANDIDATES:
                 corrected: List[PackagingCandidate] = []
-                for p in output.candidates[:self.MAX_CANDIDATES]:
+                for i, p in enumerate(output.candidates[:self.MAX_CANDIDATES]):
                     c = PackagingCandidate(
-                        id=p.id,
-                        title=p.title,
+                        id=f"cand-{i+1}",
+                        title=p.title.strip(),
                         title_strategy=p.title_strategy,
-                        thumbnail_headline=p.thumbnail_headline,
+                        thumbnail_headline=p.thumbnail_headline.strip() if p.thumbnail_headline else None,
                         thumbnail_visual_strategy=p.thumbnail_visual_strategy,
-                        subject_asset_id=p.subject_asset_id,
-                        supporting_asset_ids=p.supporting_asset_ids,
+                        subject_asset_id=p.subject_asset_id if (p.subject_asset_id and p.subject_asset_id in context.visual_asset_ids) else None,
+                        supporting_asset_ids=[a for a in p.supporting_asset_ids if a in context.visual_asset_ids],
                         rationale=p.click_motivation_rationale,
                     )
                     corrected.append(c)
@@ -669,6 +675,7 @@ REQUIREMENTS FOR DIVERSITY CORRECTION:
         ]
 
         for i, cand in enumerate(corrected[:self.MAX_CANDIDATES]):
+            cand.id = f"cand-{i+1}"
             cand.thumbnail_visual_strategy = fallback_strategies[i % len(fallback_strategies)]
             cand.thumbnail_headline = fallback_headlines[i % len(fallback_headlines)]
             cand.title = fallback_titles[i % len(fallback_titles)]

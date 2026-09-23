@@ -420,11 +420,12 @@ def test_unsupported_presupposition_inside_why_question_rejected(test_setup):
         primary_keyword="SQLite WAL",
     )
 
-    cand_why = next(c for c in tournament.candidates if c.id == "cand-why")
+    cand_why = next(c for c in tournament.candidates if "Eliminates All Write Locks" in c.title)
+    assert cand_why.id == "cand-1"
     assert cand_why.passed_gates is False
     assert cand_why.truth_status == TitleTruthStatus.UNSUPPORTED
     assert cand_why.quality_score == 0.0
-    assert tournament.selected_candidate_id != "cand-why"
+    assert tournament.selected_candidate_id != cand_why.id
 
 
 # --- TEST 4 (AUDIT CASE C): Real Semantic Paraphrase Supported with Claim ID ---
@@ -855,10 +856,11 @@ def test_thumbnail_visual_strategy_execution_and_metadata(test_setup):
         primary_keyword="SQLite WAL",
     )
 
-    c_focus = next(c for c in tournament.candidates if c.id == "cand-focus")
-    c_split = next(c for c in tournament.candidates if c.id == "cand-split")
-    c_crop = next(c for c in tournament.candidates if c.id == "cand-crop")
+    c_focus = tournament.candidates[0]
+    c_split = tournament.candidates[1]
+    c_crop = tournament.candidates[2]
 
+    assert [c.id for c in tournament.candidates] == ["cand-1", "cand-2", "cand-3"]
     assert c_focus.requested_visual_strategy == "FOCUS"
     assert c_focus.actual_visual_strategy == "FOCUS"
 
@@ -1019,7 +1021,9 @@ def test_rejected_candidate_not_exposed_as_publishable_title_variant(test_setup)
 
     # Tournament retains rejected candidate for durability audit
     assert len(tournament.candidates) == 3
-    assert any(c.id == "cand-rejected" and not c.passed_gates for c in tournament.candidates)
+    assert any("Corruption" in c.title and not c.passed_gates for c in tournament.candidates)
+    assert tournament.candidates[0].id == "cand-1"
+    assert not tournament.candidates[0].passed_gates
 
     # But SEOPackage.title_variants MUST only contain valid gate-passed candidates!
     seo_after = repo.get_seo_package(project.id)
@@ -1447,3 +1451,182 @@ def test_deterministic_ranking_and_tie_breaking(test_setup):
     scores_1 = [c.quality_score for c in t1.candidates]
     scores_2 = [c.quality_score for c in t2.candidates]
     assert scores_1 == scores_2
+
+
+# --- TEST 21: Initial Generation Duplicate Backend IDs Canonicalized & Render Integrity ---
+def test_initial_generation_duplicate_backend_ids_canonicalized_and_render_integrity(test_setup):
+    """ReasoningBackend duplicate candidate IDs are completely ignored; canonical IDs cand-1..3 are enforced and files/SHAs remain uncorrupted."""
+    repo, project, channel, thumb_designer, tmp_path = test_setup
+
+    def mock_handler(prompt, schema_cls):
+        if schema_cls == PackagingGenerationOutput:
+            return PackagingGenerationOutput(
+                candidates=[
+                    CandidateProposal(
+                        id="cand-1",  # duplicate ID
+                        title="Understanding SQLite WAL",
+                        title_strategy="DIRECT_VALUE",
+                        thumbnail_headline="WAL EXPLAINED",
+                        thumbnail_visual_strategy="FOCUS",
+                        subject_asset_id="ast-visual-01",
+                        click_motivation_rationale="Direct explanation.",
+                    ),
+                    CandidateProposal(
+                        id="cand-1",  # duplicate ID
+                        title="How SQLite WAL Works",
+                        title_strategy="CONTRAST_MECHANISM",
+                        thumbnail_headline="HOW WAL WORKS",
+                        thumbnail_visual_strategy="SPLIT_CONTRAST",
+                        subject_asset_id="ast-visual-02",
+                        click_motivation_rationale="Contrasting mechanism.",
+                    ),
+                    CandidateProposal(
+                        id="cand-1",  # duplicate ID
+                        title="Key Concepts in SQLite WAL",
+                        title_strategy="CURIOSITY_QUESTION",
+                        thumbnail_headline="KEY CONCEPTS",
+                        thumbnail_visual_strategy="DETAIL_CROP",
+                        subject_asset_id="ast-visual-01",
+                        click_motivation_rationale="Architectural concepts.",
+                    ),
+                ]
+            )
+        if schema_cls == TitleGroundingEvaluation:
+            return default_mock_grounding_evaluator(prompt)
+        raise ValueError(f"Unhandled: {schema_cls}")
+
+    backend = MockReasoningBackend(handler=mock_handler)
+    service = PackagingEngineService(
+        repository=repo,
+        thumbnail_designer=thumb_designer,
+        backend=backend,
+        output_dir=tmp_path / "output_dup_id",
+    )
+
+    tournament = service.run_tournament(project.id, "SQLite WAL")
+
+    # Section 7 assertions
+    candidate_ids = [c.id for c in tournament.candidates]
+    assert candidate_ids == ["cand-1", "cand-2", "cand-3"]
+    assert len(set(candidate_ids)) == 3
+
+    # Section 8 assertions: File integrity & SHA match
+    paths_16_9 = [c.file_path_16_9 for c in tournament.candidates]
+    paths_9_16 = [c.file_path_9_16 for c in tournament.candidates]
+    assert len(set(paths_16_9)) == 3
+    assert len(set(paths_9_16)) == 3
+
+    for cand in tournament.candidates:
+        assert Path(cand.file_path_16_9).exists()
+        file_bytes = Path(cand.file_path_16_9).read_bytes()
+        actual_sha = hashlib.sha256(file_bytes).hexdigest()
+        assert actual_sha == cand.content_sha256
+
+    # Section 9 assertions: Selected ID resolves uniquely before and after SQLite reload
+    matches = [c for c in tournament.candidates if c.id == tournament.selected_candidate_id]
+    assert len(matches) == 1
+
+    fresh_repo = SQLiteRepository(repo.db_path)
+    reloaded = fresh_repo.get_packaging_tournament(project.id)
+    assert reloaded is not None
+    assert reloaded.selected_candidate_id == tournament.selected_candidate_id
+    reloaded_matches = [c for c in reloaded.candidates if c.id == reloaded.selected_candidate_id]
+    assert len(reloaded_matches) == 1
+    assert [c.id for c in reloaded.candidates] == ["cand-1", "cand-2", "cand-3"]
+
+
+# --- TEST 22: Diversity Correction Duplicate Backend IDs Canonicalized ---
+def test_diversity_correction_duplicate_backend_ids_canonicalized(test_setup):
+    """When initial candidates fail diversity, correction backend returning duplicate IDs is canonicalized server-side."""
+    repo, project, channel, thumb_designer, tmp_path = test_setup
+
+    def mock_handler(prompt, schema_cls):
+        if schema_cls == PackagingGenerationOutput:
+            if "PREVIOUS CANDIDATES" in prompt:
+                # Correction output returning duplicate IDs
+                return PackagingGenerationOutput(
+                    candidates=[
+                        CandidateProposal(
+                            id="whatever-same-id",
+                            title="Understanding SQLite WAL In Depth",
+                            title_strategy="DIRECT_VALUE",
+                            thumbnail_headline="IN DEPTH",
+                            thumbnail_visual_strategy="FOCUS",
+                            subject_asset_id="ast-visual-01",
+                            click_motivation_rationale="Distinct outcome.",
+                        ),
+                        CandidateProposal(
+                            id="whatever-same-id",
+                            title="Why SQLite WAL Changes Storage Concurrency",
+                            title_strategy="CONTRAST_MECHANISM",
+                            thumbnail_headline="CONCURRENCY",
+                            thumbnail_visual_strategy="SPLIT_CONTRAST",
+                            subject_asset_id="ast-visual-02",
+                            click_motivation_rationale="Distinct contrast.",
+                        ),
+                        CandidateProposal(
+                            id="whatever-same-id",
+                            title="Can SQLite WAL Prevent Blocking at Scale?",
+                            title_strategy="CURIOSITY_QUESTION",
+                            thumbnail_headline="AT SCALE?",
+                            thumbnail_visual_strategy="DETAIL_CROP",
+                            subject_asset_id="ast-visual-01",
+                            click_motivation_rationale="Distinct inquiry.",
+                        ),
+                    ]
+                )
+            # Initial output: near-duplicate titles that fail diversity
+            return PackagingGenerationOutput(
+                candidates=[
+                    CandidateProposal(
+                        id="cand-1",
+                        title="How SQLite WAL Handles Concurrency",
+                        title_strategy="DIRECT_VALUE",
+                        thumbnail_headline="CONCURRENCY",
+                        thumbnail_visual_strategy="FOCUS",
+                        subject_asset_id="ast-visual-01",
+                        click_motivation_rationale="Variant 1.",
+                    ),
+                    CandidateProposal(
+                        id="cand-2",
+                        title="How SQLite WAL Handles Concurrency Better",
+                        title_strategy="CONTRAST_MECHANISM",
+                        thumbnail_headline="CONCURRENCY",
+                        thumbnail_visual_strategy="FOCUS",
+                        subject_asset_id="ast-visual-01",
+                        click_motivation_rationale="Variant 2.",
+                    ),
+                    CandidateProposal(
+                        id="cand-3",
+                        title="How SQLite WAL Handles Concurrent Access",
+                        title_strategy="CURIOSITY_QUESTION",
+                        thumbnail_headline="CONCURRENCY",
+                        thumbnail_visual_strategy="FOCUS",
+                        subject_asset_id="ast-visual-01",
+                        click_motivation_rationale="Variant 3.",
+                    ),
+                ]
+            )
+        if schema_cls == TitleGroundingEvaluation:
+            return default_mock_grounding_evaluator(prompt)
+        raise ValueError(f"Unhandled: {schema_cls}")
+
+    backend = MockReasoningBackend(handler=mock_handler)
+    service = PackagingEngineService(
+        repository=repo,
+        thumbnail_designer=thumb_designer,
+        backend=backend,
+        output_dir=tmp_path / "output_div_dup_id",
+    )
+
+    tournament = service.run_tournament(project.id, "SQLite WAL")
+
+    assert tournament.status == PackagingTournamentStatus.CORRECTED
+    candidate_ids = [c.id for c in tournament.candidates]
+    assert candidate_ids == ["cand-1", "cand-2", "cand-3"]
+    assert len(set(candidate_ids)) == 3
+
+    for cand in tournament.candidates:
+        assert Path(cand.file_path_16_9).exists()
+        file_bytes = Path(cand.file_path_16_9).read_bytes()
+        assert hashlib.sha256(file_bytes).hexdigest() == cand.content_sha256
