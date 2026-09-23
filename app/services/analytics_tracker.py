@@ -65,7 +65,10 @@ class YouTubeAnalyticsTracker:
             chosen_source = source or AnalyticsSource.SIMULATED
         else:
             snapshot_type = "REAL"
-            chosen_source = source or AnalyticsSource.YOUTUBE_ANALYTICS_API
+            # NOTE: record_snapshot is a manual compatibility utility and defaults to LEGACY_UNVERIFIED.
+            # Authoritative YOUTUBE_ANALYTICS_API production evidence can ONLY be created by
+            # YouTubeAnalyticsIngestionService successfully parsing genuine YouTube Analytics API responses.
+            chosen_source = source or AnalyticsSource.LEGACY_UNVERIFIED
             # Do NOT invent fake youtube video ID like yt-auto-...
 
         ctr_val = max(0.0, min(100.0, float(ctr_percent))) if ctr_percent is not None else None

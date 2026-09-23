@@ -7,7 +7,7 @@ import pytest
 
 from app.db.repository import SQLiteRepository
 from app.db.schema import init_database
-from app.domain.enums import VideoLifecycleState
+from app.domain.enums import AnalyticsSource, VideoLifecycleState
 from app.domain.models import AnalyticsSnapshot, Channel, VideoProject
 from app.services.analytics_tracker import YouTubeAnalyticsTracker
 from app.services.strategy_feedback import StrategyFeedbackLoop
@@ -72,6 +72,7 @@ def test_real_analytics_does_not_invent_fake_youtube_video_id(repo):
     # Must NOT fabricate a fake id like "yt-auto-..."
     assert snapshot.youtube_video_id is None
     assert snapshot.snapshot_type == "REAL"
+    assert snapshot.source == AnalyticsSource.LEGACY_UNVERIFIED
     assert snapshot.is_simulated is False
 
 
@@ -102,7 +103,7 @@ def test_simulated_analytics_marked_and_excluded_from_strategy_feedback(repo):
     assert analysis["total_snapshots"] == 0
     assert analysis["mean_views"] == 0.0
 
-    # Now add a REAL snapshot
+    # Now add an authoritative REAL API snapshot
     real_snap = tracker.record_snapshot(
         project_id=project.id,
         views=1200,
@@ -112,6 +113,7 @@ def test_simulated_analytics_marked_and_excluded_from_strategy_feedback(repo):
         retention_at_3s_percent=55.0,
         youtube_video_id="real-yt-id-12345",
         is_simulated=False,
+        source=AnalyticsSource.YOUTUBE_ANALYTICS_API,
     )
 
     analysis_with_real = feedback.analyze_channel_performance("chan-ana-01")

@@ -43,6 +43,7 @@ from app.domain.models import (
     RetentionPoint,
     VideoProject,
 )
+from app.services.analytics_tracker import YouTubeAnalyticsTracker
 from app.services.pipeline_brain import BrainPipeline, PipelineBrain
 from app.services.strategy_feedback import StrategyFeedbackLoop
 from app.services.youtube_analytics_ingestion import (
@@ -831,3 +832,369 @@ def test_no_fake_zero_snapshot_created_post_upload(temp_repo):
     assert analysis["has_data"] is False
     assert analysis["total_snapshots"] == 0
 
+
+# ============================================================================
+# Final Trust-Boundary Closure Tests (Blockers A, B, C, D)
+# ============================================================================
+
+def test_ingest_project_analytics_propagates_auth_scope_error(temp_repo):
+    """Blocker A / Section 31: ingest_project_analytics propagates AnalyticsAuthScopeError, 0 snapshots."""
+    _setup_published_project(temp_repo, project_id="proj-auth-prop", youtube_video_id="yt-auth-001")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": {"code": 403, "message": "insufficient authentication scopes"}})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = YouTubeAnalyticsIngestionService(
+        oauth_manager=DummyOAuthManager(),
+        repository=temp_repo,
+        http_client=client,
+    )
+
+    with pytest.raises(AnalyticsAuthScopeError):
+        service.ingest_project_analytics(project_id="proj-auth-prop", video_id="yt-auth-001")
+
+    assert len(temp_repo.get_analytics_snapshots("proj-auth-prop")) == 0
+
+
+def test_ingest_project_analytics_propagates_http_500_error(temp_repo):
+    """Blocker A / Section 32: ingest_project_analytics propagates AnalyticsHttpError, 0 snapshots."""
+    _setup_published_project(temp_repo, project_id="proj-http-prop", youtube_video_id="yt-http-001")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="Internal Server Error")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = YouTubeAnalyticsIngestionService(
+        oauth_manager=DummyOAuthManager(),
+        repository=temp_repo,
+        http_client=client,
+    )
+
+    with pytest.raises(AnalyticsHttpError) as exc_info:
+        service.ingest_project_analytics(project_id="proj-http-prop", video_id="yt-http-001")
+
+    assert exc_info.value.status_code == 500
+    assert len(temp_repo.get_analytics_snapshots("proj-http-prop")) == 0
+
+
+def test_ingest_project_analytics_propagates_network_error(temp_repo):
+    """Blocker A / Section 33: ingest_project_analytics propagates AnalyticsNetworkError, 0 snapshots."""
+    _setup_published_project(temp_repo, project_id="proj-net-prop", youtube_video_id="yt-net-001")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("Connection timed out")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = YouTubeAnalyticsIngestionService(
+        oauth_manager=DummyOAuthManager(),
+        repository=temp_repo,
+        http_client=client,
+    )
+
+    with pytest.raises(AnalyticsNetworkError):
+        service.ingest_project_analytics(project_id="proj-net-prop", video_id="yt-net-001")
+
+    assert len(temp_repo.get_analytics_snapshots("proj-net-prop")) == 0
+
+
+def test_retention_http_500_fails_atomically_persisting_zero_snapshots(temp_repo):
+    """Blocker C / Section 18: Playback succeeds, retention 500 -> AnalyticsHttpError, 0 snapshots."""
+    _setup_published_project(temp_repo, project_id="proj-ret-fail", youtube_video_id="yt-ret-001")
+
+    playback_response = {
+        "kind": "youtubeAnalytics#resultTable",
+        "columnHeaders": [
+            {"name": "views", "columnType": "METRIC", "dataType": "INTEGER"},
+            {"name": "estimatedMinutesWatched", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [[1000, 300.0]],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "elapsedVideoTimeRatio" in str(request.url):
+            return httpx.Response(500, text="Retention DB Error")
+        return httpx.Response(200, json=playback_response)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = YouTubeAnalyticsIngestionService(
+        oauth_manager=DummyOAuthManager(),
+        repository=temp_repo,
+        http_client=client,
+    )
+
+    with pytest.raises(AnalyticsHttpError) as exc_info:
+        service.ingest_project_analytics(project_id="proj-ret-fail", video_id="yt-ret-001")
+
+    assert exc_info.value.status_code == 500
+    assert len(temp_repo.get_analytics_snapshots("proj-ret-fail")) == 0
+
+
+def test_retention_network_timeout_fails_atomically_persisting_zero_snapshots(temp_repo):
+    """Blocker C / Section 19: Playback succeeds, retention timeout -> AnalyticsNetworkError, 0 snapshots."""
+    _setup_published_project(temp_repo, project_id="proj-ret-timeout", youtube_video_id="yt-ret-002")
+
+    playback_response = {
+        "kind": "youtubeAnalytics#resultTable",
+        "columnHeaders": [
+            {"name": "views", "columnType": "METRIC", "dataType": "INTEGER"},
+            {"name": "estimatedMinutesWatched", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [[1000, 300.0]],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "elapsedVideoTimeRatio" in str(request.url):
+            raise httpx.ReadTimeout("Retention read timeout")
+        return httpx.Response(200, json=playback_response)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = YouTubeAnalyticsIngestionService(
+        oauth_manager=DummyOAuthManager(),
+        repository=temp_repo,
+        http_client=client,
+    )
+
+    with pytest.raises(AnalyticsNetworkError):
+        service.ingest_project_analytics(project_id="proj-ret-timeout", video_id="yt-ret-002")
+
+    assert len(temp_repo.get_analytics_snapshots("proj-ret-timeout")) == 0
+
+
+def test_retention_empty_response_persists_playback_with_empty_curve(temp_repo):
+    """Blocker C / Section 20: Playback succeeds, retention 200 rows=[] -> COLLECTED with empty curve."""
+    _setup_published_project(temp_repo, project_id="proj-ret-empty", youtube_video_id="yt-ret-003")
+
+    playback_response = {
+        "kind": "youtubeAnalytics#resultTable",
+        "columnHeaders": [
+            {"name": "views", "columnType": "METRIC", "dataType": "INTEGER"},
+            {"name": "estimatedMinutesWatched", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [[2000, 600.0]],
+    }
+    retention_empty_response = {
+        "kind": "youtubeAnalytics#resultTable",
+        "columnHeaders": [
+            {"name": "elapsedVideoTimeRatio", "columnType": "DIMENSION", "dataType": "FLOAT"},
+            {"name": "audienceWatchRatio", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [],  # Valid 200 response with no curve points yet
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "elapsedVideoTimeRatio" in str(request.url):
+            return httpx.Response(200, json=retention_empty_response)
+        return httpx.Response(200, json=playback_response)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = YouTubeAnalyticsIngestionService(
+        oauth_manager=DummyOAuthManager(),
+        repository=temp_repo,
+        http_client=client,
+    )
+
+    result = service.ingest_project_analytics(
+        project_id="proj-ret-empty",
+        video_id="yt-ret-003",
+        duration_seconds=60.0,
+    )
+
+    assert result.status == AnalyticsCollectionStatus.COLLECTED
+    assert result.snapshot is not None
+    assert result.snapshot.views == 2000
+    assert result.snapshot.watch_time_hours == 10.0
+    assert result.snapshot.retention_curve == []
+    assert result.snapshot.retention_at_3s_percent is None
+
+    snapshots = temp_repo.get_analytics_snapshots("proj-ret-empty")
+    assert len(snapshots) == 1
+    assert snapshots[0].source == AnalyticsSource.YOUTUBE_ANALYTICS_API
+
+
+def test_observed_zero_metrics_persists_as_collected(temp_repo):
+    """Blocker D / Sections 21, 22, 36: Valid API row with views=0, minutes=0.0 -> COLLECTED."""
+    _setup_published_project(temp_repo, project_id="proj-obs-zero", youtube_video_id="yt-zero-001")
+
+    playback_zero_response = {
+        "kind": "youtubeAnalytics#resultTable",
+        "columnHeaders": [
+            {"name": "views", "columnType": "METRIC", "dataType": "INTEGER"},
+            {"name": "estimatedMinutesWatched", "columnType": "METRIC", "dataType": "FLOAT"},
+            {"name": "averageViewDuration", "columnType": "METRIC", "dataType": "FLOAT"},
+            {"name": "averageViewPercentage", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [[0, 0.0, 0.0, 0.0]],  # Observed 0 views
+    }
+    retention_response = {
+        "kind": "youtubeAnalytics#resultTable",
+        "columnHeaders": [],
+        "rows": [],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "elapsedVideoTimeRatio" in str(request.url):
+            return httpx.Response(200, json=retention_response)
+        return httpx.Response(200, json=playback_zero_response)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = YouTubeAnalyticsIngestionService(
+        oauth_manager=DummyOAuthManager(),
+        repository=temp_repo,
+        http_client=client,
+    )
+
+    result = service.ingest_project_analytics(
+        project_id="proj-obs-zero",
+        video_id="yt-zero-001",
+    )
+
+    assert result.status == AnalyticsCollectionStatus.COLLECTED
+    assert result.snapshot is not None
+    assert result.snapshot.views == 0
+    assert result.snapshot.watch_time_hours == 0.0
+    assert result.snapshot.source == AnalyticsSource.YOUTUBE_ANALYTICS_API
+
+    snapshots = temp_repo.get_analytics_snapshots("proj-obs-zero")
+    assert len(snapshots) == 1
+    assert snapshots[0].views == 0
+    assert snapshots[0].source == AnalyticsSource.YOUTUBE_ANALYTICS_API
+
+
+def test_not_published_project_returns_not_published_without_api_call(temp_repo):
+    """Section 25: Unreleased project returns NOT_PUBLISHED without making API calls."""
+    channel = Channel(
+        id="chan-unpub",
+        title="Unpub",
+        handle="@Unpub",
+        niche="Tech",
+        target_audience="Devs",
+    )
+    temp_repo.save_channel(channel)
+    proj = VideoProject(
+        id="proj-unpub",
+        channel_id=channel.id,
+        title="Unreleased Draft",
+        state=VideoLifecycleState.CREATED,  # Not PUBLISHED / SCHEDULED
+    )
+    temp_repo.save_video_project(proj)
+
+    api_called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal api_called
+        api_called = True
+        return httpx.Response(200, json={})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = YouTubeAnalyticsIngestionService(
+        oauth_manager=DummyOAuthManager(),
+        repository=temp_repo,
+        http_client=client,
+    )
+
+    result = service.ingest_project_analytics("proj-unpub", video_id="yt-unpub-001")
+    assert result.status == AnalyticsCollectionStatus.NOT_PUBLISHED
+    assert api_called is False
+    assert len(temp_repo.get_analytics_snapshots("proj-unpub")) == 0
+
+
+def test_manual_tracker_defaults_to_legacy_unverified_and_excluded_from_learning(temp_repo):
+    """Blocker B / Sections 13 & 34: manual tracker non-simulated -> LEGACY_UNVERIFIED -> excluded from StrategyFeedback."""
+    project = _setup_published_project(
+        temp_repo,
+        project_id="proj-manual-01",
+        title="Manual Project",
+        channel_id="chan-manual-01",
+        youtube_video_id="yt-manual-01",
+    )
+    tracker = YouTubeAnalyticsTracker(temp_repo)
+
+    snapshot = tracker.record_snapshot(
+        project_id=project.id,
+        views=1000,
+        watch_time_hours=20.0,
+        ctr_percent=8.0,
+        is_simulated=False,
+    )
+
+    assert snapshot.source == AnalyticsSource.LEGACY_UNVERIFIED
+
+    feedback = StrategyFeedbackLoop(temp_repo)
+    analysis = feedback.analyze_channel_performance("chan-manual-01")
+    assert analysis["has_data"] is False
+    assert analysis["total_snapshots"] == 0
+
+
+def test_simulated_tracker_excluded_from_learning(temp_repo):
+    """Blocker B / Section 14: tracker is_simulated=True -> SIMULATED -> excluded from StrategyFeedback."""
+    project = _setup_published_project(
+        temp_repo,
+        project_id="proj-sim-01",
+        title="Sim Project",
+        channel_id="chan-sim-01",
+    )
+    tracker = YouTubeAnalyticsTracker(temp_repo)
+
+    snapshot = tracker.record_snapshot(
+        project_id=project.id,
+        views=50000,
+        watch_time_hours=1500.0,
+        is_simulated=True,
+    )
+
+    assert snapshot.source == AnalyticsSource.SIMULATED
+    assert snapshot.snapshot_type == "SIMULATED"
+
+    feedback = StrategyFeedbackLoop(temp_repo)
+    analysis = feedback.analyze_channel_performance("chan-sim-01")
+    assert analysis["has_data"] is False
+    assert analysis["total_snapshots"] == 0
+
+
+def test_trusted_ingestion_service_enters_learning(temp_repo):
+    """Section 35: Authoritative ingestion service snapshot enters StrategyFeedback."""
+    project = _setup_published_project(
+        temp_repo,
+        project_id="proj-trusted-01",
+        title="Trusted Architecture",
+        channel_id="chan-trusted-01",
+        youtube_video_id="yt-trusted-001",
+    )
+
+    playback_response = {
+        "kind": "youtubeAnalytics#resultTable",
+        "columnHeaders": [
+            {"name": "views", "columnType": "METRIC", "dataType": "INTEGER"},
+            {"name": "estimatedMinutesWatched", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [[3000, 900.0]],
+    }
+    retention_response = {
+        "kind": "youtubeAnalytics#resultTable",
+        "columnHeaders": [],
+        "rows": [],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "elapsedVideoTimeRatio" in str(request.url):
+            return httpx.Response(200, json=retention_response)
+        return httpx.Response(200, json=playback_response)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = YouTubeAnalyticsIngestionService(
+        oauth_manager=DummyOAuthManager(),
+        repository=temp_repo,
+        http_client=client,
+    )
+
+    res = service.ingest_project_analytics("proj-trusted-01", video_id="yt-trusted-001")
+    assert res.status == AnalyticsCollectionStatus.COLLECTED
+    assert res.snapshot.source == AnalyticsSource.YOUTUBE_ANALYTICS_API
+
+    feedback = StrategyFeedbackLoop(temp_repo)
+    analysis = feedback.analyze_channel_performance("chan-trusted-01")
+    assert analysis["has_data"] is True
+    assert analysis["total_snapshots"] == 1
+    assert analysis["mean_views"] == 3000.0
+    assert analysis["mean_watch_time_hours"] == 15.0

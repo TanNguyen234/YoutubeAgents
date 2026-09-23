@@ -12,7 +12,12 @@ from uuid import uuid4
 import httpx
 
 from app.db.repository import Repository, SQLiteRepository
-from app.domain.enums import AnalyticsCollectionStatus, AnalyticsSource, PublicationStatus
+from app.domain.enums import (
+    AnalyticsCollectionStatus,
+    AnalyticsSource,
+    PublicationStatus,
+    VideoLifecycleState,
+)
 from app.domain.models import AnalyticsCollectionResult, AnalyticsSnapshot, RetentionPoint
 from app.services.youtube_oauth import (
     YouTubeOAuthError,
@@ -249,6 +254,17 @@ class YouTubeAnalyticsIngestionService:
             elif hasattr(self.repository, "get_video_project"):
                 project = self.repository.get_video_project(project_id)
 
+        if project and getattr(project, "state", None) not in (
+            VideoLifecycleState.PUBLISHED,
+            VideoLifecycleState.SCHEDULED,
+        ):
+            return AnalyticsCollectionResult(
+                project_id=project_id,
+                video_id=video_id,
+                status=AnalyticsCollectionStatus.NOT_PUBLISHED,
+                error_message=f"Project '{project_id}' is in {getattr(project.state, 'value', project.state)} state and not published yet.",
+            )
+
         if not video_id:
             if project and getattr(project, "youtube_video_id", None):
                 video_id = project.youtube_video_id
@@ -290,23 +306,8 @@ class YouTubeAnalyticsIngestionService:
         if start_date > end_date:
             start_date = end_date
 
-        # 3. Query playback metrics
-        try:
-            playback_data = self.query_playback_metrics(video_id, start_date, end_date)
-        except AnalyticsAuthScopeError as e:
-            return AnalyticsCollectionResult(
-                project_id=project_id,
-                video_id=video_id,
-                status=AnalyticsCollectionStatus.NO_DATA_YET,
-                error_message=f"Authentication scope error: {e}",
-            )
-        except AnalyticsHttpError as e:
-            return AnalyticsCollectionResult(
-                project_id=project_id,
-                video_id=video_id,
-                status=AnalyticsCollectionStatus.NO_DATA_YET,
-                error_message=f"YouTube Analytics HTTP error ({e.status_code}): {e}",
-            )
+        # 3. Query playback metrics (exceptions propagate: AnalyticsAuthScopeError, AnalyticsHttpError, AnalyticsNetworkError)
+        playback_data = self.query_playback_metrics(video_id, start_date, end_date)
 
         if not playback_data:
             return AnalyticsCollectionResult(
@@ -325,21 +326,8 @@ class YouTubeAnalyticsIngestionService:
         subs_gained = int(playback_data.get("subscribersGained", 0))
         likes = int(playback_data.get("likes", 0))
 
-        # If views is 0 and no watch time, data is not ready yet
-        if views == 0 and est_minutes == 0.0:
-            return AnalyticsCollectionResult(
-                project_id=project_id,
-                video_id=video_id,
-                status=AnalyticsCollectionStatus.NO_DATA_YET,
-                error_message=f"Video {video_id} returned 0 views and 0 watch time in window {start_date} to {end_date}.",
-            )
-
-        # 4. Query retention curve
-        retention_curve: List[RetentionPoint] = []
-        try:
-            retention_curve = self.query_retention_curve(video_id, start_date, end_date)
-        except Exception as e:
-            logger.warning(f"Could not fetch retention curve for video {video_id}: {e}")
+        # 4. Query retention curve (atomic failure: exceptions propagate, no partial snapshot persisted)
+        retention_curve: List[RetentionPoint] = self.query_retention_curve(video_id, start_date, end_date)
 
         # 5. Approximate 3s retention
         retention_at_3s = None

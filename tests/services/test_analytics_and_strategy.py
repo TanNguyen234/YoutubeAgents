@@ -7,7 +7,7 @@ import pytest
 
 from app.db.repository import SQLiteRepository
 from app.db.schema import init_database
-from app.domain.enums import VideoLifecycleState
+from app.domain.enums import AnalyticsSource, VideoLifecycleState
 from app.domain.models import AnalyticsSnapshot, Channel, VideoProject
 from app.services.analytics_tracker import AnalyticsTrackerError, YouTubeAnalyticsTracker
 from app.services.strategy_feedback import StrategyFeedbackLoop
@@ -75,10 +75,12 @@ def test_record_analytics_snapshot_success(repo):
     assert snapshot.views == 1500
     assert snapshot.ctr_percent == 8.2
     assert snapshot.youtube_video_id == "yt-wal-123"
+    assert snapshot.source == AnalyticsSource.LEGACY_UNVERIFIED
 
     history = tracker.get_project_snapshots(project.id)
     assert len(history) == 1
     assert history[0].views == 1500
+    assert history[0].source == AnalyticsSource.LEGACY_UNVERIFIED
 
 
 def test_record_analytics_snapshot_fails_if_unreleased(repo):
@@ -114,24 +116,36 @@ def test_strategy_feedback_analysis_and_scoring(repo):
     p1 = _setup_published_project(repo, "proj-hit-01", "SQLite WAL Performance Tuning")
     p2 = _setup_published_project(repo, "proj-low-01", "Basic SQL Syntax Overview")
 
-    tracker = YouTubeAnalyticsTracker(repo)
+    # Authoritative API observations (source=YOUTUBE_ANALYTICS_API)
     # P1 is high performer
-    tracker.record_snapshot(
-        project_id=p1.id,
-        views=5000,
-        watch_time_hours=150.0,
-        ctr_percent=9.5,
-        average_view_duration_seconds=120.0,
-        retention_at_3s_percent=70.0,
+    repo.save_analytics_snapshot(
+        AnalyticsSnapshot(
+            id="snap-strat-p1",
+            project_id=p1.id,
+            source=AnalyticsSource.YOUTUBE_ANALYTICS_API,
+            report_start_date="2026-09-01",
+            report_end_date="2026-09-20",
+            views=5000,
+            watch_time_hours=150.0,
+            ctr_percent=9.5,
+            average_view_duration_seconds=120.0,
+            retention_at_3s_percent=70.0,
+        )
     )
     # P2 is lower performer
-    tracker.record_snapshot(
-        project_id=p2.id,
-        views=800,
-        watch_time_hours=18.0,
-        ctr_percent=3.2,
-        average_view_duration_seconds=45.0,
-        retention_at_3s_percent=42.0,
+    repo.save_analytics_snapshot(
+        AnalyticsSnapshot(
+            id="snap-strat-p2",
+            project_id=p2.id,
+            source=AnalyticsSource.YOUTUBE_ANALYTICS_API,
+            report_start_date="2026-09-01",
+            report_end_date="2026-09-20",
+            views=800,
+            watch_time_hours=18.0,
+            ctr_percent=3.2,
+            average_view_duration_seconds=45.0,
+            retention_at_3s_percent=42.0,
+        )
     )
 
     feedback = StrategyFeedbackLoop(repo)
