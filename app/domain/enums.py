@@ -214,4 +214,17 @@ class PsychologicalMechanism(str, Enum):
     CALLBACK = "CALLBACK"
 
 
+class TitleTruthStatus(str, Enum):
+    """Grounding validation verdict for candidate title factual propositions."""
 
+    SUPPORTED = "SUPPORTED"
+    NON_FACTUAL_FRAMING = "NON_FACTUAL_FRAMING"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
+class PackagingTournamentStatus(str, Enum):
+    """Execution status of the packaging tournament."""
+
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CORRECTED = "CORRECTED"

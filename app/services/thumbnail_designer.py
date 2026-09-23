@@ -78,6 +78,42 @@ class ThumbnailDesignerService:
         self.repository.save_thumbnail_package(pkg)
         return pkg
 
+    def render_candidate_thumbnail(
+        self,
+        project_id: str,
+        candidate_id: str,
+        headline_text: Optional[str] = None,
+        background_image_path: Optional[str] = None,
+        series_badge: Optional[str] = None,
+    ) -> Tuple[Path, Path, str]:
+        """Render high-contrast 16:9 and 9:16 thumbnails for a tournament candidate and return paths + sha256."""
+        clean_headline = (headline_text or "").strip().upper()
+
+        path_16_9 = self.output_dir / f"thumb_{project_id}_{candidate_id}_16_9.jpg"
+        self._render_single_thumbnail(
+            target_size=(1280, 720),
+            headline=clean_headline,
+            series_badge=series_badge,
+            bg_path=background_image_path,
+            output_path=path_16_9,
+            is_vertical=False,
+        )
+
+        path_9_16 = self.output_dir / f"thumb_{project_id}_{candidate_id}_9_16.jpg"
+        self._render_single_thumbnail(
+            target_size=(1080, 1920),
+            headline=clean_headline,
+            series_badge=series_badge,
+            bg_path=background_image_path,
+            output_path=path_9_16,
+            is_vertical=True,
+        )
+
+        with open(path_16_9, "rb") as f:
+            sha256 = hashlib.sha256(f.read()).hexdigest()
+
+        return path_16_9, path_9_16, sha256
+
     def _render_single_thumbnail(
         self,
         target_size: Tuple[int, int],
@@ -109,59 +145,67 @@ class ThumbnailDesignerService:
         overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw_ov = ImageDraw.Draw(overlay)
 
-        # 3. Typography setup
-        draw = ImageDraw.Draw(base)
-        font_size = 72 if is_vertical else 64
-        try:
-            # Try system font, fallback to default
-            font = ImageFont.truetype("arial.ttf", font_size)
-            badge_font = ImageFont.truetype("arial.ttf", 32)
-        except Exception:
-            font = ImageFont.load_default()
-            badge_font = ImageFont.load_default()
+        # 3. Typography setup (if headline is present)
+        if headline:
+            draw = ImageDraw.Draw(base)
+            font_size = 72 if is_vertical else 64
+            try:
+                # Try system font, fallback to default
+                font = ImageFont.truetype("arial.ttf", font_size)
+            except Exception:
+                font = ImageFont.load_default()
 
-        # Calculate text bounding box
-        bbox = draw.textbbox((0, 0), headline, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
+            # Calculate text bounding box
+            bbox = draw.textbbox((0, 0), headline, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
 
-        # Strategic positioning:
-        # Avoid bottom-right 25% width/height (YouTube duration badge safe zone)
-        # Position in upper-middle (vertical) or middle-left (landscape)
-        if is_vertical:
-            text_x = (width - text_w) // 2
-            text_y = int(height * 0.35)
+            # Strategic positioning:
+            # Avoid bottom-right 25% width/height (YouTube duration badge safe zone)
+            # Position in upper-middle (vertical) or middle-left (landscape)
+            if is_vertical:
+                text_x = (width - text_w) // 2
+                text_y = int(height * 0.35)
+            else:
+                text_x = int(width * 0.1)
+                text_y = (height - text_h) // 2
+
+            # Draw dark high-contrast pill banner behind headline
+            pill_pad_x = 30
+            pill_pad_y = 20
+            pill_rect = [
+                text_x - pill_pad_x,
+                text_y - pill_pad_y,
+                text_x + text_w + pill_pad_x,
+                text_y + text_h + pill_pad_y,
+            ]
+            draw_ov.rectangle(pill_rect, fill=(0, 0, 0, 200))
+
+            # Composite overlay
+            base = Image.alpha_composite(base.convert("RGBA"), overlay).convert("RGB")
+            draw = ImageDraw.Draw(base)
+
+            # Draw headline with bold white text and black stroke
+            draw.text(
+                (text_x, text_y),
+                headline,
+                fill=(255, 255, 255),
+                font=font,
+                stroke_width=4,
+                stroke_fill=(0, 0, 0),
+            )
         else:
-            text_x = int(width * 0.1)
-            text_y = (height - text_h) // 2
-
-        # Draw dark high-contrast pill banner behind headline
-        pill_pad_x = 30
-        pill_pad_y = 20
-        pill_rect = [
-            text_x - pill_pad_x,
-            text_y - pill_pad_y,
-            text_x + text_w + pill_pad_x,
-            text_y + text_h + pill_pad_y,
-        ]
-        draw_ov.rectangle(pill_rect, fill=(0, 0, 0, 200))
-
-        # Composite overlay
-        base = Image.alpha_composite(base.convert("RGBA"), overlay).convert("RGB")
-        draw = ImageDraw.Draw(base)
-
-        # Draw headline with bold white text and black stroke
-        draw.text(
-            (text_x, text_y),
-            headline,
-            fill=(255, 255, 255),
-            font=font,
-            stroke_width=4,
-            stroke_fill=(0, 0, 0),
-        )
+            # Composite minimal overlay if no headline
+            base = Image.alpha_composite(base.convert("RGBA"), overlay).convert("RGB")
+            draw = ImageDraw.Draw(base)
 
         # 4. Draw optional Series Badge (top-left safe zone)
         if series_badge:
+            draw = ImageDraw.Draw(base)
+            try:
+                badge_font = ImageFont.truetype("arial.ttf", 32)
+            except Exception:
+                badge_font = ImageFont.load_default()
             badge_text = series_badge.upper()
             b_bbox = draw.textbbox((0, 0), badge_text, font=badge_font)
             bw = b_bbox[2] - b_bbox[0]
@@ -176,6 +220,7 @@ class ThumbnailDesignerService:
 
         # Save to disk
         base.save(output_path, "JPEG", quality=92)
+
 
     def _crop_to_fill(self, img: Image.Image, target_w: int, target_h: int) -> Image.Image:
         """Crop and scale image to fill target dimensions without aspect distortion."""

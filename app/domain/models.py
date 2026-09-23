@@ -12,6 +12,7 @@ from app.domain.enums import (
     EditorialSlotStatus,
     ExperimentStatus,
     HookAngle,
+    PackagingTournamentStatus,
     PlatformFormat,
     PrimaryVideoGoal,
     PrivacyStatus,
@@ -19,6 +20,7 @@ from app.domain.enums import (
     QualityStatus,
     RetentionCueType,
     ReviewAction,
+    TitleTruthStatus,
     TitleVariantType,
     TonePreset,
     VideoLifecycleState,
@@ -729,3 +731,60 @@ class QuotaUsageRecord(BaseModel):
     consumed_date: str = Field(description="Date string YYYY-MM-DD in America/Los_Angeles (PT) time")
     project_id: Optional[str] = Field(default=None, description="Associated project if applicable")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class PackagingContext(BaseModel):
+    """Canonical factual context for packaging generation and truth evaluation."""
+
+    project_id: str = Field(description="Associated video project ID")
+    channel_id: str = Field(description="Associated channel ID")
+    primary_keyword: str = Field(description="Primary search keyword or topic")
+    target_audience: str = Field(description="Target audience persona")
+    video_topic: str = Field(description="Core video topic title")
+    core_question: Optional[str] = Field(default=None, description="Core inquiry addressed in video")
+    promised_payoff: Optional[str] = Field(default=None, description="Delivered retention payoff or resolution")
+    hook: Optional[str] = Field(default=None, description="Opening script hook")
+    summary: str = Field(description="Comprehensive research/script summary")
+    verified_claim_ids: List[str] = Field(default_factory=list, description="IDs of fact-checked claims")
+    verified_claims: List[str] = Field(default_factory=list, description="Text of verified claims")
+    visual_asset_ids: List[str] = Field(default_factory=list, description="IDs of available project visual assets")
+    content_format: str = Field(default="EXPLAINER", description="Content format archetype")
+    platform_format: str = Field(default="SHORTS_9_16", description="Platform format (SHORTS_9_16 or LONG_FORM_16_9)")
+    series_context: Optional[Dict[str, Any]] = Field(default=None, description="Episodic or series continuity metadata")
+    opportunity_angle: Optional[str] = Field(default=None, description="Market opportunity angle if present")
+
+
+class PackagingCandidate(BaseModel):
+    """A distinct title + thumbnail packaging candidate evaluated in tournament."""
+
+    id: str = Field(description="Candidate identifier (e.g. cand-1, cand-2, cand-3)")
+    title: str = Field(description="Candidate video title (must be <= 100 chars)")
+    title_strategy: str = Field(description="Strategic role/angle (e.g. DIRECT_VALUE, CONTRAST_MECHANISM, CURIOSITY_QUESTION)")
+    thumbnail_headline: Optional[str] = Field(default=None, description="Punchy thumbnail overlay text (0-4 words)")
+    thumbnail_visual_strategy: str = Field(description="Visual anchor strategy (e.g. architecture diagram, UI screenshot, code result)")
+    subject_asset_id: Optional[str] = Field(default=None, description="Project asset ID used as primary visual anchor")
+    supporting_asset_ids: List[str] = Field(default_factory=list, description="Supporting project asset IDs")
+    thumbnail_package_id: Optional[str] = Field(default=None, description="Linked thumbnail package ID")
+    file_path_16_9: Optional[str] = Field(default=None, description="Path to rendered 16:9 thumbnail")
+    file_path_9_16: Optional[str] = Field(default=None, description="Path to rendered 9:16 thumbnail")
+    content_sha256: Optional[str] = Field(default=None, description="SHA-256 hash of primary rendered thumbnail")
+    truth_status: TitleTruthStatus = Field(default=TitleTruthStatus.SUPPORTED, description="Factual grounding verdict")
+    passed_gates: bool = Field(default=True, description="Whether candidate passed all hard constraints and truth gates")
+    rejection_reason: Optional[str] = Field(default=None, description="Diagnostic explanation if rejected by hard gate")
+    quality_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Offline quality heuristic score (0.0 to 1.0)")
+    score_breakdown: Dict[str, float] = Field(default_factory=dict, description="Component scores (promise, clarity, complementarity, etc.)")
+    rationale: str = Field(default="", description="Click motivation and packaging rationale")
+
+
+class PackagingTournament(BaseModel):
+    """Persisted record of offline title + thumbnail packaging tournament."""
+
+    id: str = Field(description="Unique tournament identifier (e.g. trn-001)")
+    project_id: str = Field(description="Associated video project ID")
+    candidates: List[PackagingCandidate] = Field(description="Evaluated packaging candidates (exactly 3)")
+    selected_candidate_id: Optional[str] = Field(default=None, description="ID of winning candidate")
+    selection_reason: str = Field(description="Deterministic explanation of winner selection")
+    native_ab_eligible: bool = Field(default=False, description="True for long-form eligible for YouTube Studio A/B; False for Shorts")
+    scoring_version: str = Field(default="v1.0", description="Heuristic scoring algorithm version")
+    status: PackagingTournamentStatus = Field(default=PackagingTournamentStatus.COMPLETED)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
