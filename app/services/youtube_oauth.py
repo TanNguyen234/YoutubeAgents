@@ -23,6 +23,7 @@ DEFAULT_TOKEN_PATHS = [
 
 YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+YOUTUBE_ANALYTICS_READONLY_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
@@ -89,7 +90,7 @@ class YouTubeOAuthManager:
             "client_id": secrets["client_id"],
             "redirect_uri": redirect_uri,
             "response_type": "code",
-            "scope": f"{YOUTUBE_UPLOAD_SCOPE} {YOUTUBE_READONLY_SCOPE}",
+            "scope": f"{YOUTUBE_UPLOAD_SCOPE} {YOUTUBE_READONLY_SCOPE} {YOUTUBE_ANALYTICS_READONLY_SCOPE}",
             "access_type": "offline",
             "prompt": "consent",
         }

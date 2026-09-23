@@ -26,7 +26,7 @@ def main():
         print("\n[!] 'client_secrets.json' was NOT found in data/credentials/ or root.")
         print("\nTo enable REAL live uploads to your YouTube channel:")
         print("1. Open Google Cloud Console: https://console.cloud.google.com/")
-        print("2. Enable 'YouTube Data API v3'.")
+        print("2. Enable BOTH 'YouTube Data API v3' AND 'YouTube Analytics API'.")
         print("3. Go to 'APIs & Services' > 'Credentials' > 'Create Credentials' > 'OAuth Client ID'.")
         print("   - Application Type: Desktop app (or Web Application with redirect: http://localhost:8080/)")
         print("4. Download the JSON file and save it as:")
@@ -40,8 +40,8 @@ def main():
         print("[+] Existing token.json found. Testing refresh / validity...")
         try:
             token = manager.get_access_token()
-            print(f"[SUCCESS] Token is valid and ready for live YouTube uploads! (prefix: {token[:12]}...)")
-            print("You are ready to upload videos with: python scripts/run_real_full_pipeline.py")
+            print(f"[SUCCESS] Token is valid and ready for live YouTube uploads & analytics! (prefix: {token[:12]}...)")
+            print("You are ready to upload videos and ingest analytics.")
             return
         except Exception as e:
             print(f"[!] Existing token expired or invalid ({e}). Starting fresh login...")
