@@ -78,7 +78,7 @@ def test_fresh_database_creates_v6_directly(tmp_path: Path):
     init_database(db_path)
 
     conn = sqlite3.connect(db_path)
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 6
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == SCHEMA_VERSION
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()}
     assert "opportunity_portfolios" in tables
     assert "market_signal_snapshots" in tables
@@ -129,9 +129,9 @@ def test_v5_to_v6_migration_preserves_data(tmp_path: Path):
     # Step 2: Migrate to v6
     migrate_database(db_path)
 
-    # Step 3: Verify user_version is 6 and existing data is preserved
+    # Step 3: Verify user_version is SCHEMA_VERSION and existing data is preserved
     conn = sqlite3.connect(db_path)
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 6
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == SCHEMA_VERSION
 
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()}
     assert "opportunity_portfolios" in tables
@@ -154,5 +154,5 @@ def test_v6_migration_is_idempotent(tmp_path: Path):
     migrate_database(db_path)
 
     conn = sqlite3.connect(db_path)
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 6
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == SCHEMA_VERSION
     conn.close()
