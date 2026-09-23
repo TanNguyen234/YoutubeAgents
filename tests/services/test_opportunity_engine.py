@@ -16,7 +16,7 @@ import pytest
 from app.core.backend import ReasoningBackend
 from app.db.repository import SQLiteRepository
 from app.db.schema import init_database
-from app.domain.enums import VideoLifecycleState
+from app.domain.enums import AnalyticsSource, VideoLifecycleState
 from app.domain.models import (
     AnalyticsSnapshot,
     Channel,
@@ -488,6 +488,7 @@ def test_f_simulated_analytics_excluded(test_repo, channel):
     snap_real = AnalyticsSnapshot(
         id="snap-real-01",
         project_id=p_real.id,
+        source=AnalyticsSource.YOUTUBE_ANALYTICS_API,
         snapshot_type="REAL",
         is_simulated=False,
         views=25000,

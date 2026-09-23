@@ -612,12 +612,12 @@ class RetentionPoint(BaseModel):
 
 
 class AnalyticsSnapshot(BaseModel):
-    """Performance metrics captured from YouTube Analytics API."""
+    """Performance metrics snapshot with explicit source provenance."""
 
     id: str = Field(default_factory=lambda: f"snap-{uuid4().hex[:8]}", description="Unique snapshot ID")
     project_id: str = Field(description="Associated project ID")
     youtube_video_id: Optional[str] = Field(default=None, description="YouTube video ID")
-    source: AnalyticsSource = Field(default=AnalyticsSource.YOUTUBE_ANALYTICS_API, description="Data source provenance")
+    source: AnalyticsSource = Field(default=AnalyticsSource.LEGACY_UNVERIFIED, description="Data source provenance")
     snapshot_type: str = Field(default="REAL", description="REAL or SIMULATED")
     is_simulated: bool = Field(default=False, description="Whether this snapshot is simulated")
     report_start_date: Optional[str] = Field(default=None, description="Report start date (YYYY-MM-DD)")
@@ -635,8 +635,12 @@ class AnalyticsSnapshot(BaseModel):
     @model_validator(mode="after")
     def _sync_simulation_source(self) -> "AnalyticsSnapshot":
         if self.is_simulated or self.snapshot_type == "SIMULATED":
-            if self.source == AnalyticsSource.YOUTUBE_ANALYTICS_API:
-                self.source = AnalyticsSource.SIMULATED
+            self.source = AnalyticsSource.SIMULATED
+            self.snapshot_type = "SIMULATED"
+            self.is_simulated = True
+        elif self.source == AnalyticsSource.SIMULATED:
+            self.snapshot_type = "SIMULATED"
+            self.is_simulated = True
         return self
 
 

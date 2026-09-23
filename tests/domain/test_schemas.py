@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.domain.enums import (
+    AnalyticsSource,
     AssetType,
     ExperimentStatus,
     PlatformFormat,
@@ -214,4 +215,16 @@ def test_analytics_and_experiment_models() -> None:
         status=ExperimentStatus.RUNNING,
     )
     assert analytics.views == 15420
+    assert analytics.source == AnalyticsSource.LEGACY_UNVERIFIED
     assert experiment.status == ExperimentStatus.RUNNING
+
+
+def test_analytics_snapshot_defaults_to_legacy_unverified() -> None:
+    """Verify bare AnalyticsSnapshot defaults to LEGACY_UNVERIFIED provenance (Section 10)."""
+    snapshot = AnalyticsSnapshot(
+        project_id="proj-default-source",
+        views=123,
+    )
+    assert snapshot.source == AnalyticsSource.LEGACY_UNVERIFIED
+    assert snapshot.snapshot_type == "REAL"
+    assert snapshot.is_simulated is False

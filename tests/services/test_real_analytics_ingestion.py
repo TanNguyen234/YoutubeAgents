@@ -1198,3 +1198,77 @@ def test_trusted_ingestion_service_enters_learning(temp_repo):
     assert analysis["total_snapshots"] == 1
     assert analysis["mean_views"] == 3000.0
     assert analysis["mean_watch_time_hours"] == 15.0
+
+
+def test_bare_model_snapshot_defaults_to_unverified_and_excluded_from_strategy_feedback(temp_repo):
+    """Section 11: Direct AnalyticsSnapshot construction without source defaults to LEGACY_UNVERIFIED and is excluded from learning."""
+    project = _setup_published_project(
+        temp_repo,
+        project_id="proj-bare-unverified-01",
+        title="Unverified Model Construction",
+        channel_id="chan-unverified-01",
+    )
+    snapshot = AnalyticsSnapshot(
+        id="snap-unverified",
+        project_id=project.id,
+        views=5000,
+        watch_time_hours=100.0,
+    )
+    # Mandatory: Omit source= completely
+    assert snapshot.source == AnalyticsSource.LEGACY_UNVERIFIED
+
+    temp_repo.save_analytics_snapshot(snapshot)
+
+    analysis = StrategyFeedbackLoop(temp_repo).analyze_channel_performance("chan-unverified-01")
+    assert analysis["has_data"] is False
+    assert analysis["total_snapshots"] == 0
+
+
+def test_explicit_trusted_analytics_api_snapshot_enters_strategy_feedback(temp_repo):
+    """Section 12: Explicit source=YOUTUBE_ANALYTICS_API allows trusted snapshots into strategy feedback."""
+    project = _setup_published_project(
+        temp_repo,
+        project_id="proj-explicit-api-01",
+        title="Explicit API Construction",
+        channel_id="chan-explicit-01",
+    )
+    snapshot = AnalyticsSnapshot(
+        id="snap-explicit-api",
+        project_id=project.id,
+        views=4000,
+        watch_time_hours=80.0,
+        source=AnalyticsSource.YOUTUBE_ANALYTICS_API,
+    )
+    assert snapshot.source == AnalyticsSource.YOUTUBE_ANALYTICS_API
+    temp_repo.save_analytics_snapshot(snapshot)
+
+    analysis = StrategyFeedbackLoop(temp_repo).analyze_channel_performance("chan-explicit-01")
+    assert analysis["has_data"] is True
+    assert analysis["total_snapshots"] == 1
+    assert analysis["mean_views"] == 4000.0
+
+
+def test_direct_model_simulation_syncs_source_and_excluded_from_feedback(temp_repo):
+    """Section 14: Constructing model with is_simulated=True syncs source=SIMULATED and excludes from strategy feedback."""
+    project = _setup_published_project(
+        temp_repo,
+        project_id="proj-sim-sync-01",
+        title="Simulation Sync",
+        channel_id="chan-sim-sync-01",
+    )
+    snapshot = AnalyticsSnapshot(
+        id="snap-sim-direct",
+        project_id=project.id,
+        views=15000,
+        watch_time_hours=300.0,
+        is_simulated=True,
+    )
+    assert snapshot.source == AnalyticsSource.SIMULATED
+    assert snapshot.snapshot_type == "SIMULATED"
+    assert snapshot.is_simulated is True
+
+    temp_repo.save_analytics_snapshot(snapshot)
+
+    analysis = StrategyFeedbackLoop(temp_repo).analyze_channel_performance("chan-sim-sync-01")
+    assert analysis["has_data"] is False
+    assert analysis["total_snapshots"] == 0
