@@ -3,9 +3,9 @@
 from pathlib import Path
 import sqlite3
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
-SCHEMA_V7_SQL = """
+SCHEMA_V8_SQL = """
 
 PRAGMA foreign_keys = ON;
 
@@ -156,16 +156,25 @@ CREATE TABLE IF NOT EXISTS analytics_snapshots (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
     youtube_video_id TEXT,
+    source TEXT NOT NULL DEFAULT 'LEGACY_UNVERIFIED',
     snapshot_type TEXT NOT NULL DEFAULT 'REAL',
     is_simulated INTEGER NOT NULL DEFAULT 0,
+    report_start_date TEXT,
+    report_end_date TEXT,
     views INTEGER NOT NULL DEFAULT 0,
     watch_time_hours REAL NOT NULL DEFAULT 0.0,
-    ctr_percent REAL NOT NULL DEFAULT 0.0,
     average_view_duration_seconds REAL NOT NULL DEFAULT 0.0,
+    average_view_percentage REAL,
+    impressions INTEGER,
+    ctr_percent REAL,
     retention_at_3s_percent REAL,
+    retention_curve_json TEXT,
     captured_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_analytics_snapshots_project ON analytics_snapshots(project_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_analytics_snapshots_window ON analytics_snapshots(project_id, source, report_end_date) WHERE report_end_date IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS experiments (
     id TEXT PRIMARY KEY,
@@ -343,7 +352,47 @@ CREATE TABLE IF NOT EXISTS packaging_tournaments (
 CREATE INDEX IF NOT EXISTS idx_packaging_tournaments_project ON packaging_tournaments(project_id);
 """
 
-# Backwards compatibility aliases
+# Backwards compatibility v7 schema (prior to v8 analytics_snapshots evolution)
+SCHEMA_V7_SQL = SCHEMA_V8_SQL.replace(
+    """CREATE TABLE IF NOT EXISTS analytics_snapshots (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    youtube_video_id TEXT,
+    source TEXT NOT NULL DEFAULT 'LEGACY_UNVERIFIED',
+    snapshot_type TEXT NOT NULL DEFAULT 'REAL',
+    is_simulated INTEGER NOT NULL DEFAULT 0,
+    report_start_date TEXT,
+    report_end_date TEXT,
+    views INTEGER NOT NULL DEFAULT 0,
+    watch_time_hours REAL NOT NULL DEFAULT 0.0,
+    average_view_duration_seconds REAL NOT NULL DEFAULT 0.0,
+    average_view_percentage REAL,
+    impressions INTEGER,
+    ctr_percent REAL,
+    retention_at_3s_percent REAL,
+    retention_curve_json TEXT,
+    captured_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_analytics_snapshots_project ON analytics_snapshots(project_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_analytics_snapshots_window ON analytics_snapshots(project_id, source, report_end_date) WHERE report_end_date IS NOT NULL;""",
+    """CREATE TABLE IF NOT EXISTS analytics_snapshots (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    youtube_video_id TEXT,
+    snapshot_type TEXT NOT NULL DEFAULT 'REAL',
+    is_simulated INTEGER NOT NULL DEFAULT 0,
+    views INTEGER NOT NULL DEFAULT 0,
+    watch_time_hours REAL NOT NULL DEFAULT 0.0,
+    ctr_percent REAL NOT NULL DEFAULT 0.0,
+    average_view_duration_seconds REAL NOT NULL DEFAULT 0.0,
+    retention_at_3s_percent REAL,
+    captured_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+);"""
+)
+
 SCHEMA_V6_SQL = SCHEMA_V7_SQL
 SCHEMA_V5_SQL = SCHEMA_V7_SQL
 SCHEMA_V4_SQL = SCHEMA_V7_SQL
@@ -353,13 +402,17 @@ SCHEMA_V2_SQL = SCHEMA_V7_SQL
 
 
 def migrate_database(db_path: Path) -> None:
-    """Migrate SQLite database to the current schema version (v4).
+    """Migrate SQLite database to the current schema version (v8).
 
     Handles:
-    - Truly empty database -> direct v4 initialization.
+    - Truly empty database -> direct v8 initialization.
     - Legacy Phase-3 database (user_version == 0 with tables or user_version == 1) -> migrate to v2 structure then v3 then v4.
     - Pure Phase-3.7 v2 or Phase-4.1 pseudo-v2 database (user_version == 2) -> shape-aware migration to v3 then v4.
     - Phase-4 v3 database (user_version == 3) -> v4 migration (contains_synthetic_media).
+    - Phase-5 v4 database (user_version == 4) -> v5 migration (market_signal_snapshots).
+    - Phase-6 v5 database (user_version == 5) -> v6 migration (opportunity_portfolios).
+    - Phase-7 v6 database (user_version == 6) -> v7 migration (packaging_tournaments).
+    - Phase-8 v7 database (user_version == 7) -> v8 migration (analytics_snapshots evolution: nullable CTR, retention curve, source).
     """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -378,8 +431,8 @@ def migrate_database(db_path: Path) -> None:
         user_table_count = cursor.fetchone()[0]
 
         if current_version == 0 and user_table_count == 0:
-            # Truly empty/new database: apply full v7 schema directly
-            conn.executescript(SCHEMA_V7_SQL)
+            # Truly empty/new database: apply full v8 schema directly
+            conn.executescript(SCHEMA_V8_SQL)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()
             return
@@ -502,27 +555,168 @@ def migrate_database(db_path: Path) -> None:
 
         # 4. Migrate v4 to v5: market_signal_snapshots
         if current_version < 5:
-            conn.executescript(SCHEMA_V6_SQL)
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS market_signal_snapshots (
+                    id TEXT PRIMARY KEY,
+                    batch_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    query TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'YOUTUBE_DATA_API_V3',
+                    collected_at TEXT NOT NULL,
+                    sample_video_ids_json TEXT NOT NULL,
+                    sample_size INTEGER NOT NULL DEFAULT 0,
+                    recent_video_count_7d INTEGER NOT NULL DEFAULT 0,
+                    recent_video_count_30d INTEGER NOT NULL DEFAULT 0,
+                    recent_share_30d REAL NOT NULL DEFAULT 0.0,
+                    median_views REAL NOT NULL DEFAULT 0.0,
+                    p75_views REAL NOT NULL DEFAULT 0.0,
+                    median_age_days REAL NOT NULL DEFAULT 0.0,
+                    median_views_per_day REAL NOT NULL DEFAULT 0.0,
+                    p75_views_per_day REAL NOT NULL DEFAULT 0.0,
+                    unique_creator_count INTEGER NOT NULL DEFAULT 0,
+                    top_creator_share REAL NOT NULL DEFAULT 0.0,
+                    estimated_result_count INTEGER,
+                    formula_version TEXT NOT NULL DEFAULT 'v1.0',
+                    confidence TEXT NOT NULL DEFAULT 'HIGH',
+                    raw_metrics_json TEXT,
+                    derived_scores_json TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_market_signals_batch ON market_signal_snapshots(batch_id);
+                CREATE INDEX IF NOT EXISTS idx_market_signals_query ON market_signal_snapshots(channel_id, query);
+                """
+            )
             conn.execute("PRAGMA user_version = 5;")
             conn.commit()
             current_version = 5
 
         # 5. Migrate v5 to v6: opportunity_portfolios
         if current_version < 6:
-            conn.executescript(SCHEMA_V7_SQL)
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS opportunity_portfolios (
+                    batch_id TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    generated_at TEXT NOT NULL,
+                    candidates_json TEXT NOT NULL,
+                    selected_topic_json TEXT,
+                    selection_reason TEXT,
+                    market_signal_ids_json TEXT NOT NULL,
+                    formula_version TEXT NOT NULL DEFAULT 'v1.0',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_opportunity_portfolios_channel ON opportunity_portfolios(channel_id);
+                """
+            )
             conn.execute("PRAGMA user_version = 6;")
             conn.commit()
             current_version = 6
 
         # 6. Migrate v6 to v7: packaging_tournaments
         if current_version < 7:
-            conn.executescript(SCHEMA_V7_SQL)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS packaging_tournaments (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    candidates_json TEXT NOT NULL,
+                    selected_candidate_id TEXT,
+                    selection_reason TEXT,
+                    native_ab_eligible INTEGER NOT NULL DEFAULT 0,
+                    scoring_version TEXT NOT NULL DEFAULT 'v1.0',
+                    status TEXT NOT NULL DEFAULT 'COMPLETED',
+                    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_packaging_tournaments_project ON packaging_tournaments(project_id);
+                """
+            )
+            conn.execute("PRAGMA user_version = 7;")
             conn.commit()
             current_version = 7
+
+        # 7. Migrate v7 to v8: analytics_snapshots evolution (nullable CTR, impressions, source, window index)
+        if current_version < 8:
+            conn.execute("PRAGMA foreign_keys = OFF;")
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='analytics_snapshots';")
+            if cursor.fetchone():
+                cursor.execute("PRAGMA table_info(analytics_snapshots);")
+                existing_cols = {row[1] for row in cursor.fetchall()}
+
+                source_expr = (
+                    "CASE WHEN is_simulated = 1 OR snapshot_type = 'SIMULATED' THEN 'SIMULATED' ELSE 'LEGACY_UNVERIFIED' END"
+                    if "snapshot_type" in existing_cols and "is_simulated" in existing_cols
+                    else "'LEGACY_UNVERIFIED'"
+                )
+                snap_type_expr = "snapshot_type" if "snapshot_type" in existing_cols else "'REAL'"
+                is_sim_expr = "is_simulated" if "is_simulated" in existing_cols else "0"
+                yt_id_expr = "youtube_video_id" if "youtube_video_id" in existing_cols else "NULL"
+                avd_expr = "average_view_duration_seconds" if "average_view_duration_seconds" in existing_cols else "0.0"
+                ret_3s_expr = "retention_at_3s_percent" if "retention_at_3s_percent" in existing_cols else "NULL"
+                ret_curve_expr = "retention_curve_json" if "retention_curve_json" in existing_cols else "NULL"
+                avp_expr = "average_view_percentage" if "average_view_percentage" in existing_cols else "NULL"
+                imp_expr = "impressions" if "impressions" in existing_cols else "NULL"
+                start_date_expr = "report_start_date" if "report_start_date" in existing_cols else "NULL"
+                end_date_expr = "report_end_date" if "report_end_date" in existing_cols else "NULL"
+                ctr_expr = "ctr_percent" if "ctr_percent" in existing_cols else ("ctr" if "ctr" in existing_cols else "NULL")
+                captured_expr = "captured_at" if "captured_at" in existing_cols else ("collected_at" if "collected_at" in existing_cols else "datetime('now')")
+
+                conn.executescript(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS analytics_snapshots_v8 (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL,
+                        youtube_video_id TEXT,
+                        source TEXT NOT NULL DEFAULT 'LEGACY_UNVERIFIED',
+                        snapshot_type TEXT NOT NULL DEFAULT 'REAL',
+                        is_simulated INTEGER NOT NULL DEFAULT 0,
+                        report_start_date TEXT,
+                        report_end_date TEXT,
+                        views INTEGER NOT NULL DEFAULT 0,
+                        watch_time_hours REAL NOT NULL DEFAULT 0.0,
+                        average_view_duration_seconds REAL NOT NULL DEFAULT 0.0,
+                        average_view_percentage REAL,
+                        impressions INTEGER,
+                        ctr_percent REAL,
+                        retention_at_3s_percent REAL,
+                        retention_curve_json TEXT,
+                        captured_at TEXT NOT NULL,
+                        FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE
+                    );
+
+                    INSERT INTO analytics_snapshots_v8 (
+                        id, project_id, youtube_video_id, source, snapshot_type, is_simulated,
+                        report_start_date, report_end_date, views, watch_time_hours,
+                        average_view_duration_seconds, average_view_percentage, impressions,
+                        ctr_percent, retention_at_3s_percent, retention_curve_json, captured_at
+                    )
+                    SELECT
+                        id, project_id, {yt_id_expr}, {source_expr}, {snap_type_expr}, {is_sim_expr},
+                        {start_date_expr}, {end_date_expr}, views, watch_time_hours,
+                        {avd_expr}, {avp_expr}, {imp_expr},
+                        {ctr_expr}, {ret_3s_expr}, {ret_curve_expr}, {captured_expr}
+                    FROM analytics_snapshots;
+
+                    DROP TABLE analytics_snapshots;
+                    ALTER TABLE analytics_snapshots_v8 RENAME TO analytics_snapshots;
+                    CREATE INDEX IF NOT EXISTS idx_analytics_snapshots_project ON analytics_snapshots(project_id);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_analytics_snapshots_window ON analytics_snapshots(project_id, source, report_end_date) WHERE report_end_date IS NOT NULL;
+                    """
+                )
+            conn.executescript(SCHEMA_V8_SQL)
+            conn.execute("PRAGMA foreign_keys = ON;")
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.commit()
+            current_version = 8
         else:
-            # Current v7 idempotent check
-            conn.executescript(SCHEMA_V7_SQL)
+            # Current v8 idempotent check
+            conn.executescript(SCHEMA_V8_SQL)
             cursor.execute("PRAGMA table_info(topic_candidates);")
             tc_cols = {row[1] for row in cursor.fetchall()}
             if tc_cols and "score_breakdown_json" not in tc_cols:
@@ -555,6 +749,18 @@ def migrate_database(db_path: Path) -> None:
                 conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN snapshot_type TEXT NOT NULL DEFAULT 'REAL';")
             if snap_cols and "is_simulated" not in snap_cols:
                 conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN is_simulated INTEGER NOT NULL DEFAULT 0;")
+            if snap_cols and "source" not in snap_cols:
+                conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN source TEXT NOT NULL DEFAULT 'LEGACY_UNVERIFIED';")
+            if snap_cols and "report_start_date" not in snap_cols:
+                conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN report_start_date TEXT;")
+            if snap_cols and "report_end_date" not in snap_cols:
+                conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN report_end_date TEXT;")
+            if snap_cols and "average_view_percentage" not in snap_cols:
+                conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN average_view_percentage REAL;")
+            if snap_cols and "impressions" not in snap_cols:
+                conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN impressions INTEGER;")
+            if snap_cols and "retention_curve_json" not in snap_cols:
+                conn.execute("ALTER TABLE analytics_snapshots ADD COLUMN retention_curve_json TEXT;")
 
             cursor.execute("PRAGMA table_info(publication_jobs);")
             pub_cols = {row[1] for row in cursor.fetchall()}

@@ -4,10 +4,11 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from app.db.schema import init_database
 from app.domain.enums import (
+    AnalyticsSource,
     ApprovalOrigin,
     AssetType,
     ClaimVerificationVerdict,
@@ -26,6 +27,7 @@ from app.domain.state_machine import InvalidStateTransitionError, LifecycleState
 from app.domain.models import (
     AnalyticsSnapshot,
     Asset,
+    RetentionPoint,
     Channel,
     Chapter,
     Claim,
@@ -593,6 +595,24 @@ class SQLiteRepository:
                     projects.append(proj)
             return projects
 
+    def get_project(self, project_id: str) -> Optional[VideoProject]:
+        """Convenience alias for get_video_project."""
+        return self.get_video_project(project_id)
+
+    def list_video_projects_by_channel(self, channel_id: str) -> List[VideoProject]:
+        """Retrieve all video projects for a specific channel."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id FROM video_projects WHERE channel_id = ? ORDER BY created_at DESC;",
+                (channel_id,),
+            ).fetchall()
+            projects = []
+            for r in rows:
+                proj = self.get_video_project(r["id"])
+                if proj:
+                    projects.append(proj)
+            return projects
+
     # --- Phase 4 Evidence & Fact-Checking Persistence ---
     def save_research_dossier(self, project_id: str, dossier: ResearchDossier) -> None:
         with self._get_connection() as conn:
@@ -814,6 +834,29 @@ class SQLiteRepository:
                 for r in rows
             ]
 
+    def get_publication_job_by_project(self, project_id: str) -> Optional[PublicationJob]:
+        """Retrieve the most recent publication job for a project."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM publication_jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 1;",
+                (project_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return PublicationJob(
+                id=row["id"],
+                project_id=row["project_id"],
+                channel_id=row["channel_id"],
+                status=PublicationStatus(row["status"]),
+                privacy_status=PrivacyStatus(row["privacy_status"]),
+                scheduled_publish_time=datetime.fromisoformat(row["scheduled_publish_time"]) if row["scheduled_publish_time"] else None,
+                youtube_video_id=row["youtube_video_id"],
+                published_at=datetime.fromisoformat(row["published_at"]) if row["published_at"] else None,
+                contains_synthetic_media=bool(row["contains_synthetic_media"]) if "contains_synthetic_media" in row.keys() else False,
+                error_message=row["error_message"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+
     # --- Review Gate Operations (Stage 12) ---
     def save_review_record(self, record: ReviewRecord) -> None:
         overrides_json = json.dumps(record.media_overrides) if record.media_overrides else None
@@ -879,33 +922,103 @@ class SQLiteRepository:
         return history[-1] if history else None
 
     # --- Analytics Snapshot Operations (Stage 14 & 15) ---
+    def _row_to_analytics_snapshot(self, r: Any) -> AnalyticsSnapshot:
+        keys = r.keys()
+        snap_type = r["snapshot_type"] if "snapshot_type" in keys and r["snapshot_type"] else "REAL"
+        sim = bool(r["is_simulated"]) if "is_simulated" in keys and r["is_simulated"] is not None else False
+        source = r["source"] if "source" in keys and r["source"] else (AnalyticsSource.SIMULATED.value if sim else AnalyticsSource.LEGACY_UNVERIFIED.value)
+        retention_curve: List[RetentionPoint] = []
+        if "retention_curve_json" in keys and r["retention_curve_json"]:
+            try:
+                curve_raw = json.loads(r["retention_curve_json"])
+                retention_curve = [RetentionPoint(**p) for p in curve_raw]
+            except Exception:
+                retention_curve = []
+
+        return AnalyticsSnapshot(
+            id=r["id"],
+            project_id=r["project_id"],
+            youtube_video_id=r["youtube_video_id"] if "youtube_video_id" in keys else None,
+            source=source,
+            snapshot_type=snap_type,
+            is_simulated=sim,
+            report_start_date=r["report_start_date"] if "report_start_date" in keys else None,
+            report_end_date=r["report_end_date"] if "report_end_date" in keys else None,
+            views=r["views"],
+            watch_time_hours=r["watch_time_hours"],
+            average_view_duration_seconds=r["average_view_duration_seconds"],
+            average_view_percentage=r["average_view_percentage"] if "average_view_percentage" in keys else None,
+            impressions=r["impressions"] if "impressions" in keys else None,
+            ctr_percent=r["ctr_percent"] if "ctr_percent" in keys and r["ctr_percent"] is not None else None,
+            retention_at_3s_percent=r["retention_at_3s_percent"] if "retention_at_3s_percent" in keys else None,
+            retention_curve=retention_curve,
+            captured_at=datetime.fromisoformat(r["captured_at"]),
+        )
+
     def save_analytics_snapshot(self, snapshot: AnalyticsSnapshot) -> None:
+        retention_curve_json = (
+            json.dumps([p.model_dump() for p in snapshot.retention_curve])
+            if snapshot.retention_curve
+            else None
+        )
+        source_val = snapshot.source.value if isinstance(snapshot.source, AnalyticsSource) else str(snapshot.source)
+
         with self._get_connection() as conn:
+            existing_id = None
+            if snapshot.report_end_date:
+                row = conn.execute(
+                    "SELECT id FROM analytics_snapshots WHERE project_id = ? AND source = ? AND report_end_date = ?;",
+                    (snapshot.project_id, source_val, snapshot.report_end_date),
+                ).fetchone()
+                if row:
+                    existing_id = row["id"]
+
+            target_id = existing_id or snapshot.id
+
             conn.execute(
                 """
-                INSERT INTO analytics_snapshots (id, project_id, youtube_video_id, snapshot_type, is_simulated, views, watch_time_hours, ctr_percent, average_view_duration_seconds, retention_at_3s_percent, captured_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO analytics_snapshots (
+                    id, project_id, youtube_video_id, source, snapshot_type, is_simulated,
+                    report_start_date, report_end_date, views, watch_time_hours,
+                    average_view_duration_seconds, average_view_percentage, impressions,
+                    ctr_percent, retention_at_3s_percent, retention_curve_json, captured_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                    project_id=excluded.project_id,
+                    youtube_video_id=excluded.youtube_video_id,
+                    source=excluded.source,
                     snapshot_type=excluded.snapshot_type,
                     is_simulated=excluded.is_simulated,
+                    report_start_date=excluded.report_start_date,
+                    report_end_date=excluded.report_end_date,
                     views=excluded.views,
                     watch_time_hours=excluded.watch_time_hours,
-                    ctr_percent=excluded.ctr_percent,
                     average_view_duration_seconds=excluded.average_view_duration_seconds,
+                    average_view_percentage=excluded.average_view_percentage,
+                    impressions=excluded.impressions,
+                    ctr_percent=excluded.ctr_percent,
                     retention_at_3s_percent=excluded.retention_at_3s_percent,
+                    retention_curve_json=excluded.retention_curve_json,
                     captured_at=excluded.captured_at;
                 """,
                 (
-                    snapshot.id,
+                    target_id,
                     snapshot.project_id,
                     snapshot.youtube_video_id,
+                    source_val,
                     snapshot.snapshot_type,
                     1 if snapshot.is_simulated else 0,
+                    snapshot.report_start_date,
+                    snapshot.report_end_date,
                     snapshot.views,
                     snapshot.watch_time_hours,
-                    snapshot.ctr_percent,
                     snapshot.average_view_duration_seconds,
+                    snapshot.average_view_percentage,
+                    snapshot.impressions,
+                    snapshot.ctr_percent,
                     snapshot.retention_at_3s_percent,
+                    retention_curve_json,
                     snapshot.captured_at.isoformat(),
                 ),
             )
@@ -916,27 +1029,7 @@ class SQLiteRepository:
                 "SELECT * FROM analytics_snapshots WHERE project_id = ? ORDER BY captured_at ASC;",
                 (project_id,),
             ).fetchall()
-            results = []
-            for r in rows:
-                keys = r.keys()
-                snap_type = r["snapshot_type"] if "snapshot_type" in keys and r["snapshot_type"] else "REAL"
-                sim = bool(r["is_simulated"]) if "is_simulated" in keys and r["is_simulated"] is not None else False
-                results.append(
-                    AnalyticsSnapshot(
-                        id=r["id"],
-                        project_id=r["project_id"],
-                        youtube_video_id=r["youtube_video_id"],
-                        snapshot_type=snap_type,
-                        is_simulated=sim,
-                        views=r["views"],
-                        watch_time_hours=r["watch_time_hours"],
-                        ctr_percent=r["ctr_percent"],
-                        average_view_duration_seconds=r["average_view_duration_seconds"],
-                        retention_at_3s_percent=r["retention_at_3s_percent"],
-                        captured_at=datetime.fromisoformat(r["captured_at"]),
-                    )
-                )
-            return results
+            return [self._row_to_analytics_snapshot(r) for r in rows]
 
     def get_channel_analytics(self, channel_id: str) -> List[AnalyticsSnapshot]:
         with self._get_connection() as conn:
@@ -949,27 +1042,8 @@ class SQLiteRepository:
                 """,
                 (channel_id,),
             ).fetchall()
-            results = []
-            for r in rows:
-                keys = r.keys()
-                snap_type = r["snapshot_type"] if "snapshot_type" in keys and r["snapshot_type"] else "REAL"
-                sim = bool(r["is_simulated"]) if "is_simulated" in keys and r["is_simulated"] is not None else False
-                results.append(
-                    AnalyticsSnapshot(
-                        id=r["id"],
-                        project_id=r["project_id"],
-                        youtube_video_id=r["youtube_video_id"],
-                        snapshot_type=snap_type,
-                        is_simulated=sim,
-                        views=r["views"],
-                        watch_time_hours=r["watch_time_hours"],
-                        ctr_percent=r["ctr_percent"],
-                        average_view_duration_seconds=r["average_view_duration_seconds"],
-                        retention_at_3s_percent=r["retention_at_3s_percent"],
-                        captured_at=datetime.fromisoformat(r["captured_at"]),
-                    )
-                )
-            return results
+            return [self._row_to_analytics_snapshot(r) for r in rows]
+
 
     # --- Content Series Operations ---
     def save_content_series(self, series: ContentSeries) -> None:
@@ -1551,3 +1625,6 @@ class SQLiteRepository:
             status=PackagingTournamentStatus(row["status"]),
             created_at=datetime.fromisoformat(row["created_at"]),
         )
+
+
+Repository = SQLiteRepository

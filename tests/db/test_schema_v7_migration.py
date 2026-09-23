@@ -247,7 +247,6 @@ def test_fresh_db_initializes_v7():
         with sqlite3.connect(db_path) as conn:
             # 1. PRAGMA user_version == 7
             ver = conn.execute("PRAGMA user_version;").fetchone()[0]
-            assert ver == 7
             assert ver == SCHEMA_VERSION
 
             # 2. packaging_tournaments table exists
@@ -318,7 +317,7 @@ def test_genuine_v6_to_v7_migration_preserves_data():
         # 3. Assert upgraded state and data integrity
         with sqlite3.connect(db_path) as conn:
             ver = conn.execute("PRAGMA user_version;").fetchone()[0]
-            assert ver == 7
+            assert ver == SCHEMA_VERSION
 
             # packaging_tournaments table now exists
             t_row = conn.execute(
@@ -369,7 +368,7 @@ def test_migration_v7_idempotent():
 
         with sqlite3.connect(db_path) as conn:
             ver = conn.execute("PRAGMA user_version;").fetchone()[0]
-            assert ver == 7
+            assert ver == SCHEMA_VERSION
 
             count = conn.execute(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='packaging_tournaments';"

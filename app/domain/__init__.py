@@ -1,6 +1,8 @@
 """Domain package exporting models, enumerations, and state machine."""
 
 from app.domain.enums import (
+    AnalyticsCollectionStatus,
+    AnalyticsSource,
     ApprovalOrigin,
     AssetType,
     ClaimVerificationVerdict,
@@ -19,8 +21,10 @@ from app.domain.enums import (
     VideoLifecycleState,
 )
 from app.domain.models import (
+    AnalyticsCollectionResult,
     AnalyticsSnapshot,
     Asset,
+    RetentionPoint,
     Channel,
     Chapter,
     Claim,
@@ -62,7 +66,10 @@ from app.domain.state_machine import (
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
+    "AnalyticsCollectionResult",
+    "AnalyticsCollectionStatus",
     "AnalyticsSnapshot",
+    "AnalyticsSource",
     "ApprovalOrigin",
     "Asset",
     "AssetType",
@@ -100,6 +107,7 @@ __all__ = [
     "ResearchDossier",
     "ResearchSource",
     "RetentionMoment",
+    "RetentionPoint",
     "ReviewAction",
     "ReviewRecord",
     "Scene",

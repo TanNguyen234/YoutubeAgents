@@ -228,3 +228,21 @@ class PackagingTournamentStatus(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CORRECTED = "CORRECTED"
+
+
+class AnalyticsSource(str, Enum):
+    """Data provenance source for YouTube analytics snapshots."""
+
+    YOUTUBE_ANALYTICS_API = "YOUTUBE_ANALYTICS_API"
+    YOUTUBE_REPORTING_API = "YOUTUBE_REPORTING_API"
+    SIMULATED = "SIMULATED"
+    LEGACY_UNVERIFIED = "LEGACY_UNVERIFIED"
+
+
+class AnalyticsCollectionStatus(str, Enum):
+    """Outcome status of an analytics collection attempt."""
+
+    COLLECTED = "COLLECTED"
+    NO_DATA_YET = "NO_DATA_YET"
+    NOT_PUBLISHED = "NOT_PUBLISHED"
+    NO_YOUTUBE_VIDEO_ID = "NO_YOUTUBE_VIDEO_ID"

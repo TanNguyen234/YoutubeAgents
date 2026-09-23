@@ -2,9 +2,12 @@
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 from pydantic import BaseModel, Field, model_validator
 
 from app.domain.enums import (
+    AnalyticsCollectionStatus,
+    AnalyticsSource,
     ApprovalOrigin,
     AssetType,
     ClaimVerificationVerdict,
@@ -600,20 +603,68 @@ class PublicationJob(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class RetentionPoint(BaseModel):
+    """A discrete observation point on the YouTube audience retention curve."""
+
+    elapsed_video_time_ratio: float = Field(ge=0.0, description="Normalized playback point (0.0 to 1.0+)")
+    audience_watch_ratio: float = Field(ge=0.0, description="Audience watch ratio (can exceed 1.0 on rewatches)")
+    relative_retention_performance: Optional[float] = Field(default=None, description="Relative performance compared to similar YouTube videos")
+
+
 class AnalyticsSnapshot(BaseModel):
     """Performance metrics captured from YouTube Analytics API."""
 
-    id: str = Field(description="Unique snapshot ID")
+    id: str = Field(default_factory=lambda: f"snap-{uuid4().hex[:8]}", description="Unique snapshot ID")
     project_id: str = Field(description="Associated project ID")
     youtube_video_id: Optional[str] = Field(default=None, description="YouTube video ID")
+    source: AnalyticsSource = Field(default=AnalyticsSource.YOUTUBE_ANALYTICS_API, description="Data source provenance")
     snapshot_type: str = Field(default="REAL", description="REAL or SIMULATED")
     is_simulated: bool = Field(default=False, description="Whether this snapshot is simulated")
+    report_start_date: Optional[str] = Field(default=None, description="Report start date (YYYY-MM-DD)")
+    report_end_date: Optional[str] = Field(default=None, description="Report end date (YYYY-MM-DD)")
     views: int = Field(default=0, ge=0)
     watch_time_hours: float = Field(default=0.0, ge=0.0)
-    ctr_percent: float = Field(default=0.0, ge=0.0, le=100.0)
     average_view_duration_seconds: float = Field(default=0.0, ge=0.0)
+    average_view_percentage: Optional[float] = Field(default=None, ge=0.0)
+    impressions: Optional[int] = Field(default=None, ge=0)
+    ctr_percent: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     retention_at_3s_percent: Optional[float] = Field(default=None)
+    retention_curve: List[RetentionPoint] = Field(default_factory=list)
     captured_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="after")
+    def _sync_simulation_source(self) -> "AnalyticsSnapshot":
+        if self.is_simulated or self.snapshot_type == "SIMULATED":
+            if self.source == AnalyticsSource.YOUTUBE_ANALYTICS_API:
+                self.source = AnalyticsSource.SIMULATED
+        return self
+
+
+class AnalyticsCollectionResult(BaseModel):
+    """Outcome of an analytics collection attempt for a video project."""
+
+    status: AnalyticsCollectionStatus
+    project_id: str
+    youtube_video_id: Optional[str] = None
+    video_id: Optional[str] = None
+    snapshot: Optional[AnalyticsSnapshot] = None
+    message: Optional[str] = None
+    error_message: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "video_id" in data and "youtube_video_id" not in data:
+                data["youtube_video_id"] = data["video_id"]
+            elif "youtube_video_id" in data and "video_id" not in data:
+                data["video_id"] = data["youtube_video_id"]
+            if "error_message" in data and "message" not in data:
+                data["message"] = data["error_message"]
+            elif "message" in data and "error_message" not in data:
+                data["error_message"] = data["message"]
+        return data
+
 
 
 class Experiment(BaseModel):
