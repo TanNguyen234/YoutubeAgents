@@ -81,9 +81,8 @@ def test_fresh_db_initializes_v8():
         init_database(db_path)
 
         with sqlite3.connect(db_path) as conn:
-            # 1. PRAGMA user_version == 8
+            # 1. PRAGMA user_version == SCHEMA_VERSION
             ver = conn.execute("PRAGMA user_version;").fetchone()[0]
-            assert ver == 8
             assert ver == SCHEMA_VERSION
 
             # 2. analytics_snapshots table exists with all v8 columns
@@ -180,7 +179,6 @@ def test_genuine_v7_to_v8_migration_preserves_data():
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             ver = conn.execute("PRAGMA user_version;").fetchone()[0]
-            assert ver == 8
             assert ver == SCHEMA_VERSION
 
             # Verify SIMULATED row was preserved and assigned source = 'SIMULATED'
@@ -243,7 +241,6 @@ def test_v8_migration_is_idempotent():
 
         with sqlite3.connect(db_path) as conn:
             ver = conn.execute("PRAGMA user_version;").fetchone()[0]
-            assert ver == 8
             assert ver == SCHEMA_VERSION
 
             count = conn.execute(
