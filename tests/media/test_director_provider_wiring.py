@@ -54,11 +54,12 @@ def test_provider_wiring_from_brain_pipeline_to_director(tmp_path):
             with patch.object(MediaProductionPipeline, "__init__", intercepted_init):
                 with patch("app.services.pipeline_brain.SEOOptimizerService"):
                     with patch("app.services.pipeline_brain.ThumbnailDesignerService"):
-                        with patch("app.services.pipeline_brain.HumanReviewGateService"):
-                            with patch("app.services.pipeline_brain.YouTubePublisherService"):
-                                with patch("app.services.pipeline_brain.YouTubeAnalyticsTracker"):
-                                    with patch("app.services.pipeline_brain.StrategyFeedbackLoop"):
-                                        pipeline.run_full_autonomous_lifecycle(
+                        with patch("app.services.pipeline_brain.PackagingEngineService"):
+                            with patch("app.services.pipeline_brain.HumanReviewGateService"):
+                                with patch("app.services.pipeline_brain.YouTubePublisherService"):
+                                    with patch("app.services.pipeline_brain.YouTubeAnalyticsTracker"):
+                                        with patch("app.services.pipeline_brain.StrategyFeedbackLoop"):
+                                            pipeline.run_full_autonomous_lifecycle(
                                             project_id="wiring-test-01",
                                             channel=channel,
                                             keyword="Git rebase",
