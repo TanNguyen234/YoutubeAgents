@@ -246,3 +246,22 @@ class AnalyticsCollectionStatus(str, Enum):
     NO_DATA_YET = "NO_DATA_YET"
     NOT_PUBLISHED = "NOT_PUBLISHED"
     NO_YOUTUBE_VIDEO_ID = "NO_YOUTUBE_VIDEO_ID"
+
+
+class PackagingAttributionStatus(str, Enum):
+    """Status of attribution between deployed package and candidate tournament."""
+
+    MATCHED_SELECTED_CANDIDATE = "MATCHED_SELECTED_CANDIDATE"
+    UNMATCHED_SYSTEM_DEPLOYMENT = "UNMATCHED_SYSTEM_DEPLOYMENT"
+    UNATTRIBUTED_LEGACY = "UNATTRIBUTED_LEGACY"
+
+
+class ReachSyncStatus(str, Enum):
+    """Outcome status of a YouTube Reporting API reach sync operation."""
+
+    SYNCED = "SYNCED"
+    NO_REPORT_YET = "NO_REPORT_YET"
+    PROCESSED_EMPTY_REPORT = "PROCESSED_EMPTY_REPORT"
+    JOB_CREATED = "JOB_CREATED"
+    BLOCKED = "BLOCKED"
+    FAILED = "FAILED"

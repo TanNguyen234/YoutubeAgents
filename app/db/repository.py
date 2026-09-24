@@ -37,10 +37,14 @@ from app.domain.models import (
     MarketSignalSnapshot,
     OpportunityPortfolio,
     PackagingCandidate,
+    PackagingReachFeedback,
     PackagingTournament,
     PublicationJob,
     QualityResult,
     QuotaUsageRecord,
+    ReachObservation,
+    ReportingJobState,
+    ReportingReportReceipt,
     ResearchDossier,
     ResearchSource,
     ReviewRecord,
@@ -780,8 +784,14 @@ class SQLiteRepository:
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO publication_jobs (id, project_id, channel_id, status, privacy_status, scheduled_publish_time, youtube_video_id, published_at, contains_synthetic_media, error_message, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO publication_jobs (
+                    id, project_id, channel_id, status, privacy_status, scheduled_publish_time,
+                    youtube_video_id, published_at, contains_synthetic_media,
+                    packaging_tournament_id, packaging_candidate_id, deployed_title,
+                    deployed_thumbnail_sha256, packaging_fingerprint, packaging_attribution_status,
+                    error_message, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     status=excluded.status,
                     privacy_status=excluded.privacy_status,
@@ -789,6 +799,12 @@ class SQLiteRepository:
                     youtube_video_id=excluded.youtube_video_id,
                     published_at=excluded.published_at,
                     contains_synthetic_media=excluded.contains_synthetic_media,
+                    packaging_tournament_id=excluded.packaging_tournament_id,
+                    packaging_candidate_id=excluded.packaging_candidate_id,
+                    deployed_title=excluded.deployed_title,
+                    deployed_thumbnail_sha256=excluded.deployed_thumbnail_sha256,
+                    packaging_fingerprint=excluded.packaging_fingerprint,
+                    packaging_attribution_status=excluded.packaging_attribution_status,
                     error_message=excluded.error_message;
                 """,
                 (
@@ -801,6 +817,12 @@ class SQLiteRepository:
                     job.youtube_video_id,
                     job.published_at.isoformat() if job.published_at else None,
                     1 if job.contains_synthetic_media else 0,
+                    job.packaging_tournament_id,
+                    job.packaging_candidate_id,
+                    job.deployed_title,
+                    job.deployed_thumbnail_sha256,
+                    job.packaging_fingerprint,
+                    job.packaging_attribution_status,
                     job.error_message,
                     job.created_at.isoformat(),
                 ),
@@ -817,22 +839,7 @@ class SQLiteRepository:
                 rows = conn.execute(
                     "SELECT * FROM publication_jobs WHERE status IN ('PENDING', 'SCHEDULED') ORDER BY created_at ASC;"
                 ).fetchall()
-            return [
-                PublicationJob(
-                    id=r["id"],
-                    project_id=r["project_id"],
-                    channel_id=r["channel_id"],
-                    status=PublicationStatus(r["status"]),
-                    privacy_status=PrivacyStatus(r["privacy_status"]),
-                    scheduled_publish_time=datetime.fromisoformat(r["scheduled_publish_time"]) if r["scheduled_publish_time"] else None,
-                    youtube_video_id=r["youtube_video_id"],
-                    published_at=datetime.fromisoformat(r["published_at"]) if r["published_at"] else None,
-                    contains_synthetic_media=bool(r["contains_synthetic_media"]) if "contains_synthetic_media" in r.keys() else False,
-                    error_message=r["error_message"],
-                    created_at=datetime.fromisoformat(r["created_at"]),
-                )
-                for r in rows
-            ]
+            return [self._row_to_publication_job(r) for r in rows]
 
     def get_publication_job_by_project(self, project_id: str) -> Optional[PublicationJob]:
         """Retrieve the most recent publication job for a project."""
@@ -843,19 +850,47 @@ class SQLiteRepository:
             ).fetchone()
             if not row:
                 return None
-            return PublicationJob(
-                id=row["id"],
-                project_id=row["project_id"],
-                channel_id=row["channel_id"],
-                status=PublicationStatus(row["status"]),
-                privacy_status=PrivacyStatus(row["privacy_status"]),
-                scheduled_publish_time=datetime.fromisoformat(row["scheduled_publish_time"]) if row["scheduled_publish_time"] else None,
-                youtube_video_id=row["youtube_video_id"],
-                published_at=datetime.fromisoformat(row["published_at"]) if row["published_at"] else None,
-                contains_synthetic_media=bool(row["contains_synthetic_media"]) if "contains_synthetic_media" in row.keys() else False,
-                error_message=row["error_message"],
-                created_at=datetime.fromisoformat(row["created_at"]),
-            )
+            return self._row_to_publication_job(row)
+
+    def get_publication_job_by_youtube_video_id(self, youtube_video_id: str) -> Optional[PublicationJob]:
+        """Retrieve real/scheduled publication job by YouTube video ID (excluding dry-runs and pending)."""
+        if not youtube_video_id or youtube_video_id.startswith("yt-dryrun-"):
+            return None
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM publication_jobs
+                WHERE youtube_video_id = ?
+                  AND status IN ('COMPLETED', 'SCHEDULED')
+                ORDER BY created_at DESC LIMIT 1;
+                """,
+                (youtube_video_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return self._row_to_publication_job(row)
+
+    def _row_to_publication_job(self, r: sqlite3.Row) -> PublicationJob:
+        keys = r.keys()
+        return PublicationJob(
+            id=r["id"],
+            project_id=r["project_id"],
+            channel_id=r["channel_id"],
+            status=PublicationStatus(r["status"]),
+            privacy_status=PrivacyStatus(r["privacy_status"]),
+            scheduled_publish_time=datetime.fromisoformat(r["scheduled_publish_time"]) if r["scheduled_publish_time"] else None,
+            youtube_video_id=r["youtube_video_id"],
+            published_at=datetime.fromisoformat(r["published_at"]) if r["published_at"] else None,
+            contains_synthetic_media=bool(r["contains_synthetic_media"]) if "contains_synthetic_media" in keys else False,
+            packaging_tournament_id=r["packaging_tournament_id"] if "packaging_tournament_id" in keys else None,
+            packaging_candidate_id=r["packaging_candidate_id"] if "packaging_candidate_id" in keys else None,
+            deployed_title=r["deployed_title"] if "deployed_title" in keys else None,
+            deployed_thumbnail_sha256=r["deployed_thumbnail_sha256"] if "deployed_thumbnail_sha256" in keys else None,
+            packaging_fingerprint=r["packaging_fingerprint"] if "packaging_fingerprint" in keys else None,
+            packaging_attribution_status=r["packaging_attribution_status"] if "packaging_attribution_status" in keys else None,
+            error_message=r["error_message"],
+            created_at=datetime.fromisoformat(r["created_at"]),
+        )
 
     # --- Review Gate Operations (Stage 12) ---
     def save_review_record(self, record: ReviewRecord) -> None:
@@ -1624,6 +1659,244 @@ class SQLiteRepository:
             scoring_version=row["scoring_version"],
             status=PackagingTournamentStatus(row["status"]),
             created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+
+    # --- YouTube Reporting & Reach Operations (Phase 1) ---
+    def save_reporting_job(self, job_state: ReportingJobState) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO reporting_jobs (
+                    job_id, report_type_id, remote_name, channel_id,
+                    last_processed_create_time, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    report_type_id=excluded.report_type_id,
+                    remote_name=excluded.remote_name,
+                    channel_id=excluded.channel_id,
+                    last_processed_create_time=excluded.last_processed_create_time,
+                    updated_at=excluded.updated_at;
+                """,
+                (
+                    job_state.job_id,
+                    job_state.report_type_id,
+                    job_state.remote_name,
+                    job_state.channel_id,
+                    job_state.last_processed_create_time.isoformat() if job_state.last_processed_create_time else None,
+                    job_state.created_at.isoformat(),
+                    job_state.updated_at.isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def get_reporting_job(self, report_type_id: str, channel_id: Optional[str] = None) -> Optional[ReportingJobState]:
+        with self._get_connection() as conn:
+            if channel_id:
+                row = conn.execute(
+                    "SELECT * FROM reporting_jobs WHERE report_type_id = ? AND channel_id = ? LIMIT 1;",
+                    (report_type_id, channel_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM reporting_jobs WHERE report_type_id = ? LIMIT 1;",
+                    (report_type_id,),
+                ).fetchone()
+            if not row:
+                return None
+            return self._row_to_reporting_job(row)
+
+    def get_reporting_job_by_id(self, job_id: str) -> Optional[ReportingJobState]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM reporting_jobs WHERE job_id = ? LIMIT 1;",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return self._row_to_reporting_job(row)
+
+    def _row_to_reporting_job(self, r: sqlite3.Row) -> ReportingJobState:
+        return ReportingJobState(
+            job_id=r["job_id"],
+            report_type_id=r["report_type_id"],
+            remote_name=r["remote_name"],
+            channel_id=r["channel_id"],
+            last_processed_create_time=datetime.fromisoformat(r["last_processed_create_time"]) if r["last_processed_create_time"] else None,
+            created_at=datetime.fromisoformat(r["created_at"]),
+            updated_at=datetime.fromisoformat(r["updated_at"]),
+        )
+
+    def save_report_receipt(self, receipt: ReportingReportReceipt) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO reporting_report_receipts (
+                    report_id, job_id, report_type_id, start_time, end_time,
+                    create_time, content_sha256, processed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    receipt.report_id,
+                    receipt.job_id,
+                    receipt.report_type_id,
+                    receipt.start_time.isoformat(),
+                    receipt.end_time.isoformat(),
+                    receipt.create_time.isoformat(),
+                    receipt.content_sha256,
+                    receipt.processed_at.isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def get_report_receipt(self, report_id: str) -> Optional[ReportingReportReceipt]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM reporting_report_receipts WHERE report_id = ? LIMIT 1;",
+                (report_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return self._row_to_report_receipt(row)
+
+    def list_report_receipts(self, job_id: Optional[str] = None) -> List[ReportingReportReceipt]:
+        with self._get_connection() as conn:
+            if job_id:
+                rows = conn.execute(
+                    "SELECT * FROM reporting_report_receipts WHERE job_id = ? ORDER BY create_time ASC;",
+                    (job_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM reporting_report_receipts ORDER BY create_time ASC;"
+                ).fetchall()
+            return [self._row_to_report_receipt(r) for r in rows]
+
+    def _row_to_report_receipt(self, r: sqlite3.Row) -> ReportingReportReceipt:
+        return ReportingReportReceipt(
+            report_id=r["report_id"],
+            job_id=r["job_id"],
+            report_type_id=r["report_type_id"],
+            start_time=datetime.fromisoformat(r["start_time"]),
+            end_time=datetime.fromisoformat(r["end_time"]),
+            create_time=datetime.fromisoformat(r["create_time"]),
+            content_sha256=r["content_sha256"],
+            processed_at=datetime.fromisoformat(r["processed_at"]),
+        )
+
+    def save_reach_observation(self, observation: ReachObservation) -> bool:
+        """
+        Persist a ReachObservation with backfill replacement semantics.
+        If an observation for (publication_job_id, report_date) already exists,
+        it is ONLY overwritten if incoming.source_report_create_time > existing.source_report_create_time.
+        Returns True if inserted or updated, False if skipped as older or equal.
+        """
+        with self._get_connection() as conn:
+            existing = conn.execute(
+                "SELECT id, source_report_create_time FROM reach_observations WHERE publication_job_id = ? AND report_date = ?;",
+                (observation.publication_job_id, observation.report_date),
+            ).fetchone()
+
+            if existing:
+                existing_create_time = datetime.fromisoformat(existing["source_report_create_time"])
+                inc_time = observation.source_report_create_time
+                if inc_time.tzinfo is None and existing_create_time.tzinfo is not None:
+                    inc_time = inc_time.replace(tzinfo=timezone.utc)
+                elif inc_time.tzinfo is not None and existing_create_time.tzinfo is None:
+                    existing_create_time = existing_create_time.replace(tzinfo=timezone.utc)
+
+                if inc_time <= existing_create_time:
+                    # Older or duplicate report: do NOT overwrite newer observation
+                    return False
+
+                # Newer report: update existing observation
+                conn.execute(
+                    """
+                    UPDATE reach_observations SET
+                        thumbnail_impressions = ?,
+                        thumbnail_impressions_ctr = ?,
+                        source_report_id = ?,
+                        source_report_create_time = ?,
+                        source = ?,
+                        created_at = ?
+                    WHERE id = ?;
+                    """,
+                    (
+                        observation.thumbnail_impressions,
+                        observation.thumbnail_impressions_ctr,
+                        observation.source_report_id,
+                        observation.source_report_create_time.isoformat(),
+                        observation.source.value if hasattr(observation.source, "value") else str(observation.source),
+                        observation.collected_at.isoformat(),
+                        existing["id"],
+                    ),
+                )
+                conn.commit()
+                return True
+
+            # Insert new observation
+            conn.execute(
+                """
+                INSERT INTO reach_observations (
+                    id, project_id, publication_job_id, youtube_video_id, report_date,
+                    thumbnail_impressions, thumbnail_impressions_ctr,
+                    source_report_id, source_report_create_time, source, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    observation.id,
+                    observation.project_id,
+                    observation.publication_job_id,
+                    observation.youtube_video_id,
+                    observation.report_date,
+                    observation.thumbnail_impressions,
+                    observation.thumbnail_impressions_ctr,
+                    observation.source_report_id,
+                    observation.source_report_create_time.isoformat(),
+                    observation.source.value if hasattr(observation.source, "value") else str(observation.source),
+                    observation.collected_at.isoformat(),
+                ),
+            )
+            conn.commit()
+            return True
+
+    def get_reach_observations_by_project(self, project_id: str) -> List[ReachObservation]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reach_observations WHERE project_id = ? ORDER BY report_date ASC;",
+                (project_id,),
+            ).fetchall()
+            return [self._row_to_reach_observation(r) for r in rows]
+
+    def get_reach_observations_by_publication_job(self, publication_job_id: str) -> List[ReachObservation]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reach_observations WHERE publication_job_id = ? ORDER BY report_date ASC;",
+                (publication_job_id,),
+            ).fetchall()
+            return [self._row_to_reach_observation(r) for r in rows]
+
+    def get_reach_observations_by_video_id(self, youtube_video_id: str) -> List[ReachObservation]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reach_observations WHERE youtube_video_id = ? ORDER BY report_date ASC;",
+                (youtube_video_id,),
+            ).fetchall()
+            return [self._row_to_reach_observation(r) for r in rows]
+
+    def _row_to_reach_observation(self, r: sqlite3.Row) -> ReachObservation:
+        return ReachObservation(
+            id=r["id"],
+            project_id=r["project_id"],
+            publication_job_id=r["publication_job_id"],
+            youtube_video_id=r["youtube_video_id"],
+            report_date=r["report_date"],
+            thumbnail_impressions=r["thumbnail_impressions"],
+            thumbnail_impressions_ctr=r["thumbnail_impressions_ctr"],
+            source_report_id=r["source_report_id"],
+            source_report_create_time=datetime.fromisoformat(r["source_report_create_time"]),
+            source=AnalyticsSource(r["source"]) if "source" in r.keys() and r["source"] else AnalyticsSource.LEGACY_UNVERIFIED,
+            collected_at=datetime.fromisoformat(r["created_at"]),
         )
 
 

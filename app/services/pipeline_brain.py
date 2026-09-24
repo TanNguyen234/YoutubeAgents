@@ -23,7 +23,9 @@ from app.domain.models import (
     EditorialSlot,
     FactCheckReport,
     OpportunityPortfolio,
+    PackagingReachFeedback,
     PublicationJob,
+    ReachSyncResult,
     ResearchDossier,
     ReviewRecord,
     ScriptSections,
@@ -60,9 +62,11 @@ from app.services.strategy_feedback import StrategyFeedbackLoop
 from app.services.thumbnail_designer import ThumbnailDesignerService
 from app.services.topic_evaluator import TopicEvaluator
 from app.services.topic_strategist import TopicStrategist
+from app.services.packaging_feedback import compute_packaging_reach_feedback
 from app.services.youtube_analytics_ingestion import YouTubeAnalyticsIngestionService
 from app.services.youtube_oauth import YouTubeOAuthManager
 from app.services.youtube_publisher import YouTubePublisherService
+from app.services.youtube_reach_reporting import YouTubeReachReportingService
 
 
 class BrainPipeline:
@@ -843,6 +847,27 @@ class BrainPipeline:
                 )
                 results.append(res)
         return results
+
+    def refresh_reach_reports(
+        self,
+        channel_id: Optional[str] = None,
+        oauth_manager: Optional[YouTubeOAuthManager] = None,
+        http_client: Optional[httpx.Client] = None,
+    ) -> ReachSyncResult:
+        """Ingest authentic post-publication thumbnail reach observations from YouTube Reporting API."""
+        reach_service = YouTubeReachReportingService(
+            repository=self.repo,
+            oauth_manager=oauth_manager,
+            http_client=http_client,
+        )
+        return reach_service.sync_reach(channel_id=channel_id)
+
+    def get_packaging_reach_feedback(
+        self,
+        project_id: str,
+    ) -> Optional[PackagingReachFeedback]:
+        """Compute post-publication packaging reach feedback with impression-weighted CTR."""
+        return compute_packaging_reach_feedback(repo=self.repo, project_id=project_id)
 
 
 PipelineBrain = BrainPipeline

@@ -3,7 +3,7 @@
 from pathlib import Path
 import sqlite3
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_V8_SQL = """
 
@@ -352,6 +352,88 @@ CREATE TABLE IF NOT EXISTS packaging_tournaments (
 CREATE INDEX IF NOT EXISTS idx_packaging_tournaments_project ON packaging_tournaments(project_id);
 """
 
+SCHEMA_V9_SQL = SCHEMA_V8_SQL.replace(
+    """CREATE TABLE IF NOT EXISTS publication_jobs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    privacy_status TEXT NOT NULL DEFAULT 'private',
+    scheduled_publish_time TEXT,
+    youtube_video_id TEXT,
+    published_at TEXT,
+    contains_synthetic_media INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE RESTRICT
+);""",
+    """CREATE TABLE IF NOT EXISTS publication_jobs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    privacy_status TEXT NOT NULL DEFAULT 'private',
+    scheduled_publish_time TEXT,
+    youtube_video_id TEXT,
+    published_at TEXT,
+    contains_synthetic_media INTEGER NOT NULL DEFAULT 0,
+    packaging_tournament_id TEXT,
+    packaging_candidate_id TEXT,
+    deployed_title TEXT,
+    deployed_thumbnail_sha256 TEXT,
+    packaging_fingerprint TEXT,
+    packaging_attribution_status TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE RESTRICT
+);"""
+) + """
+
+CREATE TABLE IF NOT EXISTS reporting_jobs (
+    job_id TEXT PRIMARY KEY,
+    report_type_id TEXT NOT NULL,
+    remote_name TEXT,
+    channel_id TEXT,
+    last_processed_create_time TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reporting_report_receipts (
+    report_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    report_type_id TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    create_time TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    processed_at TEXT NOT NULL,
+    FOREIGN KEY (job_id) REFERENCES reporting_jobs(job_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS reach_observations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    publication_job_id TEXT NOT NULL,
+    youtube_video_id TEXT NOT NULL,
+    report_date TEXT NOT NULL,
+    thumbnail_impressions INTEGER NOT NULL DEFAULT 0,
+    thumbnail_impressions_ctr REAL,
+    source_report_id TEXT NOT NULL,
+    source_report_create_time TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'LEGACY_UNVERIFIED',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (publication_job_id) REFERENCES publication_jobs(id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reach_observations_video_date ON reach_observations(publication_job_id, report_date);
+CREATE INDEX IF NOT EXISTS idx_reach_observations_project ON reach_observations(project_id);
+CREATE INDEX IF NOT EXISTS idx_reach_observations_video ON reach_observations(youtube_video_id);
+"""
+
 # Backwards compatibility v7 schema (prior to v8 analytics_snapshots evolution)
 SCHEMA_V7_SQL = SCHEMA_V8_SQL.replace(
     """CREATE TABLE IF NOT EXISTS analytics_snapshots (
@@ -431,8 +513,8 @@ def migrate_database(db_path: Path) -> None:
         user_table_count = cursor.fetchone()[0]
 
         if current_version == 0 and user_table_count == 0:
-            # Truly empty/new database: apply full v8 schema directly
-            conn.executescript(SCHEMA_V8_SQL)
+            # Truly empty/new database: apply full v9 schema directly
+            conn.executescript(SCHEMA_V9_SQL)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()
             return
@@ -711,12 +793,79 @@ def migrate_database(db_path: Path) -> None:
                 )
             conn.executescript(SCHEMA_V8_SQL)
             conn.execute("PRAGMA foreign_keys = ON;")
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.execute("PRAGMA user_version = 8;")
             conn.commit()
             current_version = 8
+
+        # 8. Migrate v8 to v9: publication packaging columns and reach reporting tables
+        if current_version < 9:
+            cursor.execute("PRAGMA table_info(publication_jobs);")
+            pub_cols = {row[1] for row in cursor.fetchall()}
+            if pub_cols:
+                if "packaging_tournament_id" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN packaging_tournament_id TEXT;")
+                if "packaging_candidate_id" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN packaging_candidate_id TEXT;")
+                if "deployed_title" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN deployed_title TEXT;")
+                if "deployed_thumbnail_sha256" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN deployed_thumbnail_sha256 TEXT;")
+                if "packaging_fingerprint" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN packaging_fingerprint TEXT;")
+                if "packaging_attribution_status" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN packaging_attribution_status TEXT;")
+
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS reporting_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    report_type_id TEXT NOT NULL,
+                    remote_name TEXT,
+                    channel_id TEXT,
+                    last_processed_create_time TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS reporting_report_receipts (
+                    report_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    report_type_id TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    create_time TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    processed_at TEXT NOT NULL,
+                    FOREIGN KEY (job_id) REFERENCES reporting_jobs(job_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS reach_observations (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    publication_job_id TEXT NOT NULL,
+                    youtube_video_id TEXT NOT NULL,
+                    report_date TEXT NOT NULL,
+                    thumbnail_impressions INTEGER NOT NULL DEFAULT 0,
+                    thumbnail_impressions_ctr REAL,
+                    source_report_id TEXT NOT NULL,
+                    source_report_create_time TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'LEGACY_UNVERIFIED',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (project_id) REFERENCES video_projects(id) ON DELETE CASCADE,
+                    FOREIGN KEY (publication_job_id) REFERENCES publication_jobs(id) ON DELETE CASCADE
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_reach_observations_video_date ON reach_observations(publication_job_id, report_date);
+                CREATE INDEX IF NOT EXISTS idx_reach_observations_project ON reach_observations(project_id);
+                CREATE INDEX IF NOT EXISTS idx_reach_observations_video ON reach_observations(youtube_video_id);
+                """
+            )
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+            conn.commit()
+            current_version = 9
         else:
-            # Current v8 idempotent check
-            conn.executescript(SCHEMA_V8_SQL)
+            # Current v9 idempotent check
+            conn.executescript(SCHEMA_V9_SQL)
             cursor.execute("PRAGMA table_info(topic_candidates);")
             tc_cols = {row[1] for row in cursor.fetchall()}
             if tc_cols and "score_breakdown_json" not in tc_cols:
@@ -764,11 +913,21 @@ def migrate_database(db_path: Path) -> None:
 
             cursor.execute("PRAGMA table_info(publication_jobs);")
             pub_cols = {row[1] for row in cursor.fetchall()}
-            if pub_cols and "contains_synthetic_media" not in pub_cols:
-                conn.execute(
-                    "ALTER TABLE publication_jobs "
-                    "ADD COLUMN contains_synthetic_media INTEGER NOT NULL DEFAULT 0;"
-                )
+            if pub_cols:
+                if "contains_synthetic_media" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN contains_synthetic_media INTEGER NOT NULL DEFAULT 0;")
+                if "packaging_tournament_id" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN packaging_tournament_id TEXT;")
+                if "packaging_candidate_id" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN packaging_candidate_id TEXT;")
+                if "deployed_title" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN deployed_title TEXT;")
+                if "deployed_thumbnail_sha256" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN deployed_thumbnail_sha256 TEXT;")
+                if "packaging_fingerprint" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN packaging_fingerprint TEXT;")
+                if "packaging_attribution_status" not in pub_cols:
+                    conn.execute("ALTER TABLE publication_jobs ADD COLUMN packaging_attribution_status TEXT;")
 
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
             conn.commit()

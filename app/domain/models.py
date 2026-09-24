@@ -15,12 +15,14 @@ from app.domain.enums import (
     EditorialSlotStatus,
     ExperimentStatus,
     HookAngle,
+    PackagingAttributionStatus,
     PackagingTournamentStatus,
     PlatformFormat,
     PrimaryVideoGoal,
     PrivacyStatus,
     PublicationStatus,
     QualityStatus,
+    ReachSyncStatus,
     RetentionCueType,
     ReviewAction,
     TitleTruthStatus,
@@ -599,6 +601,12 @@ class PublicationJob(BaseModel):
     youtube_video_id: Optional[str] = Field(default=None)
     published_at: Optional[datetime] = Field(default=None)
     contains_synthetic_media: bool = Field(default=False, description="Whether this video contains synthetic or AI-generated media")
+    packaging_tournament_id: Optional[str] = Field(default=None, description="Linked packaging tournament ID at publication")
+    packaging_candidate_id: Optional[str] = Field(default=None, description="Linked winning candidate ID if matched")
+    deployed_title: Optional[str] = Field(default=None, description="Actual title sent into YouTube upload payload")
+    deployed_thumbnail_sha256: Optional[str] = Field(default=None, description="Actual SHA-256 of uploaded thumbnail bytes")
+    packaging_fingerprint: Optional[str] = Field(default=None, description="Deterministic deployment provenance SHA-256")
+    packaging_attribution_status: Optional[str] = Field(default=None, description="MATCHED_SELECTED_CANDIDATE, UNMATCHED_SYSTEM_DEPLOYMENT, or UNATTRIBUTED_LEGACY")
     error_message: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -847,3 +855,100 @@ class PackagingTournament(BaseModel):
     scoring_version: str = Field(default="v1.0", description="Heuristic scoring algorithm version")
     status: PackagingTournamentStatus = Field(default=PackagingTournamentStatus.COMPLETED)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+def compute_packaging_fingerprint(
+    project_id: str,
+    youtube_video_id: str,
+    tournament_id: Optional[str] = None,
+    candidate_id: Optional[str] = None,
+    deployed_title: Optional[str] = None,
+    deployed_thumbnail_sha256: Optional[str] = None,
+) -> str:
+    """Compute deterministic SHA-256 from canonical deployment information."""
+    import hashlib
+    raw = f"{project_id}|{youtube_video_id}|{tournament_id or ''}|{candidate_id or ''}|{(deployed_title or '').strip()}|{(deployed_thumbnail_sha256 or '').strip()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+class ReportingJobState(BaseModel):
+    """Persisted remote YouTube Reporting API job registration."""
+
+    job_id: str = Field(description="Remote reporting job ID")
+    report_type_id: str = Field(default="channel_reach_basic_a1", description="Report type ID")
+    remote_name: Optional[str] = Field(default=None, description="Remote reporting job name")
+    channel_id: Optional[str] = Field(default=None, description="Channel ID if applicable")
+    last_processed_create_time: Optional[datetime] = Field(default=None, description="High-water mark of processed report createTime")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ReportingReportReceipt(BaseModel):
+    """Receipt tracking successfully downloaded and ingested Reporting API report."""
+
+    report_id: str = Field(description="Remote report ID")
+    job_id: str = Field(description="Associated reporting job ID")
+    report_type_id: str = Field(default="channel_reach_basic_a1", description="Report type ID")
+    start_time: datetime = Field(description="Covered period start timestamp")
+    end_time: datetime = Field(description="Covered period end timestamp")
+    create_time: datetime = Field(description="Report generation timestamp from YouTube")
+    content_sha256: str = Field(description="SHA-256 hash of downloaded report bytes")
+    processed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ReachObservation(BaseModel):
+    """Daily YouTube thumbnail impressions and CTR observation from YouTube Reporting API."""
+
+    id: str = Field(default_factory=lambda: f"reach-{uuid4().hex[:8]}", description="Unique reach observation ID")
+    project_id: str = Field(description="Associated project ID")
+    publication_job_id: str = Field(description="Associated publication job ID")
+    youtube_video_id: str = Field(description="YouTube video ID")
+    report_date: str = Field(description="Report date string (YYYY-MM-DD)")
+    thumbnail_impressions: int = Field(ge=0, description="Observed video thumbnail impressions")
+    thumbnail_impressions_ctr: Optional[float] = Field(default=None, description="Observed CTR numeric value directly from API")
+    source_report_id: str = Field(description="ID of source reporting report")
+    source_report_create_time: datetime = Field(description="Create timestamp of source report")
+    source: AnalyticsSource = Field(default=AnalyticsSource.LEGACY_UNVERIFIED, description="Data source provenance (defaults safely to unverified)")
+    collected_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class PackagingReachFeedback(BaseModel):
+    """On-demand aggregate feedback connecting system-deployed package to observed YouTube thumbnail reach."""
+
+    project_id: str = Field(description="Associated project ID")
+    publication_job_id: str = Field(description="Publication job ID")
+    youtube_video_id: str = Field(description="YouTube video ID")
+    tournament_id: Optional[str] = Field(default=None, description="Packaging tournament ID")
+    deployed_candidate_id: Optional[str] = Field(default=None, description="System-deployed candidate ID")
+    deployed_title: Optional[str] = Field(default=None, description="Actual deployed title")
+    deployed_thumbnail_sha256: Optional[str] = Field(default=None, description="Actual deployed thumbnail SHA-256")
+    packaging_fingerprint: Optional[str] = Field(default=None, description="Deployment fingerprint")
+    attribution_status: str = Field(description="MATCHED_SELECTED_CANDIDATE, UNMATCHED_SYSTEM_DEPLOYMENT, or UNATTRIBUTED_LEGACY")
+    start_date: str = Field(description="Earliest observed report date")
+    end_date: str = Field(description="Latest observed report date")
+    observed_days: int = Field(default=0, ge=0, description="Total days with reach observations")
+    total_thumbnail_impressions: int = Field(default=0, ge=0, description="Total thumbnail impressions across all days")
+    weighted_thumbnail_impressions_ctr: Optional[float] = Field(default=None, description="Impression-weighted thumbnail CTR")
+    source_report_ids: List[str] = Field(default_factory=list, description="IDs of source reports contributing observations")
+
+
+class ReachSyncResult(BaseModel):
+    """Outcome of a YouTube Reporting API reach sync operation."""
+
+    status: ReachSyncStatus
+    job_id: Optional[str] = None
+    report_type_id: str = "channel_reach_basic_a1"
+    reports_found: int = 0
+    reports_processed: int = 0
+    observations_created: int = 0
+    observations_updated: int = 0
+    observations_persisted: int = 0
+    unknown_video_rows_count: int = 0
+    receipts: List[ReportingReportReceipt] = Field(default_factory=list)
+    last_create_time: Optional[datetime] = None
+    message: Optional[str] = None
+    error_message: Optional[str] = None
+
+    @property
+    def unknown_video_rows(self) -> int:
+        return self.unknown_video_rows_count
