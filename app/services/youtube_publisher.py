@@ -10,12 +10,13 @@ from uuid import uuid4
 from app.db.repository import SQLiteRepository
 from app.domain.enums import (
     AssetType,
+    PackagingAttributionStatus,
     PrivacyStatus,
     PublicationStatus,
     ReviewAction,
     VideoLifecycleState,
 )
-from app.domain.models import PublicationJob, VideoProject
+from app.domain.models import PublicationJob, VideoProject, compute_packaging_fingerprint
 from app.media.models import get_render_manifest_path
 from app.services.youtube_oauth import YouTubeOAuthManager
 from app.services.youtube_uploader import YouTubeUploader
@@ -252,19 +253,21 @@ class YouTubePublisherService:
 
         job_id = f"pub-{uuid4().hex[:8]}"
 
+        # Resolve thumbnail path: PREFER active ThumbnailPackage.file_path_16_9 first! (Section 24)
+        thumb_path = None
+        thumb_pkg = self.repo.get_thumbnail_package(project.id)
+        if thumb_pkg and thumb_pkg.file_path_16_9 and Path(thumb_pkg.file_path_16_9).is_file():
+            thumb_path = Path(thumb_pkg.file_path_16_9)
+        else:
+            for a in project.assets:
+                if a.asset_type == AssetType.THUMBNAIL and Path(a.file_path).is_file():
+                    thumb_path = Path(a.file_path)
+                    break
+
         if has_credentials:
             # Real live upload path via native HTTP multipart API
             try:
                 uploader = YouTubeUploader(oauth_manager=oauth_mgr)
-                thumb_path = None
-                for a in project.assets:
-                    if a.asset_type == AssetType.THUMBNAIL and Path(a.file_path).exists():
-                        thumb_path = Path(a.file_path)
-                        break
-                if not thumb_path:
-                    thumb_pkg = self.repo.get_thumbnail_package(project.id)
-                    if thumb_pkg and Path(thumb_pkg.file_path_16_9).exists():
-                        thumb_path = Path(thumb_pkg.file_path_16_9)
                 yt_video_id, watch_url = uploader.upload_video(
                     video_path=video_path,
                     metadata_payload=payload,
@@ -279,6 +282,48 @@ class YouTubePublisherService:
                     expected_current_state=VideoLifecycleState.UPLOADING,
                 )
                 raise YouTubePublishError(f"Live YouTube upload failed: {e}") from e
+
+            # Freeze deployed packaging metadata strictly upon successful REAL upload (Sections 20-26, 50)
+            deployed_title = payload["snippet"]["title"]
+            deployed_thumbnail_sha256 = None
+            if thumb_path and thumb_path.is_file():
+                deployed_thumbnail_sha256 = hashlib.sha256(thumb_path.read_bytes()).hexdigest()
+
+            tournament = self.repo.get_packaging_tournament(project.id)
+            selected_cand = None
+            if tournament and tournament.selected_candidate_id:
+                for c in tournament.candidates:
+                    if c.id == tournament.selected_candidate_id:
+                        selected_cand = c
+                        break
+
+            if selected_cand:
+                pkg_tournament_id = tournament.id
+                title_match = (deployed_title == selected_cand.title)
+                thumb_match = bool(
+                    deployed_thumbnail_sha256
+                    and selected_cand.content_sha256
+                    and deployed_thumbnail_sha256 == selected_cand.content_sha256
+                )
+                if title_match and thumb_match:
+                    pkg_candidate_id = selected_cand.id
+                    pkg_attr_status = PackagingAttributionStatus.MATCHED_SELECTED_CANDIDATE.value
+                else:
+                    pkg_candidate_id = None
+                    pkg_attr_status = PackagingAttributionStatus.UNMATCHED_SYSTEM_DEPLOYMENT.value
+            else:
+                pkg_tournament_id = None
+                pkg_candidate_id = None
+                pkg_attr_status = PackagingAttributionStatus.UNATTRIBUTED_LEGACY.value
+
+            pkg_fingerprint = compute_packaging_fingerprint(
+                project_id=project.id,
+                youtube_video_id=yt_video_id,
+                tournament_id=pkg_tournament_id,
+                candidate_id=pkg_candidate_id,
+                deployed_title=deployed_title,
+                deployed_thumbnail_sha256=deployed_thumbnail_sha256,
+            )
 
             # Final Lifecycle State Transition for REAL uploads
             if scheduled_time is not None:
@@ -298,6 +343,12 @@ class YouTubePublisherService:
             target_state = VideoLifecycleState.BLOCKED
             job_status = PublicationStatus.PENDING
             now_published = None
+            deployed_title = None
+            deployed_thumbnail_sha256 = None
+            pkg_tournament_id = None
+            pkg_candidate_id = None
+            pkg_fingerprint = None
+            pkg_attr_status = None
             transition_reason = f"Dry-run simulation validated. Live upload BLOCKED: Missing valid OAuth credentials (token.json). Simulated ID: {yt_video_id}"
 
         self.repo.update_project_state(
@@ -317,6 +368,12 @@ class YouTubePublisherService:
             youtube_video_id=yt_video_id,
             published_at=now_published,
             contains_synthetic_media=bool(payload["status"].get("containsSyntheticMedia", False)),
+            packaging_tournament_id=pkg_tournament_id,
+            packaging_candidate_id=pkg_candidate_id,
+            deployed_title=deployed_title,
+            deployed_thumbnail_sha256=deployed_thumbnail_sha256,
+            packaging_fingerprint=pkg_fingerprint,
+            packaging_attribution_status=pkg_attr_status,
             error_message=None if execution_mode == "REAL" else "Dry-run validation complete. Awaiting live OAuth credentials for upload.",
             created_at=datetime.now(timezone.utc),
         )
